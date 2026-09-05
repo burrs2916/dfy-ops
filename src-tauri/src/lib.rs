@@ -1,6 +1,9 @@
 mod api;
 mod ops;
 
+#[cfg(test)]
+mod contract_sync;
+
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
