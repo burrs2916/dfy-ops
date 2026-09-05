@@ -78,6 +78,7 @@ fn fix_hint_for(name: &str) -> &'static str {
         "GreptimeDB 二进制" => "从 https://github.com/GreptimeTeam/greptimedb/releases 下载 greptime 二进制，放入 install_dir/greptimedb/",
         "VerneMQ (MQTT)" => "从 https://vernemq.com/downloads 或 https://github.com/vernemq/vernemq/releases 安装 VerneMQ",
         "上游 DFY 后端" => "确认 dfy-backend 已启动并监听 127.0.0.1:48085",
+        "运行方式" => "托管部署：winget install -e --id nginx.nginx 并配置站点指向构建产物；dev 运行：从 https://nodejs.org 安装 Node.js",
         "WebView2 运行时" => "在目标 Windows 主机安装 Microsoft Edge WebView2 Runtime：https://developer.microsoft.com/microsoft-edge/webview2/",
         _ => "请在运维中心根据上方“实际”信息排查并安装对应依赖",
     }
@@ -142,23 +143,26 @@ fn detect_webview2() -> Option<String> {
     None
 }
 
-#[cfg(not(target_os = "windows"))]
-fn detect_webview2() -> Option<String> {
-    None
-}
-
 /// 检查某个被管服务的【运行时】环境。
 ///
 /// 范围限定：仅探测“能否跑起来”所需的运行时依赖，**不含任何构建工具链**
 /// （Maven / Cargo / Angular CLI / Tauri CLI / pnpm / npm / 构建用 Node 等）。
 /// 部署产物（jar / 前端 dist / Rust 二进制 / Tauri exe）均已预置可直接运行；
 /// 外部依赖一律按“原生程序”探测（端口可达 / 二进制存在 / 命令可用），不依赖容器。
-pub fn check_service_env(def: &ServiceDef) -> ServiceEnvReport {
+///
+/// `running`：服务当前是否实测在运行（进程级检测，与状态接口同一事实来源）。
+/// **服务在运行 ⇒ 环境事实上满足**——“能否跑起来”已被事实回答，此时跳过
+/// 拓扑假设类检查（nginx 托管 / WebView2 等“部署形态”预设），只保留事实型
+/// 外部依赖探测（MySQL / Redis / MQTT 等，运行中也可能挂，warn 是真实的）。
+/// 平台不替服务决定部署形态：前端既可以是 nginx 托管、也可以是 dev server，
+/// 任一可行路径存在即满足。
+pub fn check_service_env(def: &ServiceDef, running: bool) -> ServiceEnvReport {
     let mut items: Vec<CheckItem> = Vec::new();
 
     match def.kind {
         ServiceKind::Vertx => {
             // Java 后端：运行需 JRE，以及 MySQL / Redis 依赖。
+            // 三项均为事实型探测，运行中也照常检查（依赖可能中途挂掉）。
             let java = probe("java", &["-version"]);
             items.push(make_item(
                 "Java 运行时",
@@ -187,29 +191,36 @@ pub fn check_service_env(def: &ServiceDef) -> ServiceEnvReport {
                 false,
             ));
         }
-        ServiceKind::VueSpa => {
-            // Vue3 前端：dist 已由 nginx 托管，运行时只需 nginx 在 :80 提供服务。
-            let nginx = probe("nginx", &["-v"]);
-            items.push(make_item(
-                "nginx 托管",
-                "外部依赖",
-                "已安装并配置 :80",
-                nginx.as_deref().unwrap_or("未检测到"),
-                nginx.is_some(),
-                false,
-            ));
-        }
-        ServiceKind::AngularSpa => {
-            // Angular 前端：dist 已由 nginx 托管，运行时只需 nginx 在 :8081 提供服务。
-            let nginx = probe("nginx", &["-v"]);
-            items.push(make_item(
-                "nginx 托管",
-                "外部依赖",
-                "已安装并配置 :8081",
-                nginx.as_deref().unwrap_or("未检测到"),
-                nginx.is_some(),
-                false,
-            ));
+        ServiceKind::VueSpa | ServiceKind::AngularSpa => {
+            // 前端不预设部署形态：nginx 托管（部署机）与 Node dev server（开发机）
+            // 都是合法运行方式，任一可行路径存在即满足；服务在跑则事实已回答。
+            if running {
+                items.push(make_item(
+                    "运行环境",
+                    "运行时",
+                    "具备可运行条件",
+                    "服务实测运行中（进程级检测）",
+                    true,
+                    false,
+                ));
+            } else {
+                let nginx = probe("nginx", &["-v"]);
+                let node = probe("node", &["-v"]);
+                let ok = nginx.is_some() || node.is_some();
+                let actual = format!(
+                    "nginx: {}；Node.js: {}",
+                    nginx.as_deref().unwrap_or("未检测到"),
+                    node.as_deref().unwrap_or("未检测到")
+                );
+                items.push(make_item(
+                    "运行方式",
+                    "运行时",
+                    "nginx（托管部署）或 Node.js（dev 运行）任一可用",
+                    &actual,
+                    ok,
+                    false,
+                ));
+            }
         }
         ServiceKind::RustBin => {
             // Rust 边缘服务：预编译二进制已就绪，运行时需 GreptimeDB 二进制、VerneMQ、上游后端。
@@ -250,20 +261,46 @@ pub fn check_service_env(def: &ServiceDef) -> ServiceEnvReport {
             ));
         }
         ServiceKind::TauriApp => {
-            // Tauri 桌面客户端：exe 已预置，目标机运行时只需 WebView2。
-            let ver = detect_webview2();
-            let (actual, pass) = match ver.as_deref() {
-                Some(v) => (format!("已安装 WebView2 Runtime {v}"), true),
-                None => ("未检测到（Windows 主机需安装 Edge WebView2 Runtime）".into(), false),
-            };
-            items.push(make_item(
-                "WebView2 运行时",
-                "运行时",
-                "WebView2 Runtime",
-                &actual,
-                pass,
-                false,
-            ));
+            // Tauri 桌面客户端：exe 已预置。WebView2 是 Windows 专属依赖；
+            // macOS / Linux 使用系统内置 WebView，不存在该检查项。
+            if running {
+                items.push(make_item(
+                    "运行环境",
+                    "运行时",
+                    "具备可运行条件",
+                    "服务实测运行中（进程级检测）",
+                    true,
+                    false,
+                ));
+            } else {
+                #[cfg(target_os = "windows")]
+                {
+                    let ver = detect_webview2();
+                    let (actual, pass) = match ver.as_deref() {
+                        Some(v) => (format!("已安装 WebView2 Runtime {v}"), true),
+                        None => ("未检测到（需安装 Edge WebView2 Runtime）".into(), false),
+                    };
+                    items.push(make_item(
+                        "WebView2 运行时",
+                        "运行时",
+                        "WebView2 Runtime",
+                        &actual,
+                        pass,
+                        false,
+                    ));
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    items.push(make_item(
+                        "WebView 运行时",
+                        "运行时",
+                        "系统内置 WebView",
+                        "macOS / Linux 使用系统内置 WebView（WKWebView / webkit2gtk），无需额外安装",
+                        true,
+                        false,
+                    ));
+                }
+            }
         }
     }
 
@@ -293,9 +330,57 @@ mod tests {
     #[test]
     fn check_all_services_env_and_print() {
         for def in registry::services() {
-            let report = check_service_env(&def);
+            let report = check_service_env(&def, false);
             let json = serde_json::to_string_pretty(&report).expect("serialize report");
             println!("=== 环境检查报告: {} ({}) ===\n{}\n", def.id, def.name, json);
         }
+    }
+
+    /// 运行中的服务：环境事实上满足（能否跑起来已被事实回答），
+    /// 不得因“nginx 未装 / WebView2 未检测到”这类拓扑假设产生 warn。
+    #[test]
+    fn running_service_env_is_pass() {
+        for id in ["dfy-ui", "gateway-console", "biosphere-spatial", "dfy-backend"] {
+            let def = registry::services().into_iter().find(|d| d.id == id).unwrap();
+            let report = check_service_env(&def, true);
+            assert_eq!(
+                report.overall,
+                CheckStatus::Pass,
+                "运行中的 {id} 环境检查不应告警: {:?}",
+                report.items
+            );
+        }
+    }
+
+    /// 未运行的前端：不预设部署形态 —— nginx 或 Node.js 任一可用即 pass。
+    /// 在本机（装了 Node、没装 nginx）上应判定通过。
+    #[test]
+    fn stopped_frontend_env_accepts_node_or_nginx() {
+        let def = registry::services()
+            .into_iter()
+            .find(|d| d.id == "gateway-console")
+            .unwrap();
+        let report = check_service_env(&def, false);
+        let has_runtime = report
+            .items
+            .iter()
+            .any(|i| i.name == "运行方式" && i.status == CheckStatus::Pass);
+        assert!(
+            has_runtime || report.items.iter().all(|i| i.status == CheckStatus::Pass),
+            "未运行前端的环境检查应给出运行方式判定: {:?}",
+            report.items
+        );
+    }
+
+    /// macOS：Tauri 客户端使用系统内置 WKWebView，未运行也不应产生 WebView2 假警告。
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tauri_env_passes_on_macos_without_running() {
+        let def = registry::services()
+            .into_iter()
+            .find(|d| d.id == "biosphere-spatial")
+            .unwrap();
+        let report = check_service_env(&def, false);
+        assert_eq!(report.overall, CheckStatus::Pass);
     }
 }

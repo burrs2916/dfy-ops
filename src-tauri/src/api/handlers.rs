@@ -345,12 +345,13 @@ pub async fn diagnosis(State(state): State<Arc<AppState>>) -> Json<serde_json::V
             let s = to_status(d, running);
             status.insert(d.id.clone(), (running, s.healthy));
         }
-        // 环境检查：探测各服务的工具链 + 外部依赖，并纳入诊断。
-        let env_reports: Vec<environment::ServiceEnvReport> = state
-            .registry
-            .iter()
-            .map(environment::check_service_env)
-            .collect();
+        // 环境检查：探测各服务的运行时依赖 + 外部依赖，并纳入诊断。
+        // 运行状态与 to_status 同源（进程级检测）：服务在跑 ⇒ 环境事实上满足。
+        let mut env_reports: Vec<environment::ServiceEnvReport> = Vec::new();
+        for d in &state.registry {
+            let s = to_status(d, state.procs.is_running(&d.id));
+            env_reports.push(environment::check_service_env(d, s.running));
+        }
         let findings = diagnosis::diagnose(&state.registry, &status, &env_reports);
         (status, env_reports, findings)
     })
@@ -385,14 +386,18 @@ pub async fn diagnosis(State(state): State<Arc<AppState>>) -> Json<serde_json::V
     }))
 }
 
-/// 检查单个服务的运行环境（工具链 + 外部依赖）。
+/// 检查单个服务的运行环境（运行时依赖 + 外部依赖）。
 pub async fn env_check(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<environment::ServiceEnvReport>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?.clone();
     Ok(Json(
-        blocking(move || environment::check_service_env(&def)).await,
+        blocking(move || {
+            let running = to_status(&def, state.procs.is_running(&id)).running;
+            environment::check_service_env(&def, running)
+        })
+        .await,
     ))
 }
 
@@ -405,7 +410,10 @@ pub async fn env_check_all(
             state
                 .registry
                 .iter()
-                .map(environment::check_service_env)
+                .map(|d| {
+                    let running = to_status(d, state.procs.is_running(&d.id)).running;
+                    environment::check_service_env(d, running)
+                })
                 .collect::<Vec<_>>()
         })
         .await,

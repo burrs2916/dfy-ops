@@ -244,8 +244,10 @@ pub fn listening_ports(pids: &[u32]) -> Vec<u16> {
             .map(|p| p.to_string())
             .collect::<Vec<_>>()
             .join(",");
+        // +c0：不截断 COMMAND 列，供解析层做工具噪音过滤
+        // （pid 级过滤依赖 ps，ps 不可用的环境下这里是最后一道防线）。
         Command::new("lsof")
-            .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &pid_list])
+            .args(["-nP", "+c0", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &pid_list])
             .stderr(Stdio::null())
             .output()
             .map(|o| parse_lsof_ports(&String::from_utf8_lossy(&o.stdout)))
@@ -257,10 +259,19 @@ pub fn listening_ports(pids: &[u32]) -> Vec<u16> {
 /// `[::1]:4200`）中的端口，去重升序。纯函数便于测试。
 ///
 /// 行尾可能带 `(LISTEN)` 后缀，因此从右往左找第一个「冒号后是数字」的 token。
+/// COMMAND 列（首列）命中工具噪音（shell / Electron 容器 / IDE·agent 宿主）的行
+/// 整行丢弃——pid 级过滤（`filter_tool_noise`）依赖 `ps`，ps 不可用时由这里兜底，
+/// 避免 WorkBuddy/Trae 这类命令行嵌项目路径的宿主进程把自家端口反查给服务。
 fn parse_lsof_ports(text: &str) -> Vec<u16> {
     let mut ports: Vec<u16> = text
         .lines()
         .skip(1) // 跳过表头 COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+        .filter(|l| {
+            l.split_whitespace()
+                .next()
+                .map(|cmd| !is_tool_noise(cmd))
+                .unwrap_or(false)
+        })
         .filter_map(|l| {
             l.split_whitespace()
                 .rev()
@@ -373,5 +384,16 @@ mod tests {
             expected
         );
         assert_eq!(parse_lsof_ports(""), expected);
+    }
+
+    /// 工具噪音进程（Electron 宿主 / shell，命令行嵌项目路径被 pgrep 误命中）
+    /// 的 LISTEN 行必须在解析层被整行丢弃——ps 不可用时这是唯一防线。
+    #[test]
+    fn parse_lsof_ports_drops_tool_noise_rows() {
+        let sample = "COMMAND   PID  USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME\n\
+                      Electron 75875 lc   22u  IPv4 0xb02      0t0  TCP 127.0.0.1:50052 (LISTEN)\n\
+                      zsh      26878 lc   23u  IPv4 0xb03      0t0  TCP 127.0.0.1:52792 (LISTEN)\n\
+                      node     28040 lc   24u  IPv6 0xb04      0t0  TCP *:80 (LISTEN)\n";
+        assert_eq!(parse_lsof_ports(sample), vec![80]);
     }
 }
