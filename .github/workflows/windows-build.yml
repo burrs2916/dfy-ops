@@ -12,8 +12,51 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    name: Rust test & clippy
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "src-tauri -> target"
+
+      # 环境检查单测会用 node 探测「运行方式」；tauri 的 generate_context!
+      # 编译期需要 dist 存在 —— 先装依赖并产出 dist 再跑测试。
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend (dist)
+        run: pnpm build
+
+      - name: Clippy
+        # Windows 专属代码路径此前从未被 clippy 检查过，先观察输出不阻断，
+        # 待 Windows 路径告警清零后再收紧为 -D warnings。
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
   build-windows:
     name: Build Windows installer
+    needs: test
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -41,7 +84,7 @@ jobs:
           workspaces: "src-tauri -> target"
 
       - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile=false
+        run: pnpm install --frozen-lockfile
 
       - name: Build frontend (dist)
         run: pnpm build

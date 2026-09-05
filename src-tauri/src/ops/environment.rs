@@ -338,9 +338,11 @@ mod tests {
 
     /// 运行中的服务：环境事实上满足（能否跑起来已被事实回答），
     /// 不得因“nginx 未装 / WebView2 未检测到”这类拓扑假设产生 warn。
+    /// 注意不含 dfy-backend——其 Java/MySQL/Redis 是事实型检查，
+    /// 在没装这些依赖的机器上 fail 是正确行为（如 CI 环境）。
     #[test]
     fn running_service_env_is_pass() {
-        for id in ["dfy-ui", "gateway-console", "biosphere-spatial", "dfy-backend"] {
+        for id in ["dfy-ui", "gateway-console", "biosphere-spatial"] {
             let def = registry::services().into_iter().find(|d| d.id == id).unwrap();
             let report = check_service_env(&def, true);
             assert_eq!(

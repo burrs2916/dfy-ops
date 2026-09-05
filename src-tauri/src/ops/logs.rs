@@ -19,7 +19,12 @@ pub fn tail(path: &str, lines: usize) -> String {
     }
 
     const CHUNK: u64 = 8 * 1024;
-    let mut buf: Vec<u8> = Vec::new();
+    // 各块按文件顺序收集（push_front），最后一次性拼接——
+    // 不再做「前插合并」，那是每块 O(已累计字节数) 的 O(n²) 操作。
+    let mut chunks: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
+    // 换行数增量累加——此前每轮回读都从头扫整段 buf 数换行（O(n²)），
+    // 现在每块只扫自己新增的 CHUNK 字节。
+    let mut newlines = 0usize;
     let mut pos = len;
     let mut reached_start = false;
 
@@ -33,17 +38,16 @@ pub fn tail(path: &str, lines: usize) -> String {
         if f.read_exact(&mut tmp).is_err() {
             break;
         }
-        // 前插：保持 buf 为从 start 到原末尾的连续字节
-        let mut merged = tmp;
-        merged.extend_from_slice(&buf);
-        buf = merged;
+        newlines += tmp.iter().filter(|&&b| b == b'\n').count();
+        chunks.push_front(tmp);
         pos = start;
         reached_start = pos == 0;
         // 凑够 lines+1 个换行即可停止（最后一行可能无换行符）
-        if buf.iter().filter(|&&b| b == b'\n').count() > lines {
+        if newlines > lines {
             break;
         }
     }
+    let buf: Vec<u8> = chunks.into_iter().flatten().collect();
 
     let text = String::from_utf8_lossy(&buf);
     let mut all: Vec<&str> = text.lines().collect();
