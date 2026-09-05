@@ -102,12 +102,12 @@ fn builtin() -> Vec<ServiceDef> {
             build_cmd: Some("cargo build --release".into()),
             run_cmd:
                 "C:/services/edge-conductor/target/release/edgecd-daemon --config C:/services/edge-conductor/config.toml".into(),
-            ports: vec![8084, 8085, 18830],
+            ports: vec![8084, 8085],
             health_url: None,
             log_paths: vec!["C:/services/edge-conductor/logs".into()],
             depends_on: vec!["dfy-backend".into()],
             is_daemon: true,
-            description: "边缘计算后端，端口 8084/8085/MQTT 18830，upstream 指向 DFY 后端 48085。".into(),
+            description: "边缘计算后端，自身监听 8084/8085；外部依赖 MQTT 18830（VerneMQ broker，非本服务端口），upstream 指向 DFY 后端 48085。".into(),
         },
         ServiceDef {
             id: "biosphere-spatial".into(),
@@ -142,4 +142,25 @@ pub fn services() -> Vec<ServiceDef> {
         }
     }
     builtin()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：18830 是外部 VerneMQ broker 的端口，不是 edge-conductor 自身监听的端口，
+    /// 绝不能出现在 edge-conductor.ports 里（否则会被误判为「本服务端口」并错误参与就绪探测）。
+    #[test]
+    fn edge_conductor_ports_exclude_external_mqtt() {
+        let def = builtin()
+            .into_iter()
+            .find(|d| d.id == "edge-conductor")
+            .expect("edge-conductor 必须存在");
+        assert!(
+            !def.ports.contains(&18830),
+            "edge-conductor.ports 不应含外部 MQTT 18830，当前：{:?}",
+            def.ports
+        );
+        assert_eq!(def.ports, vec![8084, 8085]);
+    }
 }
