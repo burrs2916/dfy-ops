@@ -53,9 +53,16 @@ pub fn run() {
                 .path()
                 .config_dir()
                 .unwrap_or_else(|_| PathBuf::from("."));
+            // services.toml 必须放应用专属配置目录（app_config_dir = config_dir + identifier，
+            // macOS: ~/Library/Application Support/com.dfy.ops/）。
+            // 此前误用系统级 config_dir()（不带 identifier），覆盖文件放对内容却读不到。
+            let app_config_dir = app
+                .path()
+                .app_config_dir()
+                .unwrap_or_else(|_| config_dir.clone());
             let state = Arc::new(AppState {
-                // 本机覆盖优先：config_dir/services.toml > DFY_OPS_SERVICES > 内置 Windows 部署默认
-                registry: registry::services_with_override(&config_dir),
+                // 本机覆盖优先：app_config_dir/services.toml > DFY_OPS_SERVICES > 内置 Windows 部署默认
+                registry: registry::services_with_override(&app_config_dir),
                 procs: ProcManager::new(),
                 ai_models: Arc::new(Mutex::new(AiModelConfig::load(&config_dir))),
                 app_settings: Arc::new(Mutex::new(AppSettings::load(&config_dir))),

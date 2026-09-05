@@ -154,9 +154,12 @@ pub fn services() -> Vec<ServiceDef> {
     builtin()
 }
 
-/// 读取服务注册表（带本机覆盖）：优先 `config_dir/services.toml`（dev 机 / 部署机差异的
-/// 标准覆盖方式，存在即生效），其次沿用 `DFY_OPS_SERVICES` 环境变量，最后回退内置
-/// Windows 部署默认定义。解析失败不 panic，逐级回退。
+/// 读取服务注册表（带本机覆盖）：优先 `app_config_dir/services.toml`（应用专属配置目录，
+/// macOS: ~/Library/Application Support/com.dfy.ops/），其次沿用 `DFY_OPS_SERVICES`
+/// 环境变量，最后回退内置 Windows 部署默认定义。解析失败不 panic，逐级回退。
+///
+/// 注意必须传 app_config_dir（带 identifier）而非系统级 config_dir——后者不带应用名，
+/// 文件放进去读不到（2026-09-05 实测踩坑：覆盖文件就绪却仍按内置 8081 探测）。
 pub fn services_with_override(config_dir: &Path) -> Vec<ServiceDef> {
     let local = config_dir.join("services.toml");
     if let Ok(text) = std::fs::read_to_string(&local) {
