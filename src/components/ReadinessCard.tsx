@@ -56,7 +56,14 @@ export default function ReadinessCard({
 
   return (
     <Card variant="outlined" sx={{ p: 2.5 }}>
-      <Stack direction="row" spacing={3} alignItems="center" flexWrap="wrap" useFlexGap>
+      {/* 第一行：左侧标题+构成拆解，右上角统计 Chip */}
+      <Stack
+        direction="row"
+        justifyContent="space-between"
+        alignItems="flex-start"
+        flexWrap="wrap"
+        useFlexGap
+      >
         <Box sx={{ minWidth: 150 }}>
           <Typography variant="h6" sx={{ fontWeight: 700 }}>
             部署就绪度
@@ -71,40 +78,6 @@ export default function ReadinessCard({
             )}
           </Typography>
         </Box>
-        <Box sx={{ flex: 1, minWidth: 200 }}>
-          <Typography variant="h4" sx={{ fontWeight: 800, color: `${tone}.main`, lineHeight: 1 }}>
-            {pct}%
-          </Typography>
-          <Box
-            sx={{
-              display: "flex",
-              height: 8,
-              borderRadius: 4,
-              overflow: "hidden",
-              bgcolor: "action.hover",
-              mt: 0.75,
-            }}
-          >
-            {own.length > 0 && (
-              <Box
-                sx={{
-                  width: seg(ownReady),
-                  bgcolor: `${tone}.main`,
-                  transition: "width 0.3s",
-                }}
-              />
-            )}
-            {third.length > 0 && (
-              <Box
-                sx={{
-                  width: seg(thirdReady),
-                  bgcolor: `${tone}.light`,
-                  transition: "width 0.3s",
-                }}
-              />
-            )}
-          </Box>
-        </Box>
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
           <Chip size="small" color="success" variant="outlined" label={`运行健康 ${runningHealthy}/${total}`} />
           <Chip size="small" color="info" variant="outlined" label={`环境满足 ${envPass}/${total}`} />
@@ -112,6 +85,45 @@ export default function ReadinessCard({
             <Chip size="small" variant="outlined" label={`桌面客户端 ${desktopCount} · 不参与就绪度`} />
           )}
         </Stack>
+      </Stack>
+
+      {/* 第二行：进度条拉满整行，百分数在右端 */}
+      <Stack direction="row" spacing={2} alignItems="center" sx={{ mt: 1.5 }}>
+        <Box
+          sx={{
+            flex: 1,
+            display: "flex",
+            height: 10,
+            borderRadius: 5,
+            overflow: "hidden",
+            bgcolor: "action.hover",
+          }}
+        >
+          {own.length > 0 && (
+            <Box
+              sx={{
+                width: seg(ownReady),
+                bgcolor: `${tone}.main`,
+                transition: "width 0.3s",
+              }}
+            />
+          )}
+          {third.length > 0 && (
+            <Box
+              sx={{
+                width: seg(thirdReady),
+                bgcolor: `${tone}.light`,
+                transition: "width 0.3s",
+              }}
+            />
+          )}
+        </Box>
+        <Typography
+          variant="h4"
+          sx={{ fontWeight: 800, color: `${tone}.main`, lineHeight: 1, minWidth: 96, textAlign: "right" }}
+        >
+          {pct}%
+        </Typography>
       </Stack>
       {notReady.length > 0 && (
         <Box sx={{ mt: 2 }}>
