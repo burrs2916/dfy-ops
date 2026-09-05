@@ -42,7 +42,8 @@ export interface ActionResult {
 
 export interface Finding {
   service: string;
-  severity: "info" | "warning" | "critical";
+  /** 与 Rust `Severity` 枚举对齐（仅 Warning/Critical；Rust 端不产 Info） */
+  severity: "warning" | "critical";
   message: string;
   fixHint?: string | null;
 }

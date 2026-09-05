@@ -78,7 +78,7 @@ fn builtin() -> Vec<ServiceDef> {
             log_paths: vec!["C:/services/nginx/logs/access.log".into()],
             depends_on: vec!["dfy-backend".into()],
             is_daemon: true,
-            description: "Vue3 管理后台，由 nginx 托管于 80 端口，反代 /api 到后端 8080。".into(),
+            description: "Vue3 管理后台，由 nginx 托管于 80 端口，反代 /api 到后端 48085。".into(),
         },
         ServiceDef {
             id: "gateway-console".into(),
