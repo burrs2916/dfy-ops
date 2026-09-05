@@ -16,10 +16,23 @@ import type {
 // 运维后端（内嵌 Axum）监听本地 18721。
 const BASE = "http://127.0.0.1:18721";
 
+/**
+ * 客户端标识头：后端 api/server.rs 的 require_client_header 中间件会校验它。
+ *
+ * 这是本机运维 API 的防跨站驱动措施——若不加，用户浏览的任意第三方页面都能
+ * fetch 到 127.0.0.1:18721 去启停服务、触发构建。带上这个非安全头会强制浏览器
+ * 发 OPTIONS 预检，预检由后端的来源白名单裁决，非法来源在预检阶段就被拦掉。
+ *
+ * 代价：每个 GET 也多一次预检往返（原先刻意省掉的）。本机回环下开销可忽略，
+ * 换来的是运维接口不被任意网页驱动，这笔交换是值得的。
+ */
+const CLIENT_HEADER: Record<string, string> = {
+  "X-Dfy-Ops-Client": "dfy-ops-web",
+};
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  // 仅当有请求体时才设置 Content-Type：GET 带该头会触发 CORS 预检（非安全头），
-  // 造成每个请求都多一次 OPTIONS 往返（后端虽已支持预检，能省则省）。
-  const headers: Record<string, string> = {};
+  // 仅当有请求体时才设置 Content-Type：GET 带该头没必要，多一个非安全头徒增预检负担。
+  const headers: Record<string, string> = { ...CLIENT_HEADER };
   if (init?.body) {
     headers["Content-Type"] = "application/json";
   }

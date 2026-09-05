@@ -18,6 +18,27 @@ use crate::ops::registry::{ServiceDef, ServiceKind};
 
 const PROBE_TIMEOUT_MS: u64 = 800;
 
+/// 把同步阻塞段移交 tokio 的 blocking 线程池执行。
+///
+/// 必须这么做的原因：Axum handler 跑在 tokio worker 线程上，worker 数默认 = CPU 核数。
+/// 而本模块的 handler 内部包含大量同步阻塞操作——
+///   · 端口探测（check_tcp，每端口最长 800ms，前端 5s 轮询持续触发）
+///   · 环境探测（Command::output 拉起 java/nginx 子进程）
+///   · 依赖编排的就绪等待（wait_ready 内 thread::sleep，单服务最长 30s）
+///   · 日志文件 / 配置文件的同步读写
+/// 若在 handler 里直接同步执行，一次「全部启动」就能把 worker 池占满（30s × N 个服务），
+/// 期间 /api/health 与前端状态轮询全部排队，用户看到的现象就是界面卡死。
+/// blocking 池默认上限 512 线程，与 worker 池隔离，因此不会互相拖累。
+async fn blocking<T, F>(f: F) -> T
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .expect("blocking task 执行失败（内部 panic）")
+}
+
 /// 服务的实时状态（运行 + 健康）。
 #[derive(Debug, Clone, Serialize)]
 pub struct ServiceStatus {
@@ -91,11 +112,14 @@ pub async fn server_health(State(state): State<Arc<AppState>>) -> Json<serde_jso
 }
 
 pub async fn list_services(State(state): State<Arc<AppState>>) -> Json<Vec<ServiceStatus>> {
-    let out = state
-        .registry
-        .iter()
-        .map(|d| to_status(d, state.procs.is_running(&d.id)))
-        .collect();
+    let out = blocking(move || {
+        state
+            .registry
+            .iter()
+            .map(|d| to_status(d, state.procs.is_running(&d.id)))
+            .collect::<Vec<_>>()
+    })
+    .await;
     Json(out)
 }
 
@@ -103,8 +127,9 @@ pub async fn get_service(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<ServiceStatus>, StatusCode> {
-    let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(to_status(def, state.procs.is_running(&id))))
+    let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?.clone();
+    let running = blocking(move || state.procs.is_running(&id)).await;
+    Ok(Json(to_status(&def, running)))
 }
 
 pub async fn start_service(
@@ -114,10 +139,12 @@ pub async fn start_service(
     if find_def(&state, &id).is_none() {
         return Json(serde_json::json!({"ok": false, "error": "service not found"}));
     }
-    let results = orchestrator::start_with_deps(&state.procs, &state.registry, &id);
+    let id_for_result = id.clone();
+    let results =
+        blocking(move || orchestrator::start_with_deps(&state.procs, &state.registry, &id)).await;
     Json(serde_json::json!({
         "ok": results.iter().all(|r| r.ok),
-        "id": id,
+        "id": id_for_result,
         "details": results,
     }))
 }
@@ -129,7 +156,8 @@ pub async fn stop_service(
     if find_def(&state, &id).is_none() {
         return Json(serde_json::json!({"ok": false, "error": "service not found"}));
     }
-    let r = state.procs.stop(&id);
+    let id_for_result = id.clone();
+    let r = blocking(move || state.procs.stop(&id_for_result)).await;
     Json(serde_json::json!({
         "ok": r.is_ok(),
         "id": id,
@@ -144,41 +172,52 @@ pub async fn restart_service(
     if find_def(&state, &id).is_none() {
         return Json(serde_json::json!({"ok": false, "error": "service not found"}));
     }
-    let _ = state.procs.stop(&id);
-    let results = orchestrator::start_with_deps(&state.procs, &state.registry, &id);
+    let id_for_result = id.clone();
+    // stop + start 合并在同一个 blocking 任务里：stop 在 Windows 上要走 taskkill，
+    // start 内含最长 30s 的就绪等待，两者都是同步阻塞，一起挪出 worker 池。
+    let results = blocking(move || {
+        let _ = state.procs.stop(&id);
+        orchestrator::start_with_deps(&state.procs, &state.registry, &id)
+    })
+    .await;
     Json(serde_json::json!({
         "ok": results.iter().all(|r| r.ok),
-        "id": id,
+        "id": id_for_result,
         "details": results,
     }))
 }
 
 /// 按依赖拓扑顺序启动全部常驻服务。
-pub async fn start_all(State(state): State<Arc<AppState>>) -> Json<Vec<orchestrator::ActionResult>> {
-    Json(orchestrator::start_all(&state.procs, &state.registry))
+pub async fn start_all(
+    State(state): State<Arc<AppState>>,
+) -> Json<Vec<orchestrator::ActionResult>> {
+    Json(blocking(move || orchestrator::start_all(&state.procs, &state.registry)).await)
 }
 
 /// 按逆依赖顺序停止全部服务。
 pub async fn stop_all(State(state): State<Arc<AppState>>) -> Json<Vec<orchestrator::ActionResult>> {
-    Json(orchestrator::stop_all(&state.procs, &state.registry))
+    Json(blocking(move || orchestrator::stop_all(&state.procs, &state.registry)).await)
 }
 
 pub async fn build_service(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
-    match &def.build_cmd {
-        Some(cmd) => {
-            let mut p = PathBuf::from(&def.install_dir);
-            p.push("build.log");
-            match state.procs.build(&def.install_dir, cmd, &p.to_string_lossy()) {
-                Ok(_) => Ok(Json(serde_json::json!({"ok": true, "id": id}))),
-                Err(e) => Ok(Json(serde_json::json!({"ok": false, "error": e.to_string()}))),
-            }
-        }
-        None => Ok(Json(serde_json::json!({"ok": false, "error": "该服务未配置 buildCmd"}))),
-    }
+    let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?.clone();
+    let Some(cmd) = def.build_cmd.clone() else {
+        return Ok(Json(
+            serde_json::json!({"ok": false, "error": "该服务未配置 buildCmd"}),
+        ));
+    };
+    let log_path = PathBuf::from(&def.install_dir)
+        .join("build.log")
+        .to_string_lossy()
+        .to_string();
+    let result = blocking(move || state.procs.build(&def.install_dir, &cmd, &log_path)).await;
+    Ok(Json(match result {
+        Ok(_) => serde_json::json!({"ok": true, "id": id}),
+        Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+    }))
 }
 
 /// 读取指定服务的构建日志（前端轮询以展示构建进度）。
@@ -187,13 +226,15 @@ pub async fn build_log(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
-    let mut p = PathBuf::from(&def.install_dir);
-    p.push("build.log");
-    let text = if p.exists() {
-        std::fs::read_to_string(&p).unwrap_or_default()
-    } else {
-        String::new()
-    };
+    let path = PathBuf::from(&def.install_dir).join("build.log");
+    let text = blocking(move || {
+        if path.exists() {
+            std::fs::read_to_string(&path).unwrap_or_default()
+        } else {
+            String::new()
+        }
+    })
+    .await;
     Ok(Json(serde_json::json!({"id": id, "logs": text})))
 }
 
@@ -202,28 +243,38 @@ pub async fn service_logs(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
-    let text = logs::tail_many(&def.log_paths, 200);
+    let log_paths = def.log_paths.clone();
+    let text = blocking(move || logs::tail_many(&log_paths, 200)).await;
     Ok(Json(serde_json::json!({"id": id, "logs": text})))
 }
 
-pub async fn diagnosis(
-    State(state): State<Arc<AppState>>,
-) -> Json<serde_json::Value> {
-    let mut status: HashMap<String, (bool, bool)> = HashMap::new();
-    for d in &state.registry {
-        let running = state.procs.is_running(&d.id);
-        let s = to_status(d, running);
-        status.insert(d.id.clone(), (running, s.healthy));
-    }
-    // 环境检查：探测各服务的工具链 + 外部依赖，并纳入诊断。
-    let env_reports: Vec<environment::ServiceEnvReport> =
-        state.registry.iter().map(environment::check_service_env).collect();
-    let findings = diagnosis::diagnose(&state.registry, &status, &env_reports);
+pub async fn diagnosis(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    // 阶段一（阻塞）：端口探测 + 子进程环境探测 + 规则诊断，整体挪到 blocking 池，
+    // 避免探测耗时把 worker 线程占住（这是诊断接口里最重的一段）。
+    let llm_state = state.clone();
+    let (status, env_reports, findings) = blocking(move || {
+        let mut status: HashMap<String, (bool, bool)> = HashMap::new();
+        for d in &state.registry {
+            let running = state.procs.is_running(&d.id);
+            let s = to_status(d, running);
+            status.insert(d.id.clone(), (running, s.healthy));
+        }
+        // 环境检查：探测各服务的工具链 + 外部依赖，并纳入诊断。
+        let env_reports: Vec<environment::ServiceEnvReport> = state
+            .registry
+            .iter()
+            .map(environment::check_service_env)
+            .collect();
+        let findings = diagnosis::diagnose(&state.registry, &status, &env_reports);
+        (status, env_reports, findings)
+    })
+    .await;
 
-    // LLM 增强层：按「模型 → 接入点 → 供应商」动态解析调用参数，未配置时退化为规则结果。
+    // 阶段二（异步）：LLM 增强层 —— 按「模型 → 接入点 → 供应商」动态解析调用参数，
+    // 未配置时退化为规则结果。网络请求本身是异步的，不占用 worker。
     let mut llm_summary: Option<String> = None;
     let mut llm_note: Option<String> = None;
-    let target = state.ai_models.lock().unwrap().active();
+    let target = llm_state.ai_models.lock().unwrap().active();
     if let Some(t) = target {
         let prompt = format!(
             "你是本地运维助手。以下是 Windows 主机上 DFY 系列服务的诊断数据，请用简体中文给出根因分析与处置建议：\n服务状态：{}\n环境检查：{}\n发现项：{}",
@@ -253,15 +304,26 @@ pub async fn env_check(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<environment::ServiceEnvReport>, StatusCode> {
-    let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
-    Ok(Json(environment::check_service_env(def)))
+    let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?.clone();
+    Ok(Json(
+        blocking(move || environment::check_service_env(&def)).await,
+    ))
 }
 
 /// 检查全部服务的运行环境。
 pub async fn env_check_all(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<environment::ServiceEnvReport>> {
-    Json(state.registry.iter().map(environment::check_service_env).collect())
+    Json(
+        blocking(move || {
+            state
+                .registry
+                .iter()
+                .map(environment::check_service_env)
+                .collect::<Vec<_>>()
+        })
+        .await,
+    )
 }
 
 // ===== 应用设置（「设置」页，与 AI 助手配置分离） =====
@@ -290,8 +352,14 @@ pub async fn save_app_settings(
     s.status_refresh_secs = body.status_refresh_secs;
     s.env_refresh_secs = body.env_refresh_secs;
     s.sanitize();
-    match s.save(&state.config_dir) {
-        Ok(_) => {
+    let config_dir = state.config_dir.clone();
+    let result = blocking(move || match s.save(&config_dir) {
+        Ok(_) => Ok(s),
+        Err(e) => Err(e),
+    })
+    .await;
+    match result {
+        Ok(s) => {
             *state.app_settings.lock().unwrap() = s.clone();
             Json(serde_json::json!({
                 "ok": true,
@@ -302,4 +370,3 @@ pub async fn save_app_settings(
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
 }
-

@@ -15,10 +15,21 @@ pub async fn get_ai_config(State(state): State<Arc<AppState>>) -> Json<AiModelCo
 }
 
 /// 通用响应：保存成功后返回最新配置（前端无需再拉一次）。
-fn saved_config(state: &AppState, cfg: AiModelConfig) -> Json<serde_json::Value> {
-    match cfg.save(&state.config_dir) {
-        Ok(_) => {
-            *state.ai_models.lock().unwrap() = cfg.clone();
+///
+/// 配置写盘是同步文件 IO，走 blocking 池执行，避免占用 async worker 线程
+/// （与 handlers::blocking 同一策略）。
+async fn saved_config(state: &AppState, cfg: AiModelConfig) -> Json<serde_json::Value> {
+    let config_dir = state.config_dir.clone();
+    let ai_models = state.ai_models.clone();
+    let result = tokio::task::spawn_blocking(move || match cfg.save(&config_dir) {
+        Ok(_) => Ok(cfg),
+        Err(e) => Err(e),
+    })
+    .await
+    .expect("blocking task 执行失败（内部 panic）");
+    match result {
+        Ok(cfg) => {
+            *ai_models.lock().unwrap() = cfg.clone();
             Json(serde_json::json!({ "ok": true, "config": cfg }))
         }
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
@@ -39,7 +50,7 @@ pub async fn save_provider(
     }
     let mut cfg = state.ai_models.lock().unwrap().clone();
     cfg.upsert_provider(p);
-    saved_config(&state, cfg)
+    saved_config(&state, cfg).await
 }
 
 /// 删除供应商（级联删除其接入点与模型）。
@@ -49,7 +60,7 @@ pub async fn delete_provider(
 ) -> Json<serde_json::Value> {
     let mut cfg = state.ai_models.lock().unwrap().clone();
     cfg.delete_provider(&id);
-    saved_config(&state, cfg)
+    saved_config(&state, cfg).await
 }
 
 /// 新增/更新接入点（带 id 为更新）。
@@ -77,7 +88,7 @@ pub async fn save_endpoint(
     }
     let mut cfg = state.ai_models.lock().unwrap().clone();
     cfg.upsert_endpoint(e);
-    saved_config(&state, cfg)
+    saved_config(&state, cfg).await
 }
 
 /// 删除接入点（级联删除其下模型）。
@@ -87,7 +98,7 @@ pub async fn delete_endpoint(
 ) -> Json<serde_json::Value> {
     let mut cfg = state.ai_models.lock().unwrap().clone();
     cfg.delete_endpoint(&id);
-    saved_config(&state, cfg)
+    saved_config(&state, cfg).await
 }
 
 /// 新增/更新模型（带 id 为更新）。
@@ -105,7 +116,7 @@ pub async fn save_model(
     }
     let mut cfg = state.ai_models.lock().unwrap().clone();
     cfg.upsert_model(m);
-    saved_config(&state, cfg)
+    saved_config(&state, cfg).await
 }
 
 /// 删除模型。
@@ -115,7 +126,7 @@ pub async fn delete_model(
 ) -> Json<serde_json::Value> {
     let mut cfg = state.ai_models.lock().unwrap().clone();
     cfg.delete_model(&id);
-    saved_config(&state, cfg)
+    saved_config(&state, cfg).await
 }
 
 /// 设为诊断用模型。
@@ -129,7 +140,7 @@ pub async fn set_active_model(
         return Json(serde_json::json!({ "ok": false, "error": "模型不存在" }));
     }
     cfg.active_model_id = Some(model_id);
-    saved_config(&state, cfg)
+    saved_config(&state, cfg).await
 }
 
 /// 接入点连通性测试（GET /models）。
@@ -168,4 +179,3 @@ pub async fn test_model(
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
 }
-

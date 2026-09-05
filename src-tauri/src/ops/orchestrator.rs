@@ -112,10 +112,23 @@ fn act_all(
 }
 
 /// 按依赖顺序启动全部常驻服务；每启动一个，等待其端口就绪后再启动依赖方。
+///
+/// 只启动常驻服务（`is_daemon = true`）：桌面客户端这类非常驻程序（`is_daemon = false`）
+/// 不参与批量启动，否则「全部启动」会在运维机上直接弹出一个 GUI 窗口。
+///
+/// 过滤放在拓扑排序**之后**——先对全量 defs 排序得出完整顺序，再按 id 过滤。
+/// 若改成「先过滤再排序」，某个常驻服务依赖了一个非常驻服务时，被依赖方不在输入集合里，
+/// 其入度永远无法归零，会被 `start_order` 误判成「依赖存在环」而整体报错。
 pub fn start_all(procs: &ProcManager, defs: &[ServiceDef]) -> Vec<ActionResult> {
+    let daemon_ids: HashSet<&str> = defs
+        .iter()
+        .filter(|d| d.is_daemon)
+        .map(|d| d.id.as_str())
+        .collect();
     match start_order(defs) {
         Ok(order) => order
             .into_iter()
+            .filter(|id| daemon_ids.contains(id.as_str()))
             .filter_map(|id| {
                 let def = defs.iter().find(|d| d.id == id)?;
                 if !procs.is_running(&id) {
@@ -160,11 +173,7 @@ pub fn stop_all(procs: &ProcManager, defs: &[ServiceDef]) -> Vec<ActionResult> {
 }
 
 /// 启动单个服务，并先确保其全部（传递）依赖已启动且就绪。
-pub fn start_with_deps(
-    procs: &ProcManager,
-    defs: &[ServiceDef],
-    id: &str,
-) -> Vec<ActionResult> {
+pub fn start_with_deps(procs: &ProcManager, defs: &[ServiceDef], id: &str) -> Vec<ActionResult> {
     // 收集 id 及其所有传递依赖
     let mut need: Vec<String> = Vec::new();
     let mut stack = vec![id.to_string()];
@@ -215,5 +224,90 @@ pub fn start_with_deps(
             ok: false,
             error: Some(e),
         }],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ops::registry::ServiceKind;
+
+    fn def(id: &str, is_daemon: bool) -> ServiceDef {
+        ServiceDef {
+            id: id.into(),
+            name: id.into(),
+            kind: ServiceKind::RustBin,
+            install_dir: ".".into(),
+            build_cmd: None,
+            // Unix 下 sh -c true 立即退出；Windows 下 cmd /C true 会 spawn 失败。
+            // 两种结果本测试都能接受——断言只关心「哪些 id 被纳入启动」，不关心成败。
+            run_cmd: "true".into(),
+            ports: vec![],
+            health_url: None,
+            log_paths: vec![],
+            depends_on: vec![],
+            is_daemon,
+            description: String::new(),
+        }
+    }
+
+    /// 回归：start_all 只能拉起常驻服务。
+    /// 桌面客户端（is_daemon = false）被纳入批量启动时，会在运维机上弹出 GUI 窗口。
+    #[test]
+    fn start_all_skips_non_daemon() {
+        let defs = vec![def("daemon-a", true), def("desktop-app", false)];
+        let procs = ProcManager::new();
+        let out = start_all(&procs, &defs);
+
+        let ids: Vec<&str> = out.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["daemon-a"], "非常驻服务不应被「全部启动」拉起");
+
+        let _ = procs.stop("daemon-a");
+    }
+
+    /// 回归：常驻服务依赖非常驻服务时，不得误报「依赖存在环」。
+    /// 这是「先排序再过滤」而非「先过滤再排序」的原因——若先过滤，被依赖方不在输入集合里，
+    /// 其入度永远无法归零，`start_order` 会把它判成环并让整个批量启动失败。
+    #[test]
+    fn start_all_does_not_report_cycle_when_dep_is_non_daemon() {
+        let dep = def("desktop-dep", false);
+        let mut svc = def("daemon-b", true);
+        svc.depends_on = vec!["desktop-dep".into()];
+
+        let defs = [dep, svc];
+        let procs = ProcManager::new();
+        let out = start_all(&procs, &defs);
+
+        assert!(
+            !out.iter()
+                .any(|r| r.error.as_deref() == Some("服务依赖存在环，无法排序")),
+            "过滤导致的假环必须消除，实际结果：{out:?}"
+        );
+        assert!(
+            out.iter().any(|r| r.id == "daemon-b"),
+            "常驻服务自身仍应被尝试启动，实际结果：{out:?}"
+        );
+        assert!(
+            !out.iter().any(|r| r.id == "desktop-dep"),
+            "非常驻的依赖服务不应被拉起，实际结果：{out:?}"
+        );
+
+        let _ = procs.stop("daemon-b");
+    }
+
+    /// 拓扑排序：被依赖者在前；真实存在环时报错。
+    #[test]
+    fn start_order_respects_dependencies_and_detects_cycle() {
+        let mut a = def("a", true);
+        let mut b = def("b", true);
+        b.depends_on = vec!["a".into()];
+        let defs = [a.clone(), b.clone()];
+        let order = start_order(&defs).expect("无环时应返回顺序");
+        assert_eq!(order, vec!["a", "b"]);
+        assert_eq!(stop_order(&defs).unwrap(), vec!["b", "a"]);
+
+        a.depends_on = vec!["b".into()];
+        let cyclic = [a, b];
+        assert!(start_order(&cyclic).is_err(), "存在环时应返回 Err");
     }
 }
