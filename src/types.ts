@@ -77,6 +77,8 @@ export interface AiProviderDto {
   id: string;
   name: string;
   apiKey: string;
+  /** 后端脱敏后返回：true=已配置 Key（apiKey 字段恒为 ""，保存时留空表示保留原 Key） */
+  keySet?: boolean;
   enabled: boolean;
 }
 

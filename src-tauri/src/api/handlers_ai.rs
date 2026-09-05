@@ -9,9 +9,9 @@ use crate::ops::aimodels::{AiEndpoint, AiModel, AiModelConfig, AiProvider};
 
 // ===== AI 模型配置（三层：供应商 → 接入点 → 模型，web-craft ModelConfigPage 同构） =====
 
-/// 读取完整 AI 模型配置（providers/endpoints/models/activeModelId）。
-pub async fn get_ai_config(State(state): State<Arc<AppState>>) -> Json<AiModelConfig> {
-    Json(state.ai_models.lock().unwrap().clone())
+/// 读取 AI 模型配置（对外脱敏：供应商 apiKey 一律不回吐，改用 keySet 标记是否已配置）。
+pub async fn get_ai_config(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(state.ai_models.lock().unwrap().public_config())
 }
 
 /// 通用响应：保存成功后返回最新配置（前端无需再拉一次）。
@@ -30,7 +30,8 @@ async fn saved_config(state: &AppState, cfg: AiModelConfig) -> Json<serde_json::
     match result {
         Ok(cfg) => {
             *ai_models.lock().unwrap() = cfg.clone();
-            Json(serde_json::json!({ "ok": true, "config": cfg }))
+            // 回前端脱敏：apiKey 不回吐，改用 keySet
+            Json(serde_json::json!({ "ok": true, "config": cfg.public_config() }))
         }
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),
     }
@@ -49,6 +50,12 @@ pub async fn save_provider(
         return Json(serde_json::json!({ "ok": false, "error": "供应商名称不能为空" }));
     }
     let mut cfg = state.ai_models.lock().unwrap().clone();
+    // 安全：编辑已有供应商时若 apiKey 留空，保留原值，避免误清空密钥
+    if let Some(existing) = cfg.providers.iter().find(|x| x.id == p.id) {
+        if p.api_key.trim().is_empty() && !existing.api_key.is_empty() {
+            p.api_key = existing.api_key.clone();
+        }
+    }
     cfg.upsert_provider(p);
     saved_config(&state, cfg).await
 }

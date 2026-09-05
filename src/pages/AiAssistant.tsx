@@ -175,7 +175,7 @@ function ProviderDialog({
           fullWidth
           size="small"
           type={showApiKey ? "text" : "password"}
-          placeholder="sk-..."
+          placeholder={initial?.keySet ? "已配置，留空则保留原 Key" : "sk-..."}
           InputProps={{
             endAdornment: (
               <InputAdornment position="end">

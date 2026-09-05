@@ -159,6 +159,26 @@ impl AiModelConfig {
             .or_else(|| self.models.iter().find(|m| m.enabled).map(|m| m.id.clone()))?;
         self.resolve(&id)
     }
+
+    /// 对外（前端）配置视图：供应商的 `apiKey` 一律脱敏为 `""`，改用 `keySet` 标记是否已配置。
+    ///
+    /// 磁盘持久化仍走 `save`（明文，单机单用户可接受）；此处只控制「回前端」的展示，
+    /// 避免密钥经 HTTP 泄露到浏览器（DevTools / 恶意扩展 / 截图）。密钥仅服务端 `resolve`
+    /// 消费，前端永远不需要其真实值。
+    pub fn public_config(&self) -> serde_json::Value {
+        serde_json::json!({
+            "providers": self.providers.iter().map(|p| serde_json::json!({
+                "id": p.id,
+                "name": p.name,
+                "apiKey": "",
+                "keySet": !p.api_key.is_empty(),
+                "enabled": p.enabled,
+            })).collect::<Vec<_>>(),
+            "endpoints": self.endpoints,
+            "models": self.models,
+            "activeModelId": self.active_model_id,
+        })
+    }
 }
 
 pub fn now_id(prefix: &str) -> String {
@@ -168,4 +188,41 @@ pub fn now_id(prefix: &str) -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{}-{}", prefix, n)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_config_masks_set_api_key() {
+        let mut cfg = AiModelConfig::default();
+        cfg.providers.push(AiProvider {
+            id: "pv-1".into(),
+            name: "OpenAI".into(),
+            api_key: "sk-secret".into(),
+            enabled: true,
+        });
+        let v = cfg.public_config();
+        let providers = v["providers"].as_array().unwrap();
+        assert_eq!(providers.len(), 1);
+        // 关键：明文 key 绝不能回前端
+        assert_eq!(providers[0]["apiKey"], serde_json::json!(""));
+        assert_eq!(providers[0]["keySet"], serde_json::json!(true));
+        assert_eq!(providers[0]["name"], serde_json::json!("OpenAI"));
+    }
+
+    #[test]
+    fn public_config_reports_unset_key() {
+        let mut cfg = AiModelConfig::default();
+        cfg.providers.push(AiProvider {
+            id: "pv-2".into(),
+            name: "Ollama".into(),
+            api_key: String::new(),
+            enabled: true,
+        });
+        let v = cfg.public_config();
+        assert_eq!(v["providers"][0]["apiKey"], serde_json::json!(""));
+        assert_eq!(v["providers"][0]["keySet"], serde_json::json!(false));
+    }
 }
