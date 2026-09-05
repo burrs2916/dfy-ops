@@ -15,9 +15,16 @@
 #     Erlang 系应用（VerneMQ 的 beam.smp.exe 与 RabbitMQ 共用镜像名）必须靠命令行区分。
 #   ports：仅用于本平台拉起服务后的就绪等待（编排目标），以及未配置 processNames 时的探测兜底。
 #
-# thirdParty（默认 false）：第三方系统级中间件（VerneMQ/MinIO 等）置 true——
+# thirdParty（默认 false）：第三方系统级中间件（VerneMQ/MinIO/MySQL/Redis 等）置 true——
 #   平台只检测不托管：不参与「全部启动/停止」、无启停/构建按钮、Dashboard 分组展示；
 #   运行由 Windows 服务管理器或容器运行时（本机开发可用 OrbStack/Docker）负责。
+#
+# requires（默认 []）：声明式环境检查——服务【未运行】时也需要满足的静态前提。
+#   每条：{ id = "唯一键", label = "显示名", path = "相对 installDir 的路径（可选）", port = "需可达的 TCP 端口（可选）" }
+#   path 会自动尝试 ".exe" 变体（Windows）；port 走 TCP 连通性探测。
+#
+# dependsOn：运行时依赖——被依赖服务的实时状态直接进入本服务的环境检查：
+#   未运行 ⇒ Fail（此时启动本服务无意义）；运行但端口不可达 ⇒ Warn；正常 ⇒ Pass。
 
 [[services]]
 id = "dfy-backend"
@@ -28,9 +35,9 @@ buildCmd = "mvn -q -DskipTests package"
 runCmd = "java -jar dfy-server/target/dfy-server.jar"
 ports = [48085]
 logPaths = ["C:/services/dfy-boot-base/logs/app.log"]
-dependsOn = []
+dependsOn = ["mysql", "redis"]
 isDaemon = true
-description = "鼎飞益智后端服务（Java Vert.x），默认端口 48085。"
+description = "鼎飞益智后端服务（Java Vert.x），默认端口 48085。依赖 MySQL/Redis（第三方系统级服务）。"
 
 [[services]]
 id = "dfy-ui"
@@ -69,6 +76,7 @@ ports = [8084, 8085]
 processNames = ["edgecd-daemon"]
 logPaths = ["C:/services/edge-conductor/logs"]
 dependsOn = ["dfy-backend", "vernemq", "minio"]
+requires = [{ id = "greptime", label = "GreptimeDB 二进制", path = "greptimedb/greptime" }]
 isDaemon = true
 description = "边缘计算后端；8084/8085 为自身监听端口，依赖 VerneMQ/MinIO（独立注册的第三方服务）与 DFY 后端 48085。"
 
@@ -115,3 +123,31 @@ dependsOn = []
 isDaemon = true
 thirdParty = true
 description = "第三方 S3 兼容对象存储；minio.exe 进程反查实际端口（API 9000 + console 端口如实显示）。"
+
+[[services]]
+id = "mysql"
+name = "MySQL (数据库)"
+kind = "database"
+installDir = "C:/services/mysql"
+runCmd = ""
+ports = [3306]
+processNames = ["mysqld", "mysqld.exe"]
+logPaths = []
+dependsOn = []
+isDaemon = true
+thirdParty = true
+description = "第三方关系型数据库；Windows 服务管理器托管，mysqld.exe 进程反查实际端口（默认 3306）。"
+
+[[services]]
+id = "redis"
+name = "Redis (缓存)"
+kind = "database"
+installDir = "C:/services/redis"
+runCmd = ""
+ports = [6379]
+processNames = ["redis-server", "redis-server.exe"]
+logPaths = []
+dependsOn = []
+isDaemon = true
+thirdParty = true
+description = "第三方内存缓存；redis-server 进程反查实际端口（默认 6379）。"

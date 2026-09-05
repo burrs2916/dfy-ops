@@ -89,6 +89,7 @@ fn env_report_contract() {
         name: "x".into(),
         overall: CheckStatus::Pass,
         items: vec![CheckItem {
+            id: "iid".into(),
             name: "n".into(),
             category: "c".into(),
             status: CheckStatus::Warn,
@@ -102,7 +103,7 @@ fn env_report_contract() {
     assert_keys(&v, &["id", "name", "overall", "items"]);
     assert_keys(
         &v["items"][0],
-        &["name", "category", "status", "expected", "actual", "isFatal", "fixHint"],
+        &["id", "name", "category", "status", "expected", "actual", "isFatal", "fixHint"],
     );
     for (val, expect) in [
         (CheckStatus::Pass, "pass"),

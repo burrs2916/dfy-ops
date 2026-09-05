@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -343,18 +344,16 @@ pub async fn diagnosis(State(state): State<Arc<AppState>>) -> Json<serde_json::V
     // 避免探测耗时把 worker 线程占住（这是诊断接口里最重的一段）。
     let llm_state = state.clone();
     let (status, env_reports, findings) = blocking(move || {
-        let mut status: HashMap<String, (bool, bool)> = HashMap::new();
-        for d in &state.registry {
-            let running = state.procs.is_running(&d.id);
-            let s = to_status(d, running);
-            status.insert(d.id.clone(), (running, s.healthy));
-        }
-        // 环境检查：探测各服务的运行时依赖 + 外部依赖，并纳入诊断。
-        // 运行状态与 to_status 同源（进程级检测）：服务在跑 ⇒ 环境事实上满足。
+        // 依赖检查视图：同一份「进程是事实来源」的状态，同时驱动服务状态与环境/依赖检查。
+        let deps = dep_states(&state);
+        let status: HashMap<String, (bool, bool)> = deps
+            .iter()
+            .map(|(id, dep)| (id.clone(), (dep.running, dep.healthy)))
+            .collect();
+        // 环境检查：探测各服务的运行时依赖 + requires 声明 + dependsOn 依赖，并纳入诊断。
         let mut env_reports: Vec<environment::ServiceEnvReport> = Vec::new();
         for d in &state.registry {
-            let s = to_status(d, state.procs.is_running(&d.id));
-            env_reports.push(environment::check_service_env(d, s.running));
+            env_reports.push(environment::check_service_env(d, &deps));
         }
         let findings = diagnosis::diagnose(&state.registry, &status, &env_reports);
         (status, env_reports, findings)
@@ -390,7 +389,28 @@ pub async fn diagnosis(State(state): State<Arc<AppState>>) -> Json<serde_json::V
     }))
 }
 
-/// 检查单个服务的运行环境（运行时依赖 + 外部依赖）。
+/// 构建依赖检查视图：遍历注册表，把每个服务的实时状态（进程级检测，事实来源）
+/// 汇总为 DepState 映射，供环境检查的 dependsOn 段消费。
+fn dep_states(state: &AppState) -> environment::DepStates {
+    state
+        .registry
+        .iter()
+        .map(|d| {
+            let s = to_status(d, state.procs.is_running(&d.id));
+            (
+                d.id.clone(),
+                environment::DepState {
+                    name: d.name.clone(),
+                    running: s.running,
+                    healthy: s.healthy,
+                    ports: d.ports.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+/// 检查单个服务的运行环境（运行时依赖 + requires 声明 + dependsOn 依赖）。
 pub async fn env_check(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -398,30 +418,36 @@ pub async fn env_check(
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?.clone();
     Ok(Json(
         blocking(move || {
-            let running = to_status(&def, state.procs.is_running(&id)).running;
-            environment::check_service_env(&def, running)
+            let deps = dep_states(&state);
+            environment::check_service_env(&def, &deps)
         })
         .await,
     ))
 }
 
-/// 检查全部服务的运行环境。
+/// 环境检查全量结果的缓存有效期：全量探测含多次子进程调用（java/-version 等），开销大。
+const ENV_CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// 检查全部服务的运行环境（60s TTL 缓存，前端自动轮询场景下避免重复子进程探测）。
 pub async fn env_check_all(
     State(state): State<Arc<AppState>>,
 ) -> Json<Vec<environment::ServiceEnvReport>> {
-    Json(
-        blocking(move || {
-            state
-                .registry
-                .iter()
-                .map(|d| {
-                    let running = to_status(d, state.procs.is_running(&d.id)).running;
-                    environment::check_service_env(d, running)
-                })
-                .collect::<Vec<_>>()
-        })
-        .await,
-    )
+    if let Some((at, reports)) = state.env_cache.lock().unwrap().as_ref() {
+        if at.elapsed() < ENV_CACHE_TTL {
+            return Json(reports.clone());
+        }
+    }
+    let st = state.clone();
+    let reports = blocking(move || {
+        let deps = dep_states(&st);
+        st.registry
+            .iter()
+            .map(|d| environment::check_service_env(d, &deps))
+            .collect::<Vec<_>>()
+    })
+    .await;
+    *state.env_cache.lock().unwrap() = Some((Instant::now(), reports.clone()));
+    Json(reports)
 }
 
 // ===== 应用设置（「设置」页，与 AI 助手配置分离） =====

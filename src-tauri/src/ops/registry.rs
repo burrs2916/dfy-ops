@@ -19,6 +19,34 @@ pub enum ServiceKind {
     MqttBroker,
     /// 第三方 S3 兼容对象存储（MinIO）
     ObjectStorage,
+    /// 第三方数据库/缓存（MySQL、Redis）
+    Database,
+}
+
+/// 声明式依赖检查项：环境检查时按此探测，不再在代码里硬编码路径/端口。
+/// `path` 相对 `install_dir`（或绝对路径），文件存在即满足（自动尝试 .exe 变体）；
+/// `port` 为需要可达的回环 TCP 端口。至少给一项。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequiresCheck {
+    /// 稳定 id（修复建议/前端键控用），缺省用 label
+    #[serde(default)]
+    pub id: String,
+    /// 检查项显示名
+    pub label: String,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+impl RequiresCheck {
+    pub fn check_id(&self) -> &str {
+        if self.id.is_empty() {
+            &self.label
+        } else {
+            &self.id
+        }
+    }
 }
 
 /// 被运维的本地服务定义。路径默认按 Windows 部署约定给出，可在 UI/配置中覆盖。
@@ -55,6 +83,9 @@ pub struct ServiceDef {
     /// Windows 服务管理器或容器运行时负责。
     #[serde(rename = "thirdParty", default)]
     pub third_party: bool,
+    /// 声明式依赖检查（环境检查按此探测，不在代码里硬编码路径/端口）
+    #[serde(default)]
+    pub requires: Vec<RequiresCheck>,
     pub description: String,
 }
 
@@ -63,7 +94,7 @@ struct ServiceConfig {
     services: Vec<ServiceDef>,
 }
 
-/// 返回内置的 5 个目标服务定义（DFY 系列本地部署）。
+/// 返回内置的目标服务定义（DFY 系列自研服务 + 第三方依赖）。
 fn builtin() -> Vec<ServiceDef> {
     vec![
         ServiceDef {
@@ -77,10 +108,11 @@ fn builtin() -> Vec<ServiceDef> {
             process_names: vec![],
             health_url: None,
             log_paths: vec!["C:/services/dfy-boot-base/logs/app.log".into()],
-            depends_on: vec![],
+            depends_on: vec!["mysql".into(), "redis".into()],
             is_daemon: true,
             third_party: false,
-            description: "鼎飞益智后端服务（Java Vert.x），默认端口 48085。".into(),
+            requires: vec![],
+            description: "鼎飞益智后端服务（Java Vert.x），默认端口 48085；依赖 MySQL/Redis（独立注册的第三方服务）。".into(),
         },
         ServiceDef {
             id: "dfy-ui".into(),
@@ -96,6 +128,7 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec!["dfy-backend".into()],
             is_daemon: true,
             third_party: false,
+            requires: vec![],
             description: "Vue3 管理后台，由 nginx 托管于 80 端口，反代 /api 到后端 48085。".into(),
         },
         ServiceDef {
@@ -112,6 +145,7 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec![],
             is_daemon: true,
             third_party: false,
+            requires: vec![],
             description: "Angular 19 网关控制台，静态托管。".into(),
         },
         ServiceDef {
@@ -129,6 +163,12 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec!["dfy-backend".into(), "vernemq".into(), "minio".into()],
             is_daemon: true,
             third_party: false,
+            requires: vec![RequiresCheck {
+                id: "greptime".into(),
+                label: "GreptimeDB 二进制".into(),
+                path: Some("greptimedb/greptime".into()),
+                port: None,
+            }],
             description: "边缘计算后端，自身监听 8084/8085；依赖 VerneMQ（MQTT 18830）、MinIO（对象存储）与 DFY 后端 48085，依赖项均为独立注册的第三方/上游服务。".into(),
         },
         ServiceDef {
@@ -146,6 +186,7 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec![],
             is_daemon: false,
             third_party: false,
+            requires: vec![],
             description: "空间数据系统桌面客户端；无端口，按进程名检测（非常驻，不参与批量启动）。".into(),
         },
         ServiceDef {
@@ -165,6 +206,7 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec![],
             is_daemon: true,
             third_party: true,
+            requires: vec![],
             description: "第三方 MQTT broker（Erlang/OTP），平台只检测不托管；实际监听端口由进程反查（MQTT 18830 / 状态页 8888 如实显示）。".into(),
         },
         ServiceDef {
@@ -181,7 +223,42 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec![],
             is_daemon: true,
             third_party: true,
+            requires: vec![],
             description: "第三方 S3 兼容对象存储，平台只检测不托管；minio.exe 进程反查实际端口（API 9000 + console 端口如实显示）。".into(),
+        },
+        ServiceDef {
+            id: "mysql".into(),
+            name: "MySQL (业务库)".into(),
+            kind: ServiceKind::Database,
+            install_dir: "C:/services/mysql".into(),
+            build_cmd: None,
+            run_cmd: String::new(),
+            ports: vec![3306],
+            process_names: vec!["mysqld".into(), "mysqld.exe".into()],
+            health_url: None,
+            log_paths: vec![],
+            depends_on: vec![],
+            is_daemon: true,
+            third_party: true,
+            requires: vec![],
+            description: "第三方业务数据库，平台只检测不托管；实际监听端口由进程反查（本机由 OrbStack 容器提供，走端口兜底探测）。".into(),
+        },
+        ServiceDef {
+            id: "redis".into(),
+            name: "Redis (缓存)".into(),
+            kind: ServiceKind::Database,
+            install_dir: "C:/services/redis".into(),
+            build_cmd: None,
+            run_cmd: String::new(),
+            ports: vec![6379],
+            process_names: vec!["redis-server".into(), "redis-server.exe".into()],
+            health_url: None,
+            log_paths: vec![],
+            depends_on: vec![],
+            is_daemon: true,
+            third_party: true,
+            requires: vec![],
+            description: "第三方缓存服务，平台只检测不托管；实际监听端口由进程反查（本机由 OrbStack 容器提供，走端口兜底探测）。".into(),
         },
     ]
 }
@@ -286,7 +363,7 @@ mod tests {
     #[test]
     fn builtin_contains_third_party_dependencies() {
         let defs = builtin();
-        for id in ["vernemq", "minio"] {
+        for id in ["vernemq", "minio", "mysql", "redis"] {
             let d = defs.iter().find(|d| d.id == id).expect("第三方依赖必须内置");
             assert!(d.third_party, "{id} 应标记为 thirdParty");
             assert!(d.build_cmd.is_none() && d.run_cmd.is_empty(), "{id} 平台不托管启停");

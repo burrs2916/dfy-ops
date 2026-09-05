@@ -58,8 +58,8 @@ function saveAck(set: Set<string>) {
     /* ignore */
   }
 }
-function ackId(reportId: string, itemName: string) {
-  return `${reportId}::${itemName}`;
+function ackId(reportId: string, itemId: string) {
+  return `${reportId}::${itemId}`;
 }
 
 function StatusDot({ status }: { status: CheckStatus }) {
@@ -107,7 +107,7 @@ function ServiceEnvSection({
 
   const rows = useMemo(() => {
     return report.items.filter((it) => {
-      const id = ackId(report.id, it.name);
+      const id = ackId(report.id, it.id);
       if (onlyProblems && it.status === "pass") return false;
       if (hideAcked && acked.has(id)) return false;
       return true;
@@ -158,12 +158,12 @@ function ServiceEnvSection({
               </TableRow>
             ) : (
               rows.map((it) => {
-                const id = ackId(report.id, it.name);
+                const id = ackId(report.id, it.id);
                 const isAcked = acked.has(id);
                 const hasHint = it.status !== "pass" && !!it.fixHint;
                 return (
                   <TableRow
-                    key={it.name}
+                    key={it.id}
                     sx={{ opacity: isAcked ? 0.55 : 1, "& td": { verticalAlign: "top", py: 1 } }}
                   >
                     {/* 状态 */}
@@ -313,7 +313,7 @@ export default function EnvCheck() {
     () =>
       reports.flatMap((r) =>
         r.items.filter(
-          (it) => it.status !== "pass" && !acked.has(ackId(r.id, it.name))
+          (it) => it.status !== "pass" && !acked.has(ackId(r.id, it.id))
         )
       ),
     [reports, acked]
@@ -325,7 +325,7 @@ export default function EnvCheck() {
   const passCount = allItems.filter((it) => it.status === "pass").length;
   const ackedCount = reports
     .flatMap((r) => r.items.map((it) => ({ r, it })))
-    .filter(({ r, it }) => it.status !== "pass" && acked.has(ackId(r.id, it.name))).length;
+    .filter(({ r, it }) => it.status !== "pass" && acked.has(ackId(r.id, it.id))).length;
 
   // 聚合所有待处理缺失项的 Windows 修复命令，供用户在运维中心一次性复制执行。
   const allFixes = pending

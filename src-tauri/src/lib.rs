@@ -71,6 +71,7 @@ pub fn run() {
                 ai_models: Arc::new(Mutex::new(AiModelConfig::load(&config_dir))),
                 app_settings: Arc::new(Mutex::new(AppSettings::load(&config_dir))),
                 config_dir,
+                env_cache: Arc::new(Mutex::new(None)),
             });
 
             // P2-f 保活看门狗：平台拉起过的常驻服务崩了自动重新拉起

@@ -124,6 +124,7 @@ mod tests {
     fn diagnose_env_missing_becomes_finding() {
         let mut items = Vec::new();
         items.push(CheckItem {
+            id: "java-runtime".into(),
             name: "Java 运行时".into(),
             category: "工具链".into(),
             status: CheckStatus::Fail,
@@ -133,6 +134,7 @@ mod tests {
             fix_hint: "winget install -e --id Microsoft.OpenJDK.17".into(),
         });
         items.push(CheckItem {
+            id: "nginx-hosting".into(),
             name: "nginx 托管".into(),
             category: "外部依赖".into(),
             status: CheckStatus::Warn,
@@ -142,6 +144,7 @@ mod tests {
             fix_hint: "winget install -e --id nginx.nginx".into(),
         });
         items.push(CheckItem {
+            id: "nodejs".into(),
             name: "Node.js".into(),
             category: "工具链".into(),
             status: CheckStatus::Pass,

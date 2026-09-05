@@ -60,6 +60,8 @@ export interface LogsResponse {
 export type CheckStatus = "pass" | "warn" | "fail";
 
 export interface EnvCheckItem {
+  /** 稳定 id（修复建议/前端键控），不随显示名变化 */
+  id: string;
   name: string;
   category: string;
   status: CheckStatus;

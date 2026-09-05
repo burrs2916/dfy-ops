@@ -256,6 +256,7 @@ mod tests {
             health_url: None,
             log_paths: vec![],
             depends_on: vec![],
+            requires: vec![],
             is_daemon,
             third_party: false,
             description: String::new(),
