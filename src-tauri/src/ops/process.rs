@@ -116,14 +116,15 @@ impl ProcManager {
     }
 }
 
-/// 本机是否存在命令行匹配给定名字的进程（全命令行 substring 匹配）。
+/// 本机命令行匹配给定名字的全部 PID（全命令行 substring 匹配，best-effort）。
 ///
-/// 无端口服务（Tauri 桌面客户端等）无法靠端口探活，这是它们的「检测到在运行」兜底通道：
-/// Unix 用 `pgrep -f`（退出码 0 即命中），Windows 用 `tasklist` 过滤镜像名。
-/// Best-effort：命令执行失败一律视为未运行，不 panic、不阻塞调用方（调用方已在 blocking 池）。
-pub fn process_alive(name: &str) -> bool {
+/// 这是「进程是事实来源」检测模型的入口：先按进程名定位 PID，再用
+/// [`listening_ports`] 反查它们实际监听的端口——**平台不规定端口，端口由进程反查得出**。
+/// 注意：pattern 应使用运行器特征（如 `ng serve`、`dfy-server.jar`、`edgecd-daemon`），
+/// 不要用项目路径——IDE 语言服务进程的命令行里常带全部项目路径，会误命中。
+pub fn process_pids(name: &str) -> Vec<u32> {
     if name.trim().is_empty() {
-        return false;
+        return vec![];
     }
     #[cfg(target_os = "windows")]
     {
@@ -134,18 +135,162 @@ pub fn process_alive(name: &str) -> bool {
             .creation_flags(CREATE_NO_WINDOW)
             .stderr(Stdio::null())
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains(name))
-            .unwrap_or(false)
+            .map(|o| {
+                // tasklist CSV 每行: "镜像名","PID","会话名",...
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .filter_map(|l| l.split('"').nth(3))
+                    .filter_map(|pid| pid.parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
     #[cfg(not(target_os = "windows"))]
     {
-        Command::new("pgrep")
+        let pids: Vec<u32> = Command::new("pgrep")
             .args(["-f", name])
             .stderr(Stdio::null())
             .output()
-            .map(|o| o.status.success() && !o.stdout.is_empty())
-            .unwrap_or(false)
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .split_whitespace()
+                    .filter_map(|t| t.parse().ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        filter_tool_noise(pids)
     }
+}
+
+/// 进程匹配后剔除「工具噪音」PID。
+///
+/// IDE / agent 宿主（Trae、WorkBuddy、CodeBuddy、Cursor…）的命令行里嵌着全部项目路径，
+/// 按命令行匹配进程名时会误命中——例如把 WorkBuddy 自己监听的端口归给某个服务。
+/// 规则：可执行名是常见 shell、Electron 容器或含 IDE/Helper 标识的剔除；
+/// `ps` 不可用时保守保留（只过滤确认是噪音的，宁多勿错杀真实服务）。
+#[cfg(not(target_os = "windows"))]
+fn filter_tool_noise(pids: Vec<u32>) -> Vec<u32> {
+    if pids.is_empty() {
+        return pids;
+    }
+    let list = pids
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let Ok(out) = Command::new("ps")
+        .args(["-o", "pid=,comm=", "-p", &list])
+        .stderr(Stdio::null())
+        .output()
+    else {
+        return pids;
+    };
+    let mut comms: HashMap<u32, String> = HashMap::new();
+    for l in String::from_utf8_lossy(&out.stdout).lines() {
+        let mut parts = l.splitn(2, char::is_whitespace);
+        if let (Some(p), Some(c)) = (parts.next(), parts.next()) {
+            if let Ok(pid) = p.trim().parse::<u32>() {
+                comms.insert(pid, c.trim().to_string());
+            }
+        }
+    }
+    pids.into_iter()
+        .filter(|p| match comms.get(p) {
+            Some(c) => !is_tool_noise(c),
+            None => true, // 查不到可执行名的保守保留
+        })
+        .collect()
+}
+
+/// 可执行名是否属于工具噪音（shell / GUI 容器 / IDE·agent 宿主）。
+#[cfg(not(target_os = "windows"))]
+fn is_tool_noise(comm: &str) -> bool {
+    let base = comm.rsplit('/').next().unwrap_or(comm);
+    const SHELLS: [&str; 6] = ["zsh", "bash", "sh", "fish", "pwsh", "powershell"];
+    if SHELLS.contains(&base) || base == "Electron" {
+        return true;
+    }
+    // macOS comm 可能被截断（MAXCOMLEN），故用包含匹配且只匹配噪音侧
+    ["Helper", "Trae", "CodeBuddy", "WorkBuddy", "Cursor", "LanguageServer"]
+        .iter()
+        .any(|k| base.contains(k))
+}
+
+/// 反查给定 PID 集合正在 LISTEN 的本地端口（去重升序）。
+///
+/// 「服务实际监听什么端口就检测什么端口」的实现：Unix/macOS 走
+/// `lsof -nP -iTCP -sTCP:LISTEN -a -p <pids>`，Windows 走 `netstat -ano`。
+/// Best-effort：命令不可用（如部分 Linux 无 lsof）时返回空，调用方自行回退。
+pub fn listening_ports(pids: &[u32]) -> Vec<u16> {
+    if pids.is_empty() {
+        return vec![];
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        let pid_set: Vec<String> = pids.iter().map(|p| p.to_string()).collect();
+        Command::new("netstat")
+            .args(["-ano", "-p", "tcp"])
+            .creation_flags(0x0800_0000)
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| parse_netstat_ports(&String::from_utf8_lossy(&o.stdout), &pid_set))
+            .unwrap_or_default()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let pid_list = pids
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        Command::new("lsof")
+            .args(["-nP", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &pid_list])
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| parse_lsof_ports(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default()
+    }
+}
+
+/// 解析 `lsof -iTCP -sTCP:LISTEN` 输出，提取 NAME 列（如 `*:4200`、`127.0.0.1:48085`、
+/// `[::1]:4200`）中的端口，去重升序。纯函数便于测试。
+///
+/// 行尾可能带 `(LISTEN)` 后缀，因此从右往左找第一个「冒号后是数字」的 token。
+fn parse_lsof_ports(text: &str) -> Vec<u16> {
+    let mut ports: Vec<u16> = text
+        .lines()
+        .skip(1) // 跳过表头 COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME
+        .filter_map(|l| {
+            l.split_whitespace()
+                .rev()
+                .find_map(|t| t.rsplit_once(':')?.1.parse().ok())
+        })
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+/// 解析 Windows `netstat -ano -p tcp` 输出：取 LISTENING 行，本地地址列的端口，
+/// 且 PID 在给定集合内。纯函数便于测试。
+#[cfg(target_os = "windows")]
+fn parse_netstat_ports(text: &str, pids: &[String]) -> Vec<u16> {
+    let mut ports: Vec<u16> = text
+        .lines()
+        .filter(|l| l.contains("LISTENING"))
+        .filter_map(|l| {
+            let cols: Vec<&str> = l.split_whitespace().collect();
+            // Proto Local Foreign State PID
+            if cols.len() < 5 || !pids.contains(&cols[4].to_string()) {
+                return None;
+            }
+            cols[1].rsplit_once(':')?.1.parse().ok()
+        })
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    ports
 }
 
 /// install_dir 存在才作为子进程工作目录；不存在则不设置（兜底，避免 spawn 直接失败）。
@@ -204,4 +349,29 @@ fn spawn_to_log(cwd: &str, cmd: &str, log_path: &str) -> std::io::Result<Child> 
         .stdout(Stdio::from(file))
         .stderr(Stdio::from(stderr))
         .spawn()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_lsof_ports_extracts_listening_ports() {
+        let sample = "COMMAND   PID  USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME\n\
+                      java    35668  lc   100u  IPv6 0xabc      0t0  TCP *:48085 (LISTEN)\n\
+                      node    67613  lc   101u  IPv6 0xdef      0t0  TCP [::1]:4200 (LISTEN)\n\
+                      edgecd  88147  lc   102u  IPv4 0x123      0t0  TCP 127.0.0.1:8084 (LISTEN)\n\
+                      edgecd  88147  lc   103u  IPv4 0x124      0t0  TCP 127.0.0.1:8084 (LISTEN)\n";
+        assert_eq!(parse_lsof_ports(sample), vec![4200, 8084, 48085]);
+    }
+
+    #[test]
+    fn parse_lsof_ports_ignores_header_and_empty() {
+        let expected: Vec<u16> = vec![];
+        assert_eq!(
+            parse_lsof_ports("COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME\n"),
+            expected
+        );
+        assert_eq!(parse_lsof_ports(""), expected);
+    }
 }

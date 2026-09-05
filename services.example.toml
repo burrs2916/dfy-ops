@@ -4,8 +4,11 @@
 #   本机覆盖方式：把本文件放到应用配置目录并改名 services.toml（macOS:
 #   ~/Library/Application Support/com.dfy.ops/，Windows: %APPDATA%/com.dfy.ops/）
 #
-# processNames：可选。本机存在命令行匹配该名字的进程时视为「外部运行」；
-# 用于无端口服务（Tauri 桌面客户端等）的检测兜底（Unix pgrep -f / Windows tasklist）。
+# 检测模型：进程是事实来源，端口由进程反查——平台不规定服务用什么端口。
+#   processNames（可选，按运行器特征写，如 "java -jar xx.jar" 里的 jar 名、"ng serve"）：
+#     命中进程后用 lsof/netstat 反查其【实际监听端口】，检测与展示均以实际端口为准；
+#     Shell / IDE / agent 宿主进程会被自动剔除，避免误命中。
+#   ports：仅用于本平台拉起服务后的就绪等待（编排目标），以及未配置 processNames 时的探测兜底。
 
 [[services]]
 id = "dfy-backend"

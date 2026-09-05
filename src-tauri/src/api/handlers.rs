@@ -91,34 +91,14 @@ pub struct ServiceStatus {
 }
 
 fn to_status(def: &ServiceDef, managed: bool) -> ServiceStatus {
-    // 端口探活（用于「外部运行」识别与 healthy 判定；回环目标已兼容 IPv6 绑定）
-    let port_up = def
-        .ports
-        .iter()
-        .any(|p| health::check_tcp("127.0.0.1", *p, PROBE_TIMEOUT_MS));
-    // 进程兜底探测：无端口服务（Tauri 桌面客户端等）端口永远探不到，
-    // 未受管时按 processNames 查一次本机进程，避免「明明在跑却显示未运行」。
-    let proc_up = !managed
-        && def
-            .process_names
-            .iter()
-            .any(|n| process::process_alive(n));
-    let run_state = if managed {
-        RunState::Managed
-    } else if port_up || proc_up {
-        RunState::Detected
+    let (run_state, ports, healthy) = if managed {
+        (
+            RunState::Managed,
+            def.ports.clone(),
+            managed_healthy(def),
+        )
     } else {
-        RunState::Down
-    };
-    let healthy = if let Some(url) = &def.health_url {
-        health::check_http(url, PROBE_TIMEOUT_MS)
-    } else if def.ports.is_empty() {
-        // 无端口的桌面客户端：是否「健康」直接等同于「在运行」
-        run_state != RunState::Down
-    } else {
-        def.ports
-            .iter()
-            .all(|p| health::check_tcp("127.0.0.1", *p, PROBE_TIMEOUT_MS))
+        detect_external(def)
     };
     ServiceStatus {
         id: def.id.clone(),
@@ -127,7 +107,7 @@ fn to_status(def: &ServiceDef, managed: bool) -> ServiceStatus {
         running: run_state != RunState::Down,
         run_state,
         healthy,
-        ports: def.ports.clone(),
+        ports,
         depends_on: def.depends_on.clone(),
         is_daemon: def.is_daemon,
         description: def.description.clone(),
@@ -137,6 +117,72 @@ fn to_status(def: &ServiceDef, managed: bool) -> ServiceStatus {
         health_url: def.health_url.clone(),
         log_paths: def.log_paths.clone(),
     }
+}
+
+/// 受管服务（本平台拉起）的健康判定：就绪等待本来就以配置端口为目标，沿用它。
+fn managed_healthy(def: &ServiceDef) -> bool {
+    if let Some(url) = &def.health_url {
+        health::check_http(url, PROBE_TIMEOUT_MS)
+    } else if def.ports.is_empty() {
+        // 无端口的桌面客户端：是否「健康」直接等同于「在运行」
+        true
+    } else {
+        def.ports
+            .iter()
+            .all(|p| health::check_tcp("127.0.0.1", *p, PROBE_TIMEOUT_MS))
+    }
+}
+
+/// 外部运行服务的检测：**进程是事实来源，端口由进程反查**。
+///
+/// 平台不规定服务用什么端口——按 `processNames`（运行器特征，如 `ng serve`、
+/// `dfy-server.jar`）定位 PID，再用 `lsof`/`netstat` 反查这些 PID 实际监听的端口：
+/// 反查到什么就上报什么（前端展示与 healthy 判定均以实际端口为准）。
+/// 仅当未配置进程名或未命中时，才回退到按配置端口探测（兼容 nginx 多实例这类
+/// 不适合按进程名区分的部署形态）。
+fn detect_external(def: &ServiceDef) -> (RunState, Vec<u16>, bool) {
+    let pids: Vec<u32> = def
+        .process_names
+        .iter()
+        .flat_map(|n| process::process_pids(n))
+        .collect();
+    if !pids.is_empty() {
+        let discovered = process::listening_ports(&pids);
+        if !discovered.is_empty() {
+            // 进程在且端口在监听：以实际监听端口为准
+            return (RunState::Detected, discovered, true);
+        }
+        // 进程在但没有监听端口：无端口预期（桌面客户端）视为健康；
+        // 有端口预期则回退按配置端口确认（lsof 不可用时的兜底）。
+        let healthy = if def.ports.is_empty() {
+            true
+        } else {
+            def.ports
+                .iter()
+                .all(|p| health::check_tcp("127.0.0.1", *p, PROBE_TIMEOUT_MS))
+        };
+        return (RunState::Detected, def.ports.clone(), healthy);
+    }
+    // 兜底：未配置进程名或未命中 → 按配置端口探测
+    let port_up = def
+        .ports
+        .iter()
+        .any(|p| health::check_tcp("127.0.0.1", *p, PROBE_TIMEOUT_MS));
+    let healthy = if let Some(url) = &def.health_url {
+        health::check_http(url, PROBE_TIMEOUT_MS)
+    } else if def.ports.is_empty() {
+        false
+    } else {
+        def.ports
+            .iter()
+            .all(|p| health::check_tcp("127.0.0.1", *p, PROBE_TIMEOUT_MS))
+    };
+    let state = if port_up {
+        RunState::Detected
+    } else {
+        RunState::Down
+    };
+    (state, def.ports.clone(), healthy)
 }
 
 fn find_def<'a>(state: &'a AppState, id: &str) -> Option<&'a ServiceDef> {
