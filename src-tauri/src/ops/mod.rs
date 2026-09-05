@@ -4,6 +4,7 @@ pub mod health;
 pub mod logs;
 pub mod diagnosis;
 pub mod orchestrator;
+pub mod watchdog;
 pub mod environment;
 pub mod ai;
 pub mod aimodels;

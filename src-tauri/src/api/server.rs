@@ -18,7 +18,8 @@ use crate::ops::registry::ServiceDef;
 /// 共享应用状态：服务注册表 + 进程管理器 + AI 模型配置（三层，可热更新）+ 应用设置（可热更新）+ 配置目录。
 pub struct AppState {
     pub registry: Vec<ServiceDef>,
-    pub procs: ProcManager,
+    /// Arc：保活看门狗线程与 API 共享同一进程管理器。
+    pub procs: Arc<ProcManager>,
     pub ai_models: Arc<Mutex<AiModelConfig>>,
     pub app_settings: Arc<Mutex<crate::ops::appsettings::AppSettings>>,
     pub config_dir: PathBuf,
@@ -213,7 +214,7 @@ mod tests {
         Arc::new(AppState {
             // 空注册表：这些测试只校验鉴权与 CORS，不触碰任何真实服务进程。
             registry: vec![],
-            procs: ProcManager::new(),
+            procs: Arc::new(ProcManager::new()),
             ai_models: Arc::new(Mutex::new(AiModelConfig::default())),
             app_settings: Arc::new(Mutex::new(AppSettings::load(&dir))),
             config_dir: dir,

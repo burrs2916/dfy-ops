@@ -7,13 +7,41 @@ use std::sync::Mutex;
 /// 进程管理器：以 shell 启动本地服务，并记录子进程句柄以便停止。
 pub struct ProcManager {
     children: Mutex<HashMap<String, Child>>,
+    /// 用户显式 stop 过的服务：保活看门狗跳过，直到下一次显式 start。
+    suppressed: Mutex<HashMap<String, ()>>,
+    /// 平台至少成功拉起过一次的服务：保活只管自己拉起过的，
+    /// 平台没碰过的外部服务（detected）不由看门狗接管。
+    ever_started: Mutex<HashMap<String, ()>>,
 }
 
 impl ProcManager {
     pub fn new() -> Self {
         Self {
             children: Mutex::new(HashMap::new()),
+            suppressed: Mutex::new(HashMap::new()),
+            ever_started: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// 该服务是否被用户显式停止过（保活看门狗据此跳过）。
+    pub fn is_suppressed(&self, id: &str) -> bool {
+        self.suppressed.lock().unwrap().contains_key(id)
+    }
+
+    /// 保活看门狗的候选：平台拉起过、当前不在跑、且未被显式停止的服务 id。
+    /// 走 `is_running`（内部 try_wait 会回收死进程句柄），确保「崩了但未回收」
+    /// 的服务也能进入重启名单。
+    pub fn keepalive_candidates(&self) -> Vec<String> {
+        let ever: Vec<String> = self
+            .ever_started
+            .lock()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect();
+        ever.into_iter()
+            .filter(|id| !self.is_suppressed(id) && !self.is_running(id))
+            .collect()
     }
 
     /// 该服务是否已有存活进程。
@@ -52,6 +80,12 @@ impl ProcManager {
         }
         let child = spawn_detached(install_dir, run_cmd)?;
         map.insert(id.to_string(), child);
+        // 显式启动解除保活抑制；并记录「平台拉起过」供看门狗接管
+        self.suppressed.lock().unwrap().remove(id);
+        self.ever_started
+            .lock()
+            .unwrap()
+            .insert(id.to_string(), ());
         Ok(())
     }
 
@@ -64,6 +98,11 @@ impl ProcManager {
     pub fn stop(&self, id: &str) -> std::io::Result<()> {
         let mut map = self.children.lock().unwrap();
         if let Some(mut child) = map.remove(id) {
+            // 显式停止：保活看门狗不再自动拉起，直到下一次显式 start
+            self.suppressed
+                .lock()
+                .unwrap()
+                .insert(id.to_string(), ());
             #[cfg(target_os = "windows")]
             {
                 use std::os::windows::process::CommandExt;
@@ -395,5 +434,40 @@ mod tests {
                       zsh      26878 lc   23u  IPv4 0xb03      0t0  TCP 127.0.0.1:52792 (LISTEN)\n\
                       node     28040 lc   24u  IPv6 0xb04      0t0  TCP *:80 (LISTEN)\n";
         assert_eq!(parse_lsof_ports(sample), vec![80]);
+    }
+
+    /// 保活的抑制/候选语义：从未拉起 → 不是候选；在跑 → 不是候选；
+    /// 显式 stop → 抑制且不是候选；显式 start 解除抑制；进程退出 → 成为候选。
+    #[cfg(unix)]
+    #[test]
+    fn keepalive_suppression_and_candidates() {
+        use std::time::Duration;
+
+        let pm = ProcManager::new();
+        let ids = || pm.keepalive_candidates();
+        // 平台从未拉起过：不是候选（看门狗不接管外部服务）
+        assert!(!ids().iter().any(|id| id == "svc-test"));
+
+        pm.start("svc-test", "/tmp", "sleep 30").unwrap();
+        assert!(pm.is_running("svc-test"));
+        assert!(!ids().iter().any(|id| id == "svc-test"));
+
+        // 显式 stop：进程被杀 + 进入抑制名单
+        pm.stop("svc-test").unwrap();
+        assert!(pm.is_suppressed("svc-test"));
+        assert!(!pm.is_running("svc-test"));
+        assert!(!ids().iter().any(|id| id == "svc-test"));
+
+        // 显式 start 解除抑制
+        pm.start("svc-test", "/tmp", "sleep 30").unwrap();
+        assert!(!pm.is_suppressed("svc-test"));
+
+        // 换一个立即退出的进程：退出后应重新成为候选（保活该重启它）
+        pm.start("svc-exit", "/tmp", "true").unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(ids().iter().any(|id| id == "svc-exit"));
+
+        pm.stop("svc-test").unwrap();
+        pm.stop("svc-exit").unwrap();
     }
 }

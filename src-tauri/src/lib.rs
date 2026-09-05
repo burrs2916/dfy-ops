@@ -60,14 +60,19 @@ pub fn run() {
                 .path()
                 .app_config_dir()
                 .unwrap_or_else(|_| config_dir.clone());
+            let procs = Arc::new(ProcManager::new());
             let state = Arc::new(AppState {
                 // 本机覆盖优先：app_config_dir/services.toml > DFY_OPS_SERVICES > 内置 Windows 部署默认
                 registry: registry::services_with_override(&app_config_dir),
-                procs: ProcManager::new(),
+                procs: procs.clone(),
                 ai_models: Arc::new(Mutex::new(AiModelConfig::load(&config_dir))),
                 app_settings: Arc::new(Mutex::new(AppSettings::load(&config_dir))),
                 config_dir,
             });
+
+            // P2-f 保活看门狗：平台拉起过的常驻服务崩了自动重新拉起
+            // （用户显式 stop 的会被抑制；重启间隔 30s 冷却防 crash-loop）。
+            ops::watchdog::spawn(procs.clone(), state.registry.clone(), 15);
 
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Runtime::new() {
