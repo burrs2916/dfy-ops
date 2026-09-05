@@ -1,7 +1,6 @@
 import { useState } from "react";
 import {
   Card,
-  CardActionArea,
   CardContent,
   Chip,
   CircularProgress,
@@ -59,10 +58,16 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
     }
   };
 
+  // 卡片整体可点击跳转详情。不能用 CardActionArea——它渲染成 <button>，
+  // 卡片内的启停 IconButton 也是 <button>，会触发
+  // validateDOMNesting: <button> cannot appear as a descendant of <button>。
   return (
-    <Card variant="outlined" sx={{ height: "100%" }}>
-      <CardActionArea onClick={() => navigate(`/service/${s.id}`)} sx={{ height: "100%" }}>
-        <CardContent>
+    <Card
+      variant="outlined"
+      sx={{ height: "100%", cursor: "pointer" }}
+      onClick={() => navigate(`/service/${s.id}`)}
+    >
+      <CardContent sx={{ height: "100%" }}>
           <Stack direction="row" justifyContent="space-between" alignItems="center">
             <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
               {s.name}
@@ -129,7 +134,6 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
             </Typography>
           )}
         </CardContent>
-      </CardActionArea>
     </Card>
   );
 }
