@@ -169,20 +169,33 @@ pub fn process_pids(name: &str) -> Vec<u32> {
     {
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        Command::new("tasklist")
-            .args(["/FI", &format!("IMAGENAME eq {name}"), "/NH", "/FO", "CSV"])
-            .creation_flags(CREATE_NO_WINDOW)
-            .stderr(Stdio::null())
-            .output()
-            .map(|o| {
-                // tasklist CSV 每行: "镜像名","PID","会话名",...
-                String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .filter_map(|l| l.split('"').nth(3))
-                    .filter_map(|pid| pid.parse().ok())
-                    .collect()
-            })
-            .unwrap_or_default()
+        let image_match = |image: &str| {
+            Command::new("tasklist")
+                .args(["/FI", &format!("IMAGENAME eq {image}"), "/NH", "/FO", "CSV"])
+                .creation_flags(CREATE_NO_WINDOW)
+                .stderr(Stdio::null())
+                .output()
+                .map(|o| {
+                    // tasklist CSV 每行: "镜像名","PID","会话名",...
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .filter_map(|l| l.split('"').nth(3))
+                        .filter_map(|pid| pid.parse().ok())
+                        .collect::<Vec<u32>>()
+                })
+                .unwrap_or_default()
+        };
+        // 先按镜像名匹配（含/不含 .exe 各试一次）；
+        // 都未命中再按命令行子串匹配——Erlang 系应用（VerneMQ）的实际进程是
+        // beam.smp.exe，与 RabbitMQ 等共用镜像名，只能靠命令行里的应用标识区分。
+        let mut pids = image_match(name);
+        if pids.is_empty() && !name.ends_with(".exe") {
+            pids = image_match(&format!("{name}.exe"));
+        }
+        if pids.is_empty() {
+            pids = windows_commandline_pids(name);
+        }
+        pids
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -199,6 +212,34 @@ pub fn process_pids(name: &str) -> Vec<u32> {
             .unwrap_or_default();
         filter_tool_noise(pids)
     }
+}
+
+/// Windows：按命令行子串匹配进程（PowerShell Get-CimInstance，比 wmic 现代）。
+///
+/// 用途：VerneMQ 这类 Erlang 应用，进程镜像名（beam.smp.exe）与 RabbitMQ 等共用，
+/// 镜像名匹配会误命中；其命令行里含应用标识（如 `...\vernemq\...`），按命令行匹配才准。
+/// 注意：查询本身约 1-2s，仅在镜像名匹配落空时作为兜底调用，不进高频轮询路径。
+#[cfg(target_os = "windows")]
+fn windows_commandline_pids(token: &str) -> Vec<u32> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // token 来自 services.toml（本机受信配置），无注入面；like 通配符转义 % 即可
+    let pattern = format!("*{}*", token.replace('%', ""));
+    let ps = format!(
+        "Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '{pattern}' }} | Select-Object -ExpandProperty ProcessId"
+    );
+    Command::new("powershell")
+        .args(["-NoProfile", "-Command", &ps])
+        .creation_flags(CREATE_NO_WINDOW)
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .filter_map(|t| t.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 进程匹配后剔除「工具噪音」PID。

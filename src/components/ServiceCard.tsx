@@ -23,6 +23,8 @@ const KIND_LABEL: Record<string, string> = {
   angular_spa: "Angular",
   rust_bin: "Rust",
   tauri_app: "Tauri",
+  mqtt_broker: "MQTT",
+  object_storage: "S3存储",
 };
 
 function envChip(env?: ServiceEnvReport) {
@@ -86,37 +88,40 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
                 </Typography>
               )}
             </Stack>
-            {/* 快捷操作：阻止冒泡，避免误触卡片跳转 */}
-            <Stack
-              direction="row"
-              spacing={0.25}
-              alignItems="center"
-              onClick={(e) => e.stopPropagation()}
-              sx={{ flexShrink: 0 }}
-            >
-              {busy ? (
-                <CircularProgress size={16} sx={{ m: 0.5 }} />
-              ) : !s.running ? (
-                <Tooltip title="启动">
-                  <IconButton size="small" onClick={() => act("启动", () => api.start(s.id))}>
-                    <PlayArrow fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-              ) : (
-                <>
-                  <Tooltip title="重启">
-                    <IconButton size="small" onClick={() => act("重启", () => api.restart(s.id))}>
-                      <Replay fontSize="small" />
+            {/* 快捷操作：阻止冒泡，避免误触卡片跳转。
+                第三方依赖（VerneMQ/MinIO）由系统服务/容器管理，平台只检测不托管 → 无启停按钮 */}
+            {!s.thirdParty && (
+              <Stack
+                direction="row"
+                spacing={0.25}
+                alignItems="center"
+                onClick={(e) => e.stopPropagation()}
+                sx={{ flexShrink: 0 }}
+              >
+                {busy ? (
+                  <CircularProgress size={16} sx={{ m: 0.5 }} />
+                ) : !s.running ? (
+                  <Tooltip title="启动">
+                    <IconButton size="small" onClick={() => act("启动", () => api.start(s.id))}>
+                      <PlayArrow fontSize="small" />
                     </IconButton>
                   </Tooltip>
-                  <Tooltip title="停止">
-                    <IconButton size="small" onClick={() => act("停止", () => api.stop(s.id))}>
-                      <Stop fontSize="small" />
-                    </IconButton>
-                  </Tooltip>
-                </>
-              )}
-            </Stack>
+                ) : (
+                  <>
+                    <Tooltip title="重启">
+                      <IconButton size="small" onClick={() => act("重启", () => api.restart(s.id))}>
+                        <Replay fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                    <Tooltip title="停止">
+                      <IconButton size="small" onClick={() => act("停止", () => api.stop(s.id))}>
+                        <Stop fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </>
+                )}
+              </Stack>
+            )}
           </Stack>
           {errMsg && (
             <Typography variant="caption" color="error" sx={{ display: "block", mt: 0.5 }}>

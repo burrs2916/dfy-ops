@@ -3,7 +3,9 @@ export type ServiceKind =
   | "vue_spa"
   | "angular_spa"
   | "rust_bin"
-  | "tauri_app";
+  | "tauri_app"
+  | "mqtt_broker"
+  | "object_storage";
 
 /** 运行态三态（P0-2）：managed=本平台受管运行 / detected=外部进程在跑 / down=未运行 */
 export type RunState = "managed" | "detected" | "down";
@@ -18,6 +20,8 @@ export interface ServiceStatus {
   ports: number[];
   dependsOn: string[];
   isDaemon: boolean;
+  /** 第三方依赖（VerneMQ/MinIO 等系统级中间件）：平台只检测不托管，UI 隐藏启停按钮并分组展示 */
+  thirdParty: boolean;
   description: string;
   installDir: string;
   buildCmd?: string | null;

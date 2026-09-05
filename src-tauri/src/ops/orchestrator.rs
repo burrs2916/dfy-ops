@@ -93,6 +93,10 @@ fn act_all(
         .into_iter()
         .filter_map(|id| {
             let def = defs.iter().find(|d| d.id == id)?;
+            // 第三方依赖不归平台托管（由系统服务/容器运行时管理），启停一律跳过
+            if def.third_party {
+                return None;
+            }
             // 停止阶段：跳过当前未运行的服务，避免无意义报错
             if !start && !procs.is_running(&id) {
                 return None;
@@ -122,7 +126,7 @@ fn act_all(
 pub fn start_all(procs: &ProcManager, defs: &[ServiceDef]) -> Vec<ActionResult> {
     let daemon_ids: HashSet<&str> = defs
         .iter()
-        .filter(|d| d.is_daemon)
+        .filter(|d| d.is_daemon && !d.third_party)
         .map(|d| d.id.as_str())
         .collect();
     match start_order(defs) {
@@ -198,6 +202,11 @@ pub fn start_with_deps(procs: &ProcManager, defs: &[ServiceDef], id: &str) -> Ve
             .into_iter()
             .filter_map(|sid| {
                 let def = defs.iter().find(|d| d.id == sid)?;
+                // 第三方依赖（如 edge-conductor 依赖的 vernemq/minio）：不托管，
+                // 跳过启动但不算失败——其运行由系统服务/容器运行时负责。
+                if def.third_party {
+                    return None;
+                }
                 if !procs.is_running(&sid) {
                     if let Err(e) = procs.start(&sid, &def.install_dir, &def.run_cmd) {
                         return Some(ActionResult {
@@ -248,8 +257,26 @@ mod tests {
             log_paths: vec![],
             depends_on: vec![],
             is_daemon,
+            third_party: false,
             description: String::new(),
         }
+    }
+
+    /// 回归：start_all 不得拉起第三方依赖（vernemq/minio）——平台只检测不托管。
+    #[test]
+    fn start_all_skips_third_party() {
+        let mut mq = def("vernemq", true);
+        mq.third_party = true;
+        let defs = vec![def("daemon-a", true), mq];
+        let procs = ProcManager::new();
+        let out = start_all(&procs, &defs);
+        let ids: Vec<&str> = out.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["daemon-a"],
+            "第三方依赖不应被「全部启动」拉起，实际：{ids:?}"
+        );
+        let _ = procs.stop("daemon-a");
     }
 
     /// 回归：start_all 只能拉起常驻服务。

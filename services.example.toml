@@ -4,11 +4,20 @@
 #   本机覆盖方式：把本文件放到应用配置目录并改名 services.toml（macOS:
 #   ~/Library/Application Support/com.dfy.ops/，Windows: %APPDATA%/com.dfy.ops/）
 #
+# ⚠️ 覆盖按 id 合并：配置里同 id 的服务整体替换内置定义，未提及的内置服务保留
+#    （内置含第三方依赖 vernemq/minio，勿在本机配置里重复定义，除非要改端口/路径）。
+#
 # 检测模型：进程是事实来源，端口由进程反查——平台不规定服务用什么端口。
 #   processNames（可选，按运行器特征写，如 "java -jar xx.jar" 里的 jar 名、"ng serve"）：
 #     命中进程后用 lsof/netstat 反查其【实际监听端口】，检测与展示均以实际端口为准；
 #     Shell / IDE / agent 宿主进程会被自动剔除，避免误命中。
+#     Windows 注意：镜像名匹配（含/不含 .exe）落空时自动按命令行子串匹配——
+#     Erlang 系应用（VerneMQ 的 beam.smp.exe 与 RabbitMQ 共用镜像名）必须靠命令行区分。
 #   ports：仅用于本平台拉起服务后的就绪等待（编排目标），以及未配置 processNames 时的探测兜底。
+#
+# thirdParty（默认 false）：第三方系统级中间件（VerneMQ/MinIO 等）置 true——
+#   平台只检测不托管：不参与「全部启动/停止」、无启停/构建按钮、Dashboard 分组展示；
+#   运行由 Windows 服务管理器或容器运行时（本机开发可用 OrbStack/Docker）负责。
 
 [[services]]
 id = "dfy-backend"
@@ -59,9 +68,9 @@ runCmd = "C:/services/edge-conductor/target/release/edgecd-daemon --config C:/se
 ports = [8084, 8085]
 processNames = ["edgecd-daemon"]
 logPaths = ["C:/services/edge-conductor/logs"]
-dependsOn = ["dfy-backend"]
+dependsOn = ["dfy-backend", "vernemq", "minio"]
 isDaemon = true
-description = "边缘计算后端；8084/8085 为自身监听端口，外部依赖 MQTT 18830（VerneMQ broker）与上游 DFY 后端 48085。"
+description = "边缘计算后端；8084/8085 为自身监听端口，依赖 VerneMQ/MinIO（独立注册的第三方服务）与 DFY 后端 48085。"
 
 [[services]]
 id = "biosphere-spatial"
@@ -76,3 +85,33 @@ logPaths = []
 dependsOn = []
 isDaemon = false
 description = "空间数据系统桌面客户端；无端口，按进程名检测（非常驻，不参与批量启动）。"
+
+# ===== 第三方依赖：平台只检测不托管 =====
+
+[[services]]
+id = "vernemq"
+name = "VerneMQ (MQTT)"
+kind = "mqtt_broker"
+installDir = "C:/services/vernemq"
+runCmd = ""
+ports = [18830]
+processNames = ["vernemq"]
+logPaths = []
+dependsOn = []
+isDaemon = true
+thirdParty = true
+description = "第三方 MQTT broker（Erlang/OTP）；Windows 实际进程为 beam.smp.exe，按命令行含 vernemq 匹配（与 RabbitMQ 区分）。实际端口由进程反查（MQTT 18830 / 状态页 8888）。"
+
+[[services]]
+id = "minio"
+name = "MinIO (对象存储)"
+kind = "object_storage"
+installDir = "C:/services/minio"
+runCmd = ""
+ports = [9000]
+processNames = ["minio", "minio.exe"]
+logPaths = []
+dependsOn = []
+isDaemon = true
+thirdParty = true
+description = "第三方 S3 兼容对象存储；minio.exe 进程反查实际端口（API 9000 + console 端口如实显示）。"

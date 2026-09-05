@@ -188,6 +188,19 @@ export default function Dashboard() {
   }
 
   const healthyCount = services.filter((s) => s.healthy).length;
+  // 第三方依赖（VerneMQ/MinIO 等系统级中间件）与自研服务分组展示，语义区分
+  const own = services.filter((s) => !s.thirdParty);
+  const thirdParty = services.filter((s) => s.thirdParty);
+
+  const cardGrid = (list: typeof services) => (
+    <Grid container spacing={2}>
+      {list.map((s) => (
+        <Grid item xs={12} sm={6} md={4} key={s.id}>
+          <ServiceCard s={s} env={envMap[s.id]} />
+        </Grid>
+      ))}
+    </Grid>
+  );
 
   return (
     <Stack spacing={3}>
@@ -259,13 +272,19 @@ export default function Dashboard() {
         </Alert>
       )}
 
-      <Grid container spacing={2}>
-        {services.map((s) => (
-          <Grid item xs={12} sm={6} md={4} key={s.id}>
-            <ServiceCard s={s} env={envMap[s.id]} />
-          </Grid>
-        ))}
-      </Grid>
+      <Typography variant="overline" color="text.secondary">
+        自研服务
+      </Typography>
+      {cardGrid(own)}
+
+      {thirdParty.length > 0 && (
+        <>
+          <Typography variant="overline" color="text.secondary">
+            第三方依赖（系统级中间件 · 只检测不托管）
+          </Typography>
+          {cardGrid(thirdParty)}
+        </>
+      )}
 
       <Paper variant="outlined" sx={{ p: 2 }}>
         <Typography variant="subtitle2" gutterBottom>

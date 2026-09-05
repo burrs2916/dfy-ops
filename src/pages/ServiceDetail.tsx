@@ -278,36 +278,42 @@ export default function ServiceDetail() {
               运行环境存在非致命警告，可尝试启动但部分功能可能受限；建议先按修复建议处理。
             </Alert>
           )}
-          <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
-            <Button
-              variant="contained"
-              disabled={busy || fatalMissing}
-              onClick={() => act(() => api.start(svc.id), "启动")}
-            >
-              启动
-            </Button>
-            <Button
-              variant="outlined"
-              disabled={busy}
-              onClick={() => act(() => api.stop(svc.id), "停止")}
-            >
-              停止
-            </Button>
-            <Button
-              variant="outlined"
-              disabled={busy || fatalMissing}
-              onClick={() => act(() => api.restart(svc.id), "重启")}
-            >
-              重启
-            </Button>
-            <Button
-              variant="text"
-              disabled={busy || fatalMissing}
-              onClick={startBuild}
-            >
-              构建
-            </Button>
-          </Stack>
+          {svc.thirdParty ? (
+            <Alert severity="info" sx={{ mt: 2 }}>
+              第三方依赖：由 Windows 服务管理器 / 容器运行时管理，平台只检测运行状态，不提供启停与构建。
+            </Alert>
+          ) : (
+            <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
+              <Button
+                variant="contained"
+                disabled={busy || fatalMissing}
+                onClick={() => act(() => api.start(svc.id), "启动")}
+              >
+                启动
+              </Button>
+              <Button
+                variant="outlined"
+                disabled={busy}
+                onClick={() => act(() => api.stop(svc.id), "停止")}
+              >
+                停止
+              </Button>
+              <Button
+                variant="outlined"
+                disabled={busy || fatalMissing}
+                onClick={() => act(() => api.restart(svc.id), "重启")}
+              >
+                重启
+              </Button>
+              <Button
+                variant="text"
+                disabled={busy || fatalMissing}
+                onClick={startBuild}
+              >
+                构建
+              </Button>
+            </Stack>
+          )}
         </CardContent>
       </Card>
 

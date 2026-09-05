@@ -15,6 +15,10 @@ pub enum ServiceKind {
     RustBin,
     /// Tauri 桌面客户端（非常驻服务）
     TauriApp,
+    /// 第三方 MQTT broker（VerneMQ，Erlang/OTP）
+    MqttBroker,
+    /// 第三方 S3 兼容对象存储（MinIO）
+    ObjectStorage,
 }
 
 /// 被运维的本地服务定义。路径默认按 Windows 部署约定给出，可在 UI/配置中覆盖。
@@ -46,6 +50,11 @@ pub struct ServiceDef {
     /// 是否为常驻守护服务（Tauri 桌面客户端为 false，不参与保活）
     #[serde(rename = "isDaemon")]
     pub is_daemon: bool,
+    /// 第三方依赖（VerneMQ / MinIO 等系统级中间件）：平台只检测不托管——
+    /// 不参与「全部启动/停止」、不提供启停按钮、runCmd 无意义。运行由
+    /// Windows 服务管理器或容器运行时负责。
+    #[serde(rename = "thirdParty", default)]
+    pub third_party: bool,
     pub description: String,
 }
 
@@ -70,6 +79,7 @@ fn builtin() -> Vec<ServiceDef> {
             log_paths: vec!["C:/services/dfy-boot-base/logs/app.log".into()],
             depends_on: vec![],
             is_daemon: true,
+            third_party: false,
             description: "鼎飞益智后端服务（Java Vert.x），默认端口 48085。".into(),
         },
         ServiceDef {
@@ -85,6 +95,7 @@ fn builtin() -> Vec<ServiceDef> {
             log_paths: vec!["C:/services/nginx/logs/access.log".into()],
             depends_on: vec!["dfy-backend".into()],
             is_daemon: true,
+            third_party: false,
             description: "Vue3 管理后台，由 nginx 托管于 80 端口，反代 /api 到后端 48085。".into(),
         },
         ServiceDef {
@@ -100,6 +111,7 @@ fn builtin() -> Vec<ServiceDef> {
             log_paths: vec![],
             depends_on: vec![],
             is_daemon: true,
+            third_party: false,
             description: "Angular 19 网关控制台，静态托管。".into(),
         },
         ServiceDef {
@@ -114,9 +126,10 @@ fn builtin() -> Vec<ServiceDef> {
             process_names: vec!["edgecd-daemon".into()],
             health_url: None,
             log_paths: vec!["C:/services/edge-conductor/logs".into()],
-            depends_on: vec!["dfy-backend".into()],
+            depends_on: vec!["dfy-backend".into(), "vernemq".into(), "minio".into()],
             is_daemon: true,
-            description: "边缘计算后端，自身监听 8084/8085；外部依赖 MQTT 18830（VerneMQ broker，非本服务端口），upstream 指向 DFY 后端 48085。".into(),
+            third_party: false,
+            description: "边缘计算后端，自身监听 8084/8085；依赖 VerneMQ（MQTT 18830）、MinIO（对象存储）与 DFY 后端 48085，依赖项均为独立注册的第三方/上游服务。".into(),
         },
         ServiceDef {
             id: "biosphere-spatial".into(),
@@ -132,49 +145,97 @@ fn builtin() -> Vec<ServiceDef> {
             log_paths: vec![],
             depends_on: vec![],
             is_daemon: false,
+            third_party: false,
             description: "空间数据系统桌面客户端；无端口，按进程名检测（非常驻，不参与批量启动）。".into(),
+        },
+        ServiceDef {
+            id: "vernemq".into(),
+            name: "VerneMQ (MQTT)".into(),
+            kind: ServiceKind::MqttBroker,
+            install_dir: "C:/services/vernemq".into(),
+            build_cmd: None,
+            run_cmd: String::new(),
+            ports: vec![18830],
+            // Windows 上 VerneMQ 是 Erlang/OTP 应用，实际进程为 beam.smp.exe——
+            // 与 RabbitMQ 等共用镜像名，不能按镜像名匹配；按命令行含 "vernemq" 匹配。
+            // 本机（macOS）由 OrbStack 容器提供，宿主机无此进程 → 降级走 18830 端口探测。
+            process_names: vec!["vernemq".into()],
+            health_url: None,
+            log_paths: vec![],
+            depends_on: vec![],
+            is_daemon: true,
+            third_party: true,
+            description: "第三方 MQTT broker（Erlang/OTP），平台只检测不托管；实际监听端口由进程反查（MQTT 18830 / 状态页 8888 如实显示）。".into(),
+        },
+        ServiceDef {
+            id: "minio".into(),
+            name: "MinIO (对象存储)".into(),
+            kind: ServiceKind::ObjectStorage,
+            install_dir: "C:/services/minio".into(),
+            build_cmd: None,
+            run_cmd: String::new(),
+            ports: vec![9000],
+            process_names: vec!["minio".into(), "minio.exe".into()],
+            health_url: None,
+            log_paths: vec![],
+            depends_on: vec![],
+            is_daemon: true,
+            third_party: true,
+            description: "第三方 S3 兼容对象存储，平台只检测不托管；minio.exe 进程反查实际端口（API 9000 + console 端口如实显示）。".into(),
         },
     ]
 }
 
 /// 读取服务注册表。
 ///
-/// 优先使用环境变量 `DFY_OPS_SERVICES` 指向的 TOML 配置文件；
-/// 文件缺失或解析失败时回退到内置默认定义。
+/// 内置定义为底座；若设置了环境变量 `DFY_OPS_SERVICES` 指向 TOML 配置，
+/// 按 **id 合并**覆盖（同 id 整体替换，新 id 追加）——合并而非整体替换，
+/// 保证新增的内置第三方依赖（vernemq/minio）不会被机器本机配置冲掉。
 pub fn services() -> Vec<ServiceDef> {
+    let mut defs = builtin();
     if let Ok(path) = std::env::var("DFY_OPS_SERVICES") {
         match std::fs::read_to_string(&path) {
             Ok(text) => match toml::from_str::<ServiceConfig>(&text) {
-                Ok(cfg) => return cfg.services,
-                Err(e) => eprintln!("服务配置解析失败（{path}）：{e}，回退内置默认"),
+                Ok(cfg) => merge_by_id(&mut defs, cfg.services),
+                Err(e) => eprintln!("服务配置解析失败（{path}）：{e}，使用内置默认"),
             },
-            Err(e) => eprintln!("服务配置文件读取失败（{path}）：{e}，回退内置默认"),
+            Err(e) => eprintln!("服务配置文件读取失败（{path}）：{e}，使用内置默认"),
         }
     }
-    builtin()
+    defs
 }
 
-/// 读取服务注册表（带本机覆盖）：优先 `app_config_dir/services.toml`（应用专属配置目录，
-/// macOS: ~/Library/Application Support/com.dfy.ops/），其次沿用 `DFY_OPS_SERVICES`
-/// 环境变量，最后回退内置 Windows 部署默认定义。解析失败不 panic，逐级回退。
+/// 按 id 合并：overrides 中同 id 的定义整体替换 base 里的，新 id 追加到末尾。
+fn merge_by_id(base: &mut Vec<ServiceDef>, overrides: Vec<ServiceDef>) {
+    for o in overrides {
+        match base.iter_mut().find(|d| d.id == o.id) {
+            Some(d) => *d = o,
+            None => base.push(o),
+        }
+    }
+}
+
+/// 读取服务注册表（带本机覆盖）：`app_config_dir/services.toml`（应用专属配置目录，
+/// macOS: ~/Library/Application Support/com.dfy.ops/）按 id 合并到 env/内置定义之上，
+/// 同 id 整体替换、新 id 追加。解析失败不 panic，逐级回退。
 ///
 /// 注意必须传 app_config_dir（带 identifier）而非系统级 config_dir——后者不带应用名，
 /// 文件放进去读不到（2026-09-05 实测踩坑：覆盖文件就绪却仍按内置 8081 探测）。
 pub fn services_with_override(config_dir: &Path) -> Vec<ServiceDef> {
+    let mut defs = services();
     let local = config_dir.join("services.toml");
     if let Ok(text) = std::fs::read_to_string(&local) {
-        return match toml::from_str::<ServiceConfig>(&text) {
-            Ok(cfg) => cfg.services,
+        match toml::from_str::<ServiceConfig>(&text) {
+            Ok(cfg) => merge_by_id(&mut defs, cfg.services),
             Err(e) => {
                 eprintln!(
                     "本机 services.toml 解析失败（{}）：{e}，回退 env/内置定义",
                     local.display()
                 );
-                services()
             }
-        };
+        }
     }
-    services()
+    defs
 }
 
 #[cfg(test)]
@@ -218,5 +279,55 @@ mod tests {
         )
         .expect("解析 services TOML");
         assert_eq!(cfg.services[0].process_names, vec!["x-app".to_string()]);
+    }
+
+    /// 回归：内置注册表必须包含第三方依赖 vernemq/minio（thirdParty=true），
+    /// 且自研服务 thirdParty=false。
+    #[test]
+    fn builtin_contains_third_party_dependencies() {
+        let defs = builtin();
+        for id in ["vernemq", "minio"] {
+            let d = defs.iter().find(|d| d.id == id).expect("第三方依赖必须内置");
+            assert!(d.third_party, "{id} 应标记为 thirdParty");
+            assert!(d.build_cmd.is_none() && d.run_cmd.is_empty(), "{id} 平台不托管启停");
+        }
+        for id in ["dfy-backend", "dfy-ui", "gateway-console", "edge-conductor"] {
+            let d = defs.iter().find(|d| d.id == id).unwrap();
+            assert!(!d.third_party, "{id} 是自研服务");
+        }
+    }
+
+    /// 回归：覆盖配置按 id 合并——同 id 替换、新 id 追加、内置定义不丢。
+    /// （此前是整体替换，新增内置 vernemq/minio 会被机器本机 services.toml 冲掉。）
+    #[test]
+    fn override_merges_by_id() {
+        let mut base = builtin();
+        let before = base.len();
+        let overlay: ServiceConfig = toml::from_str(
+            r#"
+            [[services]]
+            id = "dfy-backend"
+            name = "本机后端"
+            kind = "vertx"
+            installDir = "/Users/x/dfy-boot-base"
+            runCmd = "java -jar x.jar"
+            ports = [48085]
+            logPaths = []
+            dependsOn = []
+            isDaemon = true
+            description = ""
+            processNames = ["dfy-server.jar"]
+            "#,
+        )
+        .unwrap();
+        let overlay_len = overlay.services.len();
+        merge_by_id(&mut base, overlay.services);
+        assert_eq!(base.len(), before + overlay_len - 1, "同 id 替换、新 id 追加");
+        assert_eq!(
+            base.iter().find(|d| d.id == "dfy-backend").unwrap().name,
+            "本机后端",
+            "同 id 应被覆盖"
+        );
+        assert!(base.iter().any(|d| d.id == "vernemq"), "内置第三方不丢");
     }
 }

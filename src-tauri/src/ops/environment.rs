@@ -79,6 +79,8 @@ fn fix_hint_for(name: &str) -> &'static str {
         "VerneMQ (MQTT)" => "从 https://vernemq.com/downloads 或 https://github.com/vernemq/vernemq/releases 安装 VerneMQ",
         "上游 DFY 后端" => "确认 dfy-backend 已启动并监听 127.0.0.1:48085",
         "运行方式" => "托管部署：winget install -e --id nginx.nginx 并配置站点指向构建产物；dev 运行：从 https://nodejs.org 安装 Node.js",
+        "VerneMQ 服务状态" => "在主机安装 VerneMQ（https://vernemq.com/downloads）并作为服务启动，MQTT 监听端口按部署配置（本机 18830）",
+        "MinIO 服务状态" => "从 https://min.io/download 下载 minio 并作为服务运行（API 9000），配置 MINIO_ROOT_USER / MINIO_ROOT_PASSWORD",
         "WebView2 运行时" => "在目标 Windows 主机安装 Microsoft Edge WebView2 Runtime：https://developer.microsoft.com/microsoft-edge/webview2/",
         _ => "请在运维中心根据上方“实际”信息排查并安装对应依赖",
     }
@@ -257,6 +259,26 @@ pub fn check_service_env(def: &ServiceDef, running: bool) -> ServiceEnvReport {
                 "127.0.0.1:48085 可达",
                 if upstream { "端口可连接" } else { "端口不可达" },
                 upstream,
+                false,
+            ));
+        }
+        ServiceKind::MqttBroker | ServiceKind::ObjectStorage => {
+            // 第三方中间件（VerneMQ / MinIO）：它本身就是外部依赖，平台只检测不托管。
+            // 运行中 → 事实上满足；未运行 → 提示在主机安装并启动（部署机）或检查容器。
+            let label = match def.kind {
+                ServiceKind::MqttBroker => "VerneMQ 服务",
+                _ => "MinIO 服务",
+            };
+            items.push(make_item(
+                &format!("{label}状态"),
+                "外部依赖",
+                "已安装并处于运行状态",
+                if running {
+                    "服务运行中（进程/端口检测）"
+                } else {
+                    "未检测到运行"
+                },
+                running,
                 false,
             ));
         }

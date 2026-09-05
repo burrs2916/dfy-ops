@@ -72,6 +72,9 @@ pub struct ServiceStatus {
     pub depends_on: Vec<String>,
     #[serde(rename = "isDaemon")]
     pub is_daemon: bool,
+    /// 第三方依赖（VerneMQ/MinIO 等）：平台只检测不托管，前端据此隐藏启停按钮并分组展示。
+    #[serde(rename = "thirdParty")]
+    pub third_party: bool,
     pub description: String,
     /// 服务的预期安装目录（Windows 路径，仅作展示与排障参考，平台不会自动创建/部署）。
     #[serde(rename = "installDir")]
@@ -110,6 +113,7 @@ fn to_status(def: &ServiceDef, managed: bool) -> ServiceStatus {
         ports,
         depends_on: def.depends_on.clone(),
         is_daemon: def.is_daemon,
+        third_party: def.third_party,
         description: def.description.clone(),
         install_dir: def.install_dir.clone(),
         build_cmd: def.build_cmd.clone(),
