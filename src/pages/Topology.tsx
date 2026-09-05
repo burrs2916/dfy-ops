@@ -171,7 +171,14 @@ export default function Topology() {
                     fontSize={11}
                     fill="#555"
                   >
-                    {s.id} · {s.running ? (s.healthy ? "健康" : "异常") : "未运行"}
+                    {s.id} ·{" "}
+                    {!s.running
+                      ? "未运行"
+                      : !s.healthy
+                        ? "异常"
+                        : s.runState === "detected"
+                          ? "外部运行"
+                          : "健康"}
                   </text>
                 </g>
               );

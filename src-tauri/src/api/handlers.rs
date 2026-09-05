@@ -18,6 +18,21 @@ use crate::ops::registry::{ServiceDef, ServiceKind};
 
 const PROBE_TIMEOUT_MS: u64 = 800;
 
+/// 服务运行态（三态，P0-2）。
+///
+/// - `managed`：由本平台启动，且 `ProcManager` 持有真实存活的进程句柄
+///   （P1-4 已让 `is_running` 通过 `try_wait` 真实探活并回收僵尸）。
+/// - `detected`：本平台未拉起，但端口探测到在监听——服务由外部进程拉起，
+///   或历史遗留进程仍在跑。属于「在运行但不在我们掌控内」。
+/// - `down`：既无受管进程、端口也未监听。
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RunState {
+    Managed,
+    Detected,
+    Down,
+}
+
 /// 把同步阻塞段移交 tokio 的 blocking 线程池执行。
 ///
 /// 必须这么做的原因：Axum handler 跑在 tokio worker 线程上，worker 数默认 = CPU 核数。
@@ -47,6 +62,8 @@ pub struct ServiceStatus {
     #[serde(rename = "kind")]
     pub kind: ServiceKind,
     pub running: bool,
+    #[serde(rename = "runState")]
+    pub run_state: RunState,
     pub healthy: bool,
     pub ports: Vec<u16>,
     #[serde(rename = "dependsOn")]
@@ -71,11 +88,24 @@ pub struct ServiceStatus {
     pub log_paths: Vec<String>,
 }
 
-fn to_status(def: &ServiceDef, running: bool) -> ServiceStatus {
+fn to_status(def: &ServiceDef, managed: bool) -> ServiceStatus {
+    // 端口探活（仅在有端口的服务上用于「外部运行」识别与 healthy 判定）
+    let port_up = def
+        .ports
+        .iter()
+        .any(|p| health::check_tcp("127.0.0.1", *p, PROBE_TIMEOUT_MS));
+    let run_state = if managed {
+        RunState::Managed
+    } else if port_up {
+        RunState::Detected
+    } else {
+        RunState::Down
+    };
     let healthy = if let Some(url) = &def.health_url {
         health::check_http(url, PROBE_TIMEOUT_MS)
     } else if def.ports.is_empty() {
-        running
+        // 无端口的桌面客户端：是否「健康」直接等同于「在运行」
+        run_state != RunState::Down
     } else {
         def.ports
             .iter()
@@ -85,7 +115,8 @@ fn to_status(def: &ServiceDef, running: bool) -> ServiceStatus {
         id: def.id.clone(),
         name: def.name.clone(),
         kind: def.kind.clone(),
-        running,
+        running: run_state != RunState::Down,
+        run_state,
         healthy,
         ports: def.ports.clone(),
         depends_on: def.depends_on.clone(),

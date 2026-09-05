@@ -5,11 +5,15 @@ export type ServiceKind =
   | "rust_bin"
   | "tauri_app";
 
+/** 运行态三态（P0-2）：managed=本平台受管运行 / detected=外部进程在跑 / down=未运行 */
+export type RunState = "managed" | "detected" | "down";
+
 export interface ServiceStatus {
   id: string;
   name: string;
   kind: ServiceKind;
   running: boolean;
+  runState: RunState;
   healthy: boolean;
   ports: number[];
   dependsOn: string[];

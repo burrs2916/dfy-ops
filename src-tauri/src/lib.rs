@@ -62,16 +62,31 @@ pub fn run() {
             });
 
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+                let rt = match tokio::runtime::Runtime::new() {
+                    Ok(rt) => rt,
+                    Err(e) => {
+                        tracing::error!("创建 tokio runtime 失败，运维 API 无法启动: {e}");
+                        return;
+                    }
+                };
                 rt.block_on(async move {
                     let app = router(state);
-                    let listener = tokio::net::TcpListener::bind("127.0.0.1:18721")
-                        .await
-                        .expect("failed to bind ops API on 127.0.0.1:18721");
+                    // P1-5：端口绑定失败不再 expect panic 拖垮整个桌面应用。
+                    // 127.0.0.1:18721 被占用通常意味着本机已有另一个 dfy-ops 实例
+                    // 在跑运维 API——只记录并退出本服务线程（即天然的「单实例」互斥）。
+                    let listener = match tokio::net::TcpListener::bind("127.0.0.1:18721").await {
+                        Ok(l) => l,
+                        Err(e) => {
+                            tracing::error!(
+                                "运维 API 绑定 127.0.0.1:18721 失败（可能已有实例占用该端口）: {e}"
+                            );
+                            return;
+                        }
+                    };
                     tracing::info!("DFY Ops API listening on http://127.0.0.1:18721");
-                    axum::serve(listener, app)
-                        .await
-                        .expect("ops API server crashed");
+                    if let Err(e) = axum::serve(listener, app).await {
+                        tracing::error!("运维 API 服务异常退出: {e}");
+                    }
                 });
             });
             Ok(())

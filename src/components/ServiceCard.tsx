@@ -78,7 +78,7 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
             flexWrap="wrap"
           >
             <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" useFlexGap>
-              <StatusBadge running={s.running} healthy={s.healthy} />
+              <StatusBadge running={s.running} healthy={s.healthy} runState={s.runState} />
               {envChip(env)}
               {s.ports.length > 0 && (
                 <Typography variant="caption" color="text.secondary">

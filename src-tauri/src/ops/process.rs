@@ -17,8 +17,30 @@ impl ProcManager {
     }
 
     /// 该服务是否已有存活进程。
+    ///
+    /// 真实存活探测（P1-4）：用 `try_wait` 探一次子进程——若已退出则立即回收僵尸并
+    /// 移除记录，返回 false；仍在跑返回 true。这样「进程崩溃但我们还握着句柄」不会一直
+    /// 误报 running=true，也不会留下僵尸进程占用 PID 表。
     pub fn is_running(&self, id: &str) -> bool {
-        self.children.lock().unwrap().contains_key(id)
+        let mut map = self.children.lock().unwrap();
+        if let Some(child) = map.get_mut(id) {
+            match child.try_wait() {
+                // 子进程已退出：回收并清理记录
+                Ok(Some(_)) => {
+                    map.remove(id);
+                    false
+                }
+                // 仍在运行
+                Ok(None) => true,
+                // 等待出错（权限/平台异常等）：保守移除，避免僵尸堆积
+                Err(_) => {
+                    map.remove(id);
+                    false
+                }
+            }
+        } else {
+            false
+        }
     }
 
     /// 启动服务（若已在运行则忽略）。run_cmd 以系统 shell 执行，
@@ -33,10 +55,12 @@ impl ProcManager {
         Ok(())
     }
 
-    /// 停止服务（结束记录中的子进程）。
+    /// 停止服务（结束记录中的子进程及其整个进程树）。
     ///
-    /// Windows 注意：服务经 `cmd /C` 启动，`kill()` 只能杀掉 cmd.exe，
-    /// java/nginx 等孙进程会存活——必须用 `taskkill /T /F` 连进程树一起结束。
+    /// - Windows：服务经 `cmd /C` 启动，用 `taskkill /T /F` 连进程树一起结束
+    ///   （`kill()` 只能杀 cmd.exe，java/nginx 等孙进程会变孤儿）。
+    /// - Unix：启动时为 shell 设了独立进程组（pgid == shell pid），这里用
+    ///   `kill -KILL -<pgid>` 杀整组，`sh` 与其孙进程（java/nginx）一起退（P1-3）。
     pub fn stop(&self, id: &str) -> std::io::Result<()> {
         let mut map = self.children.lock().unwrap();
         if let Some(mut child) = map.remove(id) {
@@ -47,8 +71,21 @@ impl ProcManager {
                 let _ = Command::new("taskkill")
                     .args(["/PID", &child.id().to_string(), "/T", "/F"])
                     .creation_flags(CREATE_NO_WINDOW)
+                    .stderr(Stdio::null())
                     .status();
             }
+            #[cfg(unix)]
+            {
+                let pgid = child.id() as i32;
+                // 负 pid 表示「进程组」；该组由 spawn 时 process_group(0) 设定。
+                // 进程已自行退出时 kill 会报 EPERM/ESRCH，把 stderr 丢掉避免污染日志
+                // （结果我们本就忽略，兜底仍走 child.kill() + child.wait()）。
+                let _ = Command::new("kill")
+                    .args(["-KILL", &format!("-{pgid}")])
+                    .stderr(Stdio::null())
+                    .status();
+            }
+            // 兜底：确保本进程句柄对应的直接子进程被结束并回收
             let _ = child.kill();
             let _ = child.wait();
         }
@@ -98,6 +135,14 @@ fn spawn_detached(cwd: &str, cmd: &str) -> std::io::Result<Child> {
         c
     };
     apply_cwd(&mut command, cwd);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // 让被拉起的 shell 自成进程组（pgid == 其自身 pid）。stop 时用
+        // `kill -KILL -<pgid>` 才能把 shell 及其孙进程（java/nginx 等）一锅端，
+        // 否则只能杀 shell、java 变孤儿继续占用端口（P1-3）。
+        command.process_group(0);
+    }
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
