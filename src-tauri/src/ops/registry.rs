@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 /// 服务类型，决定构建/运行方式与保活策略。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,6 +33,10 @@ pub struct ServiceDef {
     #[serde(rename = "runCmd")]
     pub run_cmd: String,
     pub ports: Vec<u16>,
+    /// 进程名候选：本机存在命令行匹配该名字的进程时，视为「检测到在运行」（外部运行）。
+    /// 用于无端口服务（Tauri 桌面客户端等）的检测兜底，Unix 走 `pgrep -f`、Windows 走 `tasklist`。
+    #[serde(rename = "processNames", default)]
+    pub process_names: Vec<String>,
     #[serde(rename = "healthUrl")]
     pub health_url: Option<String>,
     #[serde(rename = "logPaths")]
@@ -60,6 +65,7 @@ fn builtin() -> Vec<ServiceDef> {
             build_cmd: Some("mvn -q -DskipTests package".into()),
             run_cmd: "java -jar dfy-server/target/dfy-server.jar".into(),
             ports: vec![48085],
+            process_names: vec![],
             health_url: None,
             log_paths: vec!["C:/services/dfy-boot-base/logs/app.log".into()],
             depends_on: vec![],
@@ -74,6 +80,7 @@ fn builtin() -> Vec<ServiceDef> {
             build_cmd: Some("pnpm build:prod".into()),
             run_cmd: "nginx -p C:/services/dfy-ui-admin-vue3-master -c nginx.conf".into(),
             ports: vec![80],
+            process_names: vec![],
             health_url: None,
             log_paths: vec!["C:/services/nginx/logs/access.log".into()],
             depends_on: vec!["dfy-backend".into()],
@@ -88,6 +95,7 @@ fn builtin() -> Vec<ServiceDef> {
             build_cmd: Some("npm run build:prod".into()),
             run_cmd: "nginx -p C:/services/gateway-console -c nginx.conf".into(),
             ports: vec![8081],
+            process_names: vec![],
             health_url: None,
             log_paths: vec![],
             depends_on: vec![],
@@ -103,6 +111,7 @@ fn builtin() -> Vec<ServiceDef> {
             run_cmd:
                 "C:/services/edge-conductor/target/release/edgecd-daemon --config C:/services/edge-conductor/config.toml".into(),
             ports: vec![8084, 8085],
+            process_names: vec!["edgecd-daemon".into()],
             health_url: None,
             log_paths: vec!["C:/services/edge-conductor/logs".into()],
             depends_on: vec!["dfy-backend".into()],
@@ -118,11 +127,12 @@ fn builtin() -> Vec<ServiceDef> {
             run_cmd:
                 "C:/services/biosphere-spatialdata-system/target/release/biosphere-spatialdata-system.exe".into(),
             ports: vec![],
+            process_names: vec!["biosphere-spatialdata-system".into()],
             health_url: None,
             log_paths: vec![],
             depends_on: vec![],
             is_daemon: false,
-            description: "空间数据系统桌面客户端；非常驻服务，按版本/安装/启动运维。".into(),
+            description: "空间数据系统桌面客户端；无端口，按进程名检测（非常驻，不参与批量启动）。".into(),
         },
     ]
 }
@@ -144,6 +154,26 @@ pub fn services() -> Vec<ServiceDef> {
     builtin()
 }
 
+/// 读取服务注册表（带本机覆盖）：优先 `config_dir/services.toml`（dev 机 / 部署机差异的
+/// 标准覆盖方式，存在即生效），其次沿用 `DFY_OPS_SERVICES` 环境变量，最后回退内置
+/// Windows 部署默认定义。解析失败不 panic，逐级回退。
+pub fn services_with_override(config_dir: &Path) -> Vec<ServiceDef> {
+    let local = config_dir.join("services.toml");
+    if let Ok(text) = std::fs::read_to_string(&local) {
+        return match toml::from_str::<ServiceConfig>(&text) {
+            Ok(cfg) => cfg.services,
+            Err(e) => {
+                eprintln!(
+                    "本机 services.toml 解析失败（{}）：{e}，回退 env/内置定义",
+                    local.display()
+                );
+                services()
+            }
+        };
+    }
+    services()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +192,28 @@ mod tests {
             def.ports
         );
         assert_eq!(def.ports, vec![8084, 8085]);
+    }
+
+    /// 回归：processNames 为可选字段（缺省为空），camelCase rename 下 TOML 能正确读取。
+    #[test]
+    fn service_config_parses_process_names() {
+        let cfg: ServiceConfig = toml::from_str(
+            r#"
+            [[services]]
+            id = "x"
+            name = "X"
+            kind = "tauri_app"
+            installDir = "/tmp/x"
+            runCmd = "x"
+            ports = []
+            logPaths = []
+            dependsOn = []
+            isDaemon = false
+            description = ""
+            processNames = ["x-app"]
+            "#,
+        )
+        .expect("解析 services TOML");
+        assert_eq!(cfg.services[0].process_names, vec!["x-app".to_string()]);
     }
 }

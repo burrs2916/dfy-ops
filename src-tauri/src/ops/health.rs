@@ -6,15 +6,32 @@ fn resolve(host: &str, port: u16) -> Option<SocketAddr> {
     (host, port).to_socket_addrs().ok()?.next()
 }
 
+/// host 是否为本机回环地址/别名。
+fn is_loopback_host(host: &str) -> bool {
+    host == "localhost" || host == "::1" || host.starts_with("127.")
+}
+
 /// TCP 端口探活。host 默认用 127.0.0.1。
+///
+/// 回环目标双栈探测：dev 服务器（如 `ng serve`）常只绑 IPv6 回环 `[::1]`，
+/// 此时 `127.0.0.1` 连接被拒——对回环地址把 127.0.0.1 与 ::1 都纳入候选，
+/// 任一栈可达即视为存活。
 pub fn check_tcp(host: &str, port: u16, timeout_ms: u64) -> bool {
-    let Some(addr) = resolve(host, port) else {
-        return false;
-    };
-    match TcpStream::connect_timeout(&addr, Duration::from_millis(timeout_ms)) {
-        Ok(_) => true,
-        Err(_) => false,
+    let mut addrs: Vec<SocketAddr> = resolve(host, port).into_iter().collect();
+    if is_loopback_host(host) {
+        for candidate in ["127.0.0.1", "::1"] {
+            if let Ok(iter) = (candidate, port).to_socket_addrs() {
+                for a in iter {
+                    if !addrs.contains(&a) {
+                        addrs.push(a);
+                    }
+                }
+            }
+        }
     }
+    addrs
+        .iter()
+        .any(|addr| TcpStream::connect_timeout(addr, Duration::from_millis(timeout_ms)).is_ok())
 }
 
 /// 从 URL 中解析 host:port（用于 HTTP 健康探测的地址）。
@@ -59,5 +76,29 @@ pub fn check_http(url: &str, timeout_ms: u64) -> bool {
             s.starts_with("HTTP/1") && !s.contains(" 503") && !s.contains(" 502")
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    /// 回归：回环探测必须覆盖 IPv6 栈——只绑 `[::1]` 的服务（如 `ng serve`），
+    /// 用 127.0.0.1 探测也必须能发现。
+    #[test]
+    fn check_tcp_detects_v6_only_loopback_listener() {
+        let listener = TcpListener::bind("[::1]:0").expect("绑定 [::1]:0");
+        let port = listener.local_addr().unwrap().port();
+        assert!(
+            check_tcp("127.0.0.1", port, 500),
+            "只绑 [::1] 的监听应被回环双栈探测发现"
+        );
+    }
+
+    #[test]
+    fn check_tcp_rejects_closed_loopback_port() {
+        // 回环 1 端口（tcpmux）在常规开发机上不会有服务
+        assert!(!check_tcp("127.0.0.1", 1, 200));
     }
 }

@@ -54,7 +54,8 @@ pub fn run() {
                 .config_dir()
                 .unwrap_or_else(|_| PathBuf::from("."));
             let state = Arc::new(AppState {
-                registry: registry::services(),
+                // 本机覆盖优先：config_dir/services.toml > DFY_OPS_SERVICES > 内置 Windows 部署默认
+                registry: registry::services_with_override(&config_dir),
                 procs: ProcManager::new(),
                 ai_models: Arc::new(Mutex::new(AiModelConfig::load(&config_dir))),
                 app_settings: Arc::new(Mutex::new(AppSettings::load(&config_dir))),

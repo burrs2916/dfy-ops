@@ -14,6 +14,7 @@ use crate::ops::environment;
 use crate::ops::health;
 use crate::ops::logs;
 use crate::ops::orchestrator;
+use crate::ops::process;
 use crate::ops::registry::{ServiceDef, ServiceKind};
 
 const PROBE_TIMEOUT_MS: u64 = 800;
@@ -22,8 +23,9 @@ const PROBE_TIMEOUT_MS: u64 = 800;
 ///
 /// - `managed`：由本平台启动，且 `ProcManager` 持有真实存活的进程句柄
 ///   （P1-4 已让 `is_running` 通过 `try_wait` 真实探活并回收僵尸）。
-/// - `detected`：本平台未拉起，但端口探测到在监听——服务由外部进程拉起，
-///   或历史遗留进程仍在跑。属于「在运行但不在我们掌控内」。
+/// - `detected`：本平台未拉起，但端口探测到在监听，或按 `processNames` 探测到
+///   本机进程（无端口桌面客户端的兜底通道）——服务由外部进程拉起或历史遗留。
+///   属于「在运行但不在我们掌控内」。
 /// - `down`：既无受管进程、端口也未监听。
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -89,14 +91,21 @@ pub struct ServiceStatus {
 }
 
 fn to_status(def: &ServiceDef, managed: bool) -> ServiceStatus {
-    // 端口探活（仅在有端口的服务上用于「外部运行」识别与 healthy 判定）
+    // 端口探活（用于「外部运行」识别与 healthy 判定；回环目标已兼容 IPv6 绑定）
     let port_up = def
         .ports
         .iter()
         .any(|p| health::check_tcp("127.0.0.1", *p, PROBE_TIMEOUT_MS));
+    // 进程兜底探测：无端口服务（Tauri 桌面客户端等）端口永远探不到，
+    // 未受管时按 processNames 查一次本机进程，避免「明明在跑却显示未运行」。
+    let proc_up = !managed
+        && def
+            .process_names
+            .iter()
+            .any(|n| process::process_alive(n));
     let run_state = if managed {
         RunState::Managed
-    } else if port_up {
+    } else if port_up || proc_up {
         RunState::Detected
     } else {
         RunState::Down

@@ -116,6 +116,38 @@ impl ProcManager {
     }
 }
 
+/// 本机是否存在命令行匹配给定名字的进程（全命令行 substring 匹配）。
+///
+/// 无端口服务（Tauri 桌面客户端等）无法靠端口探活，这是它们的「检测到在运行」兜底通道：
+/// Unix 用 `pgrep -f`（退出码 0 即命中），Windows 用 `tasklist` 过滤镜像名。
+/// Best-effort：命令执行失败一律视为未运行，不 panic、不阻塞调用方（调用方已在 blocking 池）。
+pub fn process_alive(name: &str) -> bool {
+    if name.trim().is_empty() {
+        return false;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        Command::new("tasklist")
+            .args(["/FI", &format!("IMAGENAME eq {name}"), "/NH", "/FO", "CSV"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains(name))
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Command::new("pgrep")
+            .args(["-f", name])
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| o.status.success() && !o.stdout.is_empty())
+            .unwrap_or(false)
+    }
+}
+
 /// install_dir 存在才作为子进程工作目录；不存在则不设置（兜底，避免 spawn 直接失败）。
 fn apply_cwd(command: &mut Command, install_dir: &str) {
     if std::path::Path::new(install_dir).is_dir() {

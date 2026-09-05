@@ -243,6 +243,7 @@ mod tests {
             // 两种结果本测试都能接受——断言只关心「哪些 id 被纳入启动」，不关心成败。
             run_cmd: "true".into(),
             ports: vec![],
+            process_names: vec![],
             health_url: None,
             log_paths: vec![],
             depends_on: vec![],

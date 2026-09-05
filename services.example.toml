@@ -1,7 +1,11 @@
 # DFY 运维平台 · 服务注册表示例
-# 复制为 services.toml 并按 Windows 实际部署路径修改，启动时设置环境变量：
-#   DFY_OPS_SERVICES=C:/path/to/services.toml
-# 未设置该变量时使用程序内置的默认定义。
+# 加载优先级：config_dir/services.toml（自动加载，本机覆盖） > DFY_OPS_SERVICES 环境变量 > 内置默认定义。
+#   环境变量方式：DFY_OPS_SERVICES=C:/path/to/services.toml
+#   本机覆盖方式：把本文件放到应用配置目录并改名 services.toml（macOS:
+#   ~/Library/Application Support/com.dfy.ops/，Windows: %APPDATA%/com.dfy.ops/）
+#
+# processNames：可选。本机存在命令行匹配该名字的进程时视为「外部运行」；
+# 用于无端口服务（Tauri 桌面客户端等）的检测兜底（Unix pgrep -f / Windows tasklist）。
 
 [[services]]
 id = "dfy-backend"
@@ -27,7 +31,7 @@ ports = [80]
 logPaths = ["C:/services/nginx/logs/access.log"]
 dependsOn = ["dfy-backend"]
 isDaemon = true
-description = "Vue3 管理后台，由 nginx 托管于 80 端口，反代 /api 到后端 8080。"
+description = "Vue3 管理后台，由 nginx 托管于 80 端口，反代 /api 到后端 48085。"
 
 [[services]]
 id = "gateway-console"
@@ -40,7 +44,7 @@ ports = [8081]
 logPaths = []
 dependsOn = []
 isDaemon = true
-description = "Angular 19 网关控制台，静态托管。"
+description = "Angular 19 网关控制台，静态托管。dev 机可用 ng serve（4200，绑定 [::1]），探测已兼容 IPv6 回环。"
 
 [[services]]
 id = "edge-conductor"
@@ -49,11 +53,12 @@ kind = "rust_bin"
 installDir = "C:/services/edge-conductor"
 buildCmd = "cargo build --release"
 runCmd = "C:/services/edge-conductor/target/release/edgecd-daemon --config C:/services/edge-conductor/config.toml"
-ports = [8084, 8085, 18830]
+ports = [8084, 8085]
+processNames = ["edgecd-daemon"]
 logPaths = ["C:/services/edge-conductor/logs"]
 dependsOn = ["dfy-backend"]
 isDaemon = true
-description = "边缘计算后端，端口 8084/8085/MQTT 18830，upstream 指向 DFY 后端 48085。"
+description = "边缘计算后端；8084/8085 为自身监听端口，外部依赖 MQTT 18830（VerneMQ broker）与上游 DFY 后端 48085。"
 
 [[services]]
 id = "biosphere-spatial"
@@ -63,7 +68,8 @@ installDir = "C:/services/biosphere-spatialdata-system"
 buildCmd = "pnpm tauri build"
 runCmd = "C:/services/biosphere-spatialdata-system/target/release/biosphere-spatialdata-system.exe"
 ports = []
+processNames = ["biosphere-spatialdata-system"]
 logPaths = []
 dependsOn = []
 isDaemon = false
-description = "空间数据系统桌面客户端；非常驻服务，按版本/安装/启动运维。"
+description = "空间数据系统桌面客户端；无端口，按进程名检测（非常驻，不参与批量启动）。"
