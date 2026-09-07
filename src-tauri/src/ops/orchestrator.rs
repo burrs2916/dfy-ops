@@ -246,6 +246,7 @@ mod tests {
             id: id.into(),
             name: id.into(),
             kind: ServiceKind::RustBin,
+            java_major: None,
             install_dir: ".".into(),
             build_cmd: None,
             // Unix 下 sh -c true 立即退出；Windows 下 cmd /C true 会 spawn 失败。

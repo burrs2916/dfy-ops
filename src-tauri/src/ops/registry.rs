@@ -56,6 +56,11 @@ pub struct ServiceDef {
     pub name: String,
     #[serde(rename = "kind")]
     pub kind: ServiceKind,
+    /// Java 运行时期望主版本（Vertx kind 的环境检查用）。None 时按 8 兜底。
+    /// 声明驱动：dfy-boot-base 按 JDK 8 编译（pom.xml java.version=1.8），期望值
+    /// 跟着项目走而不是硬编码在检查逻辑里。
+    #[serde(rename = "javaMajor", default)]
+    pub java_major: Option<u32>,
     #[serde(rename = "installDir")]
     pub install_dir: String,
     /// 可选构建命令（首次或更新后执行）
@@ -101,6 +106,7 @@ fn builtin() -> Vec<ServiceDef> {
             id: "dfy-backend".into(),
             name: "DFY 后端 (Vert.x)".into(),
             kind: ServiceKind::Vertx,
+            java_major: Some(8),
             install_dir: "C:/services/dfy-boot-base".into(),
             build_cmd: Some("mvn -q -DskipTests package".into()),
             run_cmd: "java -jar dfy-server/target/dfy-server.jar".into(),
@@ -111,13 +117,19 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec!["mysql".into(), "redis".into()],
             is_daemon: true,
             third_party: false,
-            requires: vec![],
-            description: "鼎飞益智后端服务（Java Vert.x），默认端口 48085；依赖 MySQL/Redis（独立注册的第三方服务）。".into(),
+            requires: vec![RequiresCheck {
+                id: "jar".into(),
+                label: "后端 JAR 产物".into(),
+                path: Some("dfy-server/target/dfy-server.jar".into()),
+                port: None,
+            }],
+            description: "鼎飞益智后端服务（Java Vert.x，JDK 8），默认端口 48085；依赖 MySQL/Redis（独立注册的第三方服务）。".into(),
         },
         ServiceDef {
             id: "dfy-ui".into(),
             name: "DFY 管理前端 (Vue3)".into(),
             kind: ServiceKind::VueSpa,
+            java_major: None,
             install_dir: "C:/services/dfy-ui-admin-vue3-master".into(),
             build_cmd: Some("pnpm build:prod".into()),
             run_cmd: "nginx -p C:/services/dfy-ui-admin-vue3-master -c nginx.conf".into(),
@@ -135,6 +147,7 @@ fn builtin() -> Vec<ServiceDef> {
             id: "gateway-console".into(),
             name: "Gateway Console (Angular)".into(),
             kind: ServiceKind::AngularSpa,
+            java_major: None,
             install_dir: "C:/services/gateway-console".into(),
             build_cmd: Some("npm run build:prod".into()),
             run_cmd: "nginx -p C:/services/gateway-console -c nginx.conf".into(),
@@ -152,6 +165,7 @@ fn builtin() -> Vec<ServiceDef> {
             id: "edge-conductor".into(),
             name: "Edge Conductor (Rust Axum)".into(),
             kind: ServiceKind::RustBin,
+            java_major: None,
             install_dir: "C:/services/edge-conductor".into(),
             build_cmd: Some("cargo build --release".into()),
             run_cmd:
@@ -175,6 +189,7 @@ fn builtin() -> Vec<ServiceDef> {
             id: "biosphere-spatial".into(),
             name: "Biosphere 空间系统 (Tauri)".into(),
             kind: ServiceKind::TauriApp,
+            java_major: None,
             install_dir: "C:/services/biosphere-spatialdata-system".into(),
             build_cmd: Some("pnpm tauri build".into()),
             run_cmd:
@@ -193,6 +208,7 @@ fn builtin() -> Vec<ServiceDef> {
             id: "vernemq".into(),
             name: "VerneMQ (MQTT)".into(),
             kind: ServiceKind::MqttBroker,
+            java_major: None,
             install_dir: "C:/services/vernemq".into(),
             build_cmd: None,
             run_cmd: String::new(),
@@ -213,6 +229,7 @@ fn builtin() -> Vec<ServiceDef> {
             id: "minio".into(),
             name: "MinIO (对象存储)".into(),
             kind: ServiceKind::ObjectStorage,
+            java_major: None,
             install_dir: "C:/services/minio".into(),
             build_cmd: None,
             run_cmd: String::new(),
@@ -230,6 +247,7 @@ fn builtin() -> Vec<ServiceDef> {
             id: "mysql".into(),
             name: "MySQL (业务库)".into(),
             kind: ServiceKind::Database,
+            java_major: None,
             install_dir: "C:/services/mysql".into(),
             build_cmd: None,
             run_cmd: String::new(),
@@ -247,6 +265,7 @@ fn builtin() -> Vec<ServiceDef> {
             id: "redis".into(),
             name: "Redis (缓存)".into(),
             kind: ServiceKind::Database,
+            java_major: None,
             install_dir: "C:/services/redis".into(),
             build_cmd: None,
             run_cmd: String::new(),

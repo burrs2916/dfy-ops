@@ -101,6 +101,17 @@ fn java_version_tuple(output: &str) -> Option<(u32, u32, u32)> {
     }
 }
 
+/// Java 运行时的修复命令：版本号来自服务声明（javaMajor），Windows 走 winget，
+/// 其他平台用 Temurin（Adoptium）。fix_hint 必须与声明期望一致——dfy-boot-base
+/// 按 JDK 8 编译，提示装 17 是错误引导（2026-09-07 修正）。
+fn java_fix_hint(major: u32) -> String {
+    if cfg!(target_os = "windows") {
+        format!("winget install -e --id Microsoft.OpenJDK.{major}   # 或访问 https://adoptium.net 安装 JDK {major}")
+    } else {
+        format!("brew install --cask temurin@{major}   # 或访问 https://adoptium.net 安装 JDK {major}")
+    }
+}
+
 /// 按检查项 id 返回修复建议；按当前平台生成（Windows 用 winget/choco，
 /// macOS 用 brew / 官方下载链接——dev 机上看到 winget 是噪音）。
 fn fix_hint_for(id: &str) -> String {
@@ -113,10 +124,7 @@ fn fix_hint_for(id: &str) -> String {
         }
     };
     match id {
-        "java" => by_platform(
-            "winget install -e --id Microsoft.OpenJDK.17   # 或访问 https://adoptium.net 安装 JRE 17",
-            "brew install --cask temurin@17   # 或访问 https://adoptium.net",
-        ),
+        "java" => java_fix_hint(8),
         "runtime-path" => by_platform(
             "托管部署：winget install -e --id nginx.nginx；dev 运行：从 https://nodejs.org 安装 Node.js",
             "托管部署：brew install nginx；dev 运行：brew install node",
@@ -214,36 +222,47 @@ pub fn check_service_env(def: &ServiceDef, states: &DepStates) -> ServiceEnvRepo
     // ===== 1. 运行时检查（kind 特有） =====
     match def.kind {
         ServiceKind::Vertx => {
-            // Java 运行时：探测并比对版本（期望 JRE 8+），运行中也照常检查。
+            // Java 运行时：期望版本声明驱动（ServiceDef.javaMajor，缺省 8），探测并比对。
+            // 低于声明版本 = class 文件无法加载，服务无法运行 → Fail；
+            // 高于声明版本（如 8+ 的 jar 跑在 17 上）兼容可运行 → Pass。
+            let expected_major = def.java_major.unwrap_or(8);
             let java = probe("java", &["-version"]);
             let it = match java {
                 None => item(
                     "java",
                     "Java 运行时",
                     "运行时",
-                    "JRE 8+",
+                    &format!("JDK {expected_major}+"),
                     "未检测到",
                     CheckStatus::Fail,
                 ),
                 Some(out) => {
-                    let status = match java_version_tuple(&out) {
-                        Some((major, _, _)) if major >= 8 => CheckStatus::Pass,
-                        Some(_) => CheckStatus::Warn,
+                    let parsed = java_version_tuple(&out);
+                    let status = match parsed {
+                        Some((major, _, _)) if major >= expected_major => CheckStatus::Pass,
+                        // 版本过低：无法加载目标字节码，启动必失败
+                        Some(_) => CheckStatus::Fail,
                         None => CheckStatus::Warn,
                     };
-                    let note = match java_version_tuple(&out) {
-                        Some((major, _, _)) if major >= 8 => "（满足 JRE 8+）",
-                        Some(_) => "（版本过低，需 JRE 8+）",
-                        None => "（无法解析版本号）",
+                    let note = match parsed {
+                        Some((major, _, _)) if major >= expected_major => {
+                            format!("（满足 JDK {expected_major}+）")
+                        }
+                        Some(_) => format!("（版本过低，无法运行 JDK {expected_major} 字节码）"),
+                        None => "（无法解析版本号）".to_string(),
                     };
-                    item(
+                    let mut it = item(
                         "java",
                         "Java 运行时",
                         "运行时",
-                        "JRE 8+",
+                        &format!("JDK {expected_major}+"),
                         &format!("{out}{note}"),
                         status,
-                    )
+                    );
+                    if it.status != CheckStatus::Pass {
+                        it.fix_hint = java_fix_hint(expected_major);
+                    }
+                    it
                 }
             };
             items.push(it);
@@ -485,13 +504,13 @@ mod tests {
     fn running_service_env_is_pass() {
         let st = states(&[
             ("dfy-ui", true, true, &[]),
-            ("gateway-console", true, true, &[4200]),
+            ("gateway-console", true, true, &[]),
             ("biosphere-spatial", true, true, &[]),
             ("dfy-backend", true, true, &[48085]),
             ("mysql", true, true, &[3306]),
             ("redis", true, true, &[6379]),
         ]);
-        for id in ["dfy-ui", "gateway-console", "biosphere-spatial", "dfy-backend"] {
+        for id in ["dfy-ui", "gateway-console", "biosphere-spatial"] {
             let def = def_of(id);
             let report = check_service_env(&def, &st);
             assert_eq!(
@@ -501,6 +520,53 @@ mod tests {
                 report.items
             );
         }
+    }
+
+    /// dfy-backend 声明了 JAR 产物检查与 JDK 8 期望（pom.xml java.version=1.8）。
+    /// jar 项按 requires 路径探测：内置 install_dir 是 Windows 部署路径，测试机上
+    /// 必然找不到 → 该项 Warn（带修复提示），但其余项（Java/依赖）必须全 Pass。
+    #[test]
+    fn dfy_backend_checks_jar_artifact_and_java8() {
+        let def = def_of("dfy-backend");
+        assert_eq!(def.java_major, Some(8), "dfy-backend 按 JDK 8 编译，期望值必须声明为 8");
+        assert!(def.requires.iter().any(|r| r.check_id() == "jar"), "必须声明 JAR 产物检查");
+
+        let st = states(&[
+            ("dfy-backend", false, false, &[]),
+            ("mysql", true, true, &[3306]),
+            ("redis", true, true, &[6379]),
+        ]);
+        let report = check_service_env(&def, &st);
+
+        // jar 项存在且非 Pass（产物不在内置 Windows 路径下）
+        let jar = report
+            .items
+            .iter()
+            .find(|i| i.id == "jar")
+            .expect("环境检查必须包含 jar 产物项");
+        assert_ne!(jar.status, CheckStatus::Pass);
+        assert!(!jar.fix_hint.is_empty(), "jar 缺失必须带修复提示");
+
+        // 除 jar 外不允许其他非 Pass（Java 版本、依赖检查都应通过）
+        let others: Vec<&CheckItem> = report
+            .items
+            .iter()
+            .filter(|i| i.id != "jar" && i.status != CheckStatus::Pass)
+            .collect();
+        assert!(
+            others.is_empty(),
+            "dfy-backend 除 jar 产物外不应有其他非 Pass 项: {:?}",
+            others
+        );
+    }
+
+    /// Java 版本低于声明期望（javaMajor）= 字节码无法加载 = Fail，修复提示指向 JDK 8。
+    /// 此前提示错误地引导安装 JRE 17（与 dfy-boot-base 的 JDK 8 目标冲突）。
+    #[test]
+    fn java_fix_hint_matches_declared_major() {
+        let hint = java_fix_hint(8);
+        assert!(hint.contains('8'), "修复提示应包含声明版本 8: {hint}");
+        assert!(!hint.contains("17"), "修复提示不得再引导安装 17: {hint}");
     }
 
     /// 依赖检查走 dependsOn + 实时状态视图：依赖未运行 → Fail（启动无意义）；
