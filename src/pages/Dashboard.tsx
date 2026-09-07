@@ -29,6 +29,8 @@ export default function Dashboard() {
   const { services, loading, error, refresh } = useOpsStore();
   const statusRefreshMs = useAppSettingsStore((s) => s.settings.statusRefreshSecs) * 1000;
   const envRefreshMs = useAppSettingsStore((s) => s.settings.envRefreshSecs) * 1000;
+  // 就绪度口径：桌面客户端是否占分母（「设置 → 通用」）
+  const desktopInReadiness = useAppSettingsStore((s) => s.settings.desktopInReadiness);
   const navigate = useNavigate();
   const [envMap, setEnvMap] = useState<Record<string, ServiceEnvReport>>({});
   const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" | "info" }>({
@@ -262,7 +264,7 @@ export default function Dashboard() {
         </Typography>
       </Box>
 
-      <ReadinessCard services={services} envMap={envMap} />
+      <ReadinessCard services={services} envMap={envMap} desktopInReadiness={desktopInReadiness} />
 
       {error && <Alert severity="error">{error}（请确认运维后端已在 127.0.0.1:18721 运行）</Alert>}
 

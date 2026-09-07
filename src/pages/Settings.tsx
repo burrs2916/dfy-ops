@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Divider, MenuItem, Paper, Select, Snackbar, Stack, Typography } from "@mui/material";
+import { Alert, Button, Divider, MenuItem, Paper, Select, Snackbar, Stack, Switch, Typography } from "@mui/material";
 import { Tune, Storage, Info } from "@mui/icons-material";
 import { api } from "../api";
 import { useAppSettingsStore } from "../store";
@@ -35,8 +35,12 @@ export default function Settings() {
     try {
       const r = await api.saveAppSettings(draft);
       if (r.ok) {
-        apply({ statusRefreshSecs: draft.statusRefreshSecs, envRefreshSecs: draft.envRefreshSecs });
-        setSnack({ open: true, msg: "已保存，刷新间隔立即生效", severity: "success" });
+        apply({
+          statusRefreshSecs: draft.statusRefreshSecs,
+          envRefreshSecs: draft.envRefreshSecs,
+          desktopInReadiness: draft.desktopInReadiness,
+        });
+        setSnack({ open: true, msg: "已保存，立即生效", severity: "success" });
       } else {
         setSnack({ open: true, msg: "保存失败：" + (r.error ?? "未知错误"), severity: "error" });
       }
@@ -58,7 +62,8 @@ export default function Settings() {
 
   const dirty =
     draft.statusRefreshSecs !== settings.statusRefreshSecs ||
-    draft.envRefreshSecs !== settings.envRefreshSecs;
+    draft.envRefreshSecs !== settings.envRefreshSecs ||
+    draft.desktopInReadiness !== settings.desktopInReadiness;
 
   return (
     <>
@@ -70,7 +75,7 @@ export default function Settings() {
             icon: <Tune />,
             label: "通用",
             title: "通用",
-            description: "实时刷新行为。保存后立即生效，无需重启。",
+            description: "实时刷新行为与就绪度统计口径。保存后立即生效，无需重启。",
             content: (
               <>
                 <Paper variant="outlined" sx={{ overflow: "hidden" }}>
@@ -108,6 +113,16 @@ export default function Settings() {
                         </MenuItem>
                       ))}
                     </Select>
+                  </SettingRow>
+                  <Divider />
+                  <SettingRow
+                    label="桌面客户端计入就绪度"
+                    description="桌面客户端（isDaemon=false）按 GUI 语义按需打开，默认不占「部署就绪度」分母。打开后，未运行也会拉低分数；关闭时仍会在就绪度卡片里常驻显示在线率"
+                  >
+                    <Switch
+                      checked={draft.desktopInReadiness}
+                      onChange={(e) => setDraft((d) => ({ ...d, desktopInReadiness: e.target.checked }))}
+                    />
                   </SettingRow>
                 </Paper>
                 {dirty && (

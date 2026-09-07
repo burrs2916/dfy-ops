@@ -6,28 +6,32 @@ type Tone = "success" | "warning" | "error";
 /**
  * 部署就绪度卡片。
  *
- * 就绪度 = 常驻服务（自研 + 第三方依赖）中「运行且健康且环境满足」的占比（用户决策：并入总数）。
+ * 就绪度 = 参与统计的服务中「运行且健康且环境满足」的占比。
  * 设计要点：
  *  - 总百分比 + 分段进度条：自研段（深）与第三方段（浅）分色，挂了哪类一眼可见；
  *  - 文案拆解 6/6 = 自研 4/4 + 第三方 2/2，不再给一个看不出构成的裸数字；
- *  - 桌面客户端（isDaemon=false）不参与就绪度，仅在 >0 时展示；
- *  - 未就绪列表标注「第三方」来源，避免误以为自研服务出问题。
+ *  - 桌面客户端（isDaemon=false）默认不占分母（GUI 按需打开，常年不在线属常态），
+ *    可在「设置 → 通用」打开 `desktopInReadiness` 让它参与；
+ *  - 无论是否计入，桌面客户端都有一块**常驻**区域显示在线明细——此前它挂在
+ *    notReady 分支里，常驻服务全就绪时就整块消失，状态变成隐形。
  */
 export default function ReadinessCard({
   services,
   envMap,
+  desktopInReadiness = false,
 }: {
   services: ServiceStatus[];
   envMap: Record<string, ServiceEnvReport>;
+  /** 「设置 → 通用」开关：桌面客户端是否计入就绪度分母。 */
+  desktopInReadiness?: boolean;
 }) {
-  const managed = services.filter((s) => s.isDaemon);
+  // 分母口径：默认只收常驻服务；开关打开后桌面客户端（非 daemon）也进来。
+  const managed = desktopInReadiness ? services : services.filter((s) => s.isDaemon);
   const own = managed.filter((s) => !s.thirdParty);
   const third = managed.filter((s) => s.thirdParty);
   const desktops = services.filter((s) => !s.isDaemon);
   const desktopCount = desktops.length;
   const desktopRunning = desktops.filter((s) => s.running).length;
-  /// 未运行的桌面客户端：不参与就绪度，但在未就绪区展示去向，避免「明明有两个未运行怎么只扣一个」的困惑。
-  const desktopsDown = desktops.filter((s) => !s.running);
   const total = managed.length;
 
   const isReady = (s: ServiceStatus) => {
@@ -85,13 +89,6 @@ export default function ReadinessCard({
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
           <Chip size="small" color="success" variant="outlined" label={`运行健康 ${runningHealthy}/${total}`} />
           <Chip size="small" color="info" variant="outlined" label={`环境满足 ${envPass}/${total}`} />
-          {desktopCount > 0 && (
-            <Chip
-              size="small"
-              variant="outlined"
-              label={`桌面客户端 ${desktopRunning}/${desktopCount} 在线 · 不参与就绪度`}
-            />
-          )}
         </Stack>
       </Stack>
 
@@ -133,6 +130,36 @@ export default function ReadinessCard({
           {pct}%
         </Typography>
       </Stack>
+
+      {/* 桌面客户端：独立常驻区块——不占分母也要让用户看见在线与否 */}
+      {desktopCount > 0 && (
+        <Box sx={{ mt: 2 }}>
+          <Typography variant="caption" color="text.secondary">
+            桌面客户端 {desktopRunning}/{desktopCount} 在线 ·{" "}
+            {desktopInReadiness ? "已计入上方就绪度" : "不占分母，未运行不扣分（设置 → 通用可切换）"}
+          </Typography>
+          <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
+            {desktops.map((s) => (
+              <Stack key={s.id} direction="row" spacing={0.75} alignItems="center">
+                <Box
+                  sx={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    bgcolor: s.running ? "success.main" : "grey.400",
+                    flexShrink: 0,
+                  }}
+                />
+                <Typography variant="caption">{s.name}</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {s.running ? "在线" : "未运行"}
+                </Typography>
+              </Stack>
+            ))}
+          </Stack>
+        </Box>
+      )}
+
       {notReady.length > 0 && (
         <Box sx={{ mt: 2 }}>
           <Typography variant="caption" color="text.secondary">
@@ -145,16 +172,6 @@ export default function ReadinessCard({
                 size="small"
                 color={n.reason === "环境缺失" || n.reason === "未运行" ? "error" : "warning"}
                 label={`${n.name}${n.third ? "（第三方）" : ""} · ${n.reason}`}
-              />
-            ))}
-            {/* 未运行的桌面客户端：灰色 Chip 列出「去向」，说明它们不扣分的原因 */}
-            {desktopsDown.map((s) => (
-              <Chip
-                key={s.id}
-                size="small"
-                variant="outlined"
-                color="default"
-                label={`${s.name}（桌面客户端）· 未运行，不计入`}
               />
             ))}
           </Stack>
