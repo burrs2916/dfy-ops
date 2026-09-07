@@ -458,9 +458,6 @@ pub struct AppSettingsInput {
     status_refresh_secs: u64,
     #[serde(rename = "envRefreshSecs")]
     env_refresh_secs: u64,
-    /// 桌面客户端是否计入就绪度分母。缺省 false——老前端（未传该字段）保持原口径。
-    #[serde(rename = "desktopInReadiness", default)]
-    desktop_in_readiness: bool,
 }
 
 /// 读取应用设置。
@@ -478,7 +475,6 @@ pub async fn save_app_settings(
     let mut s = state.app_settings.lock().unwrap().clone();
     s.status_refresh_secs = body.status_refresh_secs;
     s.env_refresh_secs = body.env_refresh_secs;
-    s.desktop_in_readiness = body.desktop_in_readiness;
     s.sanitize();
     let config_dir = state.config_dir.clone();
     let result = blocking(move || match s.save(&config_dir) {
@@ -493,7 +489,6 @@ pub async fn save_app_settings(
                 "ok": true,
                 "statusRefreshSecs": s.status_refresh_secs,
                 "envRefreshSecs": s.env_refresh_secs,
-                "desktopInReadiness": s.desktop_in_readiness,
             }))
         }
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })),

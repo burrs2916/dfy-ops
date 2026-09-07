@@ -34,11 +34,10 @@ interface AppSettingsState {
   apply: (s: AppSettings) => void;
 }
 
-/** 默认值：后端未持久化过、或返回的 JSON 缺少新字段（老版本二进制/手改配置）时兜底。 */
+/** 默认值：后端未持久化过、或返回的 JSON 缺少字段（老版本二进制/手改配置）时兜底。 */
 const DEFAULT_APP_SETTINGS: AppSettings = {
   statusRefreshSecs: 5,
   envRefreshSecs: 15,
-  desktopInReadiness: false,
 };
 
 /** 应用设置全局状态：App 挂载时加载一次，设置页保存后经 apply 热更新（轮询间隔立即生效）。 */

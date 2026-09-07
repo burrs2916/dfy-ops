@@ -6,27 +6,24 @@ type Tone = "success" | "warning" | "error";
 /**
  * 部署就绪度卡片。
  *
- * 就绪度 = 参与统计的服务中「运行且健康且环境满足」的占比。
+ * 就绪度 = 全部服务（含桌面客户端）中「运行且健康且环境满足」的占比。
  * 设计要点：
+ *  - 桌面客户端（isDaemon=false，如 Tauri GUI）直接计入分母——它就是被运维的
+ *    服务之一，未运行就拉低分数，与其他服务平等处理；
  *  - 总百分比 + 分段进度条：自研段（深）与第三方段（浅）分色，挂了哪类一眼可见；
- *  - 文案拆解 6/6 = 自研 4/4 + 第三方 2/2，不再给一个看不出构成的裸数字；
- *  - 桌面客户端（isDaemon=false）默认不占分母（GUI 按需打开，常年不在线属常态），
- *    可在「设置 → 通用」打开 `desktopInReadiness` 让它参与；
- *  - 无论是否计入，桌面客户端都有一块**常驻**区域显示在线明细——此前它挂在
- *    notReady 分支里，常驻服务全就绪时就整块消失，状态变成隐形。
+ *  - 文案拆解 n/n = 自研 x/y + 第三方 z/w，不再给一个看不出构成的裸数字；
+ *  - 桌面客户端有一块**常驻**区域，用彩色圆点显示每个客户端的在线/未运行——
+ *    一眼看清 GUI 客户端的实时状态，不必去翻服务卡。
  */
 export default function ReadinessCard({
   services,
   envMap,
-  desktopInReadiness = false,
 }: {
   services: ServiceStatus[];
   envMap: Record<string, ServiceEnvReport>;
-  /** 「设置 → 通用」开关：桌面客户端是否计入就绪度分母。 */
-  desktopInReadiness?: boolean;
 }) {
-  // 分母口径：默认只收常驻服务；开关打开后桌面客户端（非 daemon）也进来。
-  const managed = desktopInReadiness ? services : services.filter((s) => s.isDaemon);
+  // 全部服务计入分母（桌面客户端平等参与）。
+  const managed = services;
   const own = managed.filter((s) => !s.thirdParty);
   const third = managed.filter((s) => s.thirdParty);
   const desktops = services.filter((s) => !s.isDaemon);
@@ -131,12 +128,11 @@ export default function ReadinessCard({
         </Typography>
       </Stack>
 
-      {/* 桌面客户端：独立常驻区块——不占分母也要让用户看见在线与否 */}
+      {/* 桌面客户端：常驻区域，彩色圆点显示每个客户端在线/未运行 */}
       {desktopCount > 0 && (
         <Box sx={{ mt: 2 }}>
           <Typography variant="caption" color="text.secondary">
-            桌面客户端 {desktopRunning}/{desktopCount} 在线 ·{" "}
-            {desktopInReadiness ? "已计入上方就绪度" : "不占分母，未运行不扣分（设置 → 通用可切换）"}
+            桌面客户端 {desktopRunning}/{desktopCount} 在线
           </Typography>
           <Stack direction="row" spacing={2} flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
             {desktops.map((s) => (

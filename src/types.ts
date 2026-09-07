@@ -131,6 +131,4 @@ export interface AiTestResult {
 export interface AppSettings {
   statusRefreshSecs: number;
   envRefreshSecs: number;
-  /** 桌面客户端（isDaemon=false）是否计入「部署就绪度」分母；false=不计入（默认，按 GUI 客户端按需打开的语义） */
-  desktopInReadiness: boolean;
 }

@@ -85,7 +85,6 @@ export const api = {
       ok: boolean;
       statusRefreshSecs?: number;
       envRefreshSecs?: number;
-      desktopInReadiness?: boolean;
       error?: string;
     }>("/api/settings/app", {
       method: "POST",

@@ -10,13 +10,6 @@ pub struct AppSettings {
     pub status_refresh_secs: u64,
     /// 运维中心环境复探间隔（秒）。
     pub env_refresh_secs: u64,
-    /// 桌面客户端（`isDaemon = false`，如 Tauri GUI）是否计入「部署就绪度」分母。
-    ///
-    /// 默认 false：桌面客户端按需打开，常年未运行属常态，让它占分母会让就绪度
-    /// 永远到不了 100%。用户在「设置 → 通用」里可以主动打开，让未运行的桌面
-    /// 客户端也拉低就绪度。注意这只是展示口径的开关，不影响 `diagnosis` 是否
-    /// 产出发现项（那一层固定跳过非 daemon 服务）。
-    pub desktop_in_readiness: bool,
 }
 
 impl Default for AppSettings {
@@ -24,7 +17,6 @@ impl Default for AppSettings {
         Self {
             status_refresh_secs: 5,
             env_refresh_secs: 15,
-            desktop_in_readiness: false,
         }
     }
 }

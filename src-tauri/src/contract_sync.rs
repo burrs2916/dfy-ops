@@ -199,8 +199,6 @@ fn app_settings_contract() {
     let s = AppSettings::default();
     assert_keys(
         &serde_json::to_value(&s).unwrap(),
-        &["statusRefreshSecs", "envRefreshSecs", "desktopInReadiness"],
+        &["statusRefreshSecs", "envRefreshSecs"],
     );
-    // 缺省口径：桌面客户端不计入就绪度（设置页可打开）
-    assert_eq!(s.desktop_in_readiness, false);
 }
