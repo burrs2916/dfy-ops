@@ -61,6 +61,11 @@ pub struct ServiceDef {
     /// 跟着项目走而不是硬编码在检查逻辑里。
     #[serde(rename = "javaMajor", default)]
     pub java_major: Option<u32>,
+    /// 预置 JRE 相对路径（相对启动 exe 所在目录，如 "resource/jre"）。
+    /// 声明了即走「绿色交付」模式：检测与启动（{java} 占位符）都用预置 JRE，
+    /// 免安装、不改系统环境变量；None 时回退 PATH java（dev 机语义）。
+    #[serde(rename = "javaHome", default)]
+    pub java_home: Option<String>,
     #[serde(rename = "installDir")]
     pub install_dir: String,
     /// 可选构建命令（首次或更新后执行）
@@ -107,9 +112,10 @@ fn builtin() -> Vec<ServiceDef> {
             name: "DFY 后端 (Vert.x)".into(),
             kind: ServiceKind::Vertx,
             java_major: Some(8),
+            java_home: Some("resource/jre".into()),
             install_dir: "C:/services/dfy-boot-base".into(),
             build_cmd: Some("mvn -q -DskipTests package".into()),
-            run_cmd: "java -jar dfy-server/target/dfy-server.jar".into(),
+            run_cmd: "{java} -jar dfy-server/target/dfy-server.jar".into(),
             ports: vec![48085],
             process_names: vec![],
             health_url: None,
@@ -130,6 +136,7 @@ fn builtin() -> Vec<ServiceDef> {
             name: "DFY 管理前端 (Vue3)".into(),
             kind: ServiceKind::VueSpa,
             java_major: None,
+            java_home: None,
             install_dir: "C:/services/dfy-ui-admin-vue3-master".into(),
             build_cmd: Some("pnpm build:prod".into()),
             run_cmd: "nginx -p C:/services/dfy-ui-admin-vue3-master -c nginx.conf".into(),
@@ -148,6 +155,7 @@ fn builtin() -> Vec<ServiceDef> {
             name: "Gateway Console (Angular)".into(),
             kind: ServiceKind::AngularSpa,
             java_major: None,
+            java_home: None,
             install_dir: "C:/services/gateway-console".into(),
             build_cmd: Some("npm run build:prod".into()),
             run_cmd: "nginx -p C:/services/gateway-console -c nginx.conf".into(),
@@ -166,6 +174,7 @@ fn builtin() -> Vec<ServiceDef> {
             name: "Edge Conductor (Rust Axum)".into(),
             kind: ServiceKind::RustBin,
             java_major: None,
+            java_home: None,
             install_dir: "C:/services/edge-conductor".into(),
             build_cmd: Some("cargo build --release".into()),
             run_cmd:
@@ -190,6 +199,7 @@ fn builtin() -> Vec<ServiceDef> {
             name: "Biosphere 空间系统 (Tauri)".into(),
             kind: ServiceKind::TauriApp,
             java_major: None,
+            java_home: None,
             install_dir: "C:/services/biosphere-spatialdata-system".into(),
             build_cmd: Some("pnpm tauri build".into()),
             run_cmd:
@@ -209,6 +219,7 @@ fn builtin() -> Vec<ServiceDef> {
             name: "VerneMQ (MQTT)".into(),
             kind: ServiceKind::MqttBroker,
             java_major: None,
+            java_home: None,
             install_dir: "C:/services/vernemq".into(),
             build_cmd: None,
             run_cmd: String::new(),
@@ -230,6 +241,7 @@ fn builtin() -> Vec<ServiceDef> {
             name: "MinIO (对象存储)".into(),
             kind: ServiceKind::ObjectStorage,
             java_major: None,
+            java_home: None,
             install_dir: "C:/services/minio".into(),
             build_cmd: None,
             run_cmd: String::new(),
@@ -248,6 +260,7 @@ fn builtin() -> Vec<ServiceDef> {
             name: "MySQL (业务库)".into(),
             kind: ServiceKind::Database,
             java_major: None,
+            java_home: None,
             install_dir: "C:/services/mysql".into(),
             build_cmd: None,
             run_cmd: String::new(),
@@ -266,6 +279,7 @@ fn builtin() -> Vec<ServiceDef> {
             name: "Redis (缓存)".into(),
             kind: ServiceKind::Database,
             java_major: None,
+            java_home: None,
             install_dir: "C:/services/redis".into(),
             build_cmd: None,
             run_cmd: String::new(),

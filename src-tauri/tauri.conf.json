@@ -20,13 +20,15 @@
         "resizable": true
       }
     ],
-      "security": {
-        "csp": "default-src 'self'; connect-src 'self' http://localhost:18721 http://127.0.0.1:18721 ws://localhost:18721 ws://127.0.0.1:18721; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
-      }
+    "security": {
+      "csp": "default-src 'self'; connect-src 'self' http://localhost:18721 http://127.0.0.1:18721 ws://localhost:18721 ws://127.0.0.1:18721; img-src 'self' data:; style-src 'self' 'unsafe-inline'"
+    }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
+    "targets": [
+      "nsis"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -41,6 +43,9 @@
       }
     },
     "shortDescription": "DFY运维平台",
-    "longDescription": "统一管理 DFY 系列异构服务的智能运维控制台"
+    "longDescription": "统一管理 DFY 系列异构服务的智能运维控制台",
+    "resources": [
+      "resource/jre/**/*"
+    ]
   }
 }

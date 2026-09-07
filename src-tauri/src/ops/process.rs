@@ -1,8 +1,40 @@
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
+
+/// 预置 JRE 的 home 目录：**启动 exe 同级**下的相对路径（绿色交付，
+/// 免安装、不改系统环境变量）。在哪里启动，对应的目录就是哪里。
+/// `relative` 来自 ServiceDef.javaHome 声明（如 "resource/jre"）。
+/// 找不到返回 None（dev 机没有预置 → 调用方回退 PATH java）。
+pub fn bundled_java_home(relative: &str) -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+    let home = dir.join(relative);
+    home.is_dir().then_some(home)
+}
+
+/// run_cmd 中 `{java}` 占位符解析：优先预置 JRE 的 java 绝对路径，
+/// 预置缺失回退 `java`（PATH 语义，dev 机开发不受影响）。
+/// 检测（environment.rs）与启动（这里）使用同一解析，保证同源。
+pub fn resolve_java_placeholder(cmd: &str) -> String {
+    if !cmd.contains("{java}") {
+        return cmd.to_string();
+    }
+    let java = bundled_java_home("resource/jre")
+        .and_then(|home| {
+            let bin = if cfg!(target_os = "windows") {
+                home.join("bin").join("java.exe")
+            } else {
+                home.join("bin").join("java")
+            };
+            bin.exists().then(|| bin.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| "java".to_string());
+    cmd.replace("{java}", &java)
+}
 
 /// 进程管理器：以 shell 启动本地服务，并记录子进程句柄以便停止。
 pub struct ProcManager {
@@ -73,12 +105,15 @@ impl ProcManager {
 
     /// 启动服务（若已在运行则忽略）。run_cmd 以系统 shell 执行，
     /// 工作目录为 install_dir（相对路径命令如 `java -jar dfy-server/target/xxx.jar` 依赖它）。
+    /// `{java}` 占位符在此统一解析为预置 JRE（exe 同级 resource/jre）——
+    /// 检测与启动同源，绿色交付免安装。
     pub fn start(&self, id: &str, install_dir: &str, run_cmd: &str) -> std::io::Result<()> {
         let mut map = self.children.lock().unwrap();
         if map.contains_key(id) {
             return Ok(());
         }
-        let child = spawn_detached(install_dir, run_cmd)?;
+        let resolved = resolve_java_placeholder(run_cmd);
+        let child = spawn_detached(install_dir, &resolved)?;
         map.insert(id.to_string(), child);
         // 显式启动解除保活抑制；并记录「平台拉起过」供看门狗接管
         self.suppressed.lock().unwrap().remove(id);

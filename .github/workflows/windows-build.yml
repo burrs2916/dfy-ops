@@ -89,6 +89,21 @@ jobs:
       - name: Build frontend (dist)
         run: pnpm build
 
+      # 绿色交付：内置 JRE 随安装包分发（免安装、免系统环境变量）。
+      # 下载 Adoptium Temurin 8 JRE 解压到 src-tauri/resource/jre，
+      # tauri bundle.resources 会把它打进安装包，装到 exe 同级目录。
+      - name: Bundle Temurin 8 JRE (resource/jre)
+        shell: pwsh
+        run: |
+          $dest = "src-tauri/resource/jre"
+          Invoke-WebRequest -Uri "https://api.adoptium.net/v3/binary/latest/8/ga/windows/x64/jre/hotspot/normal/eclipse" -OutFile "$env:RUNNER_TEMP/jre.zip"
+          Expand-Archive -Path "$env:RUNNER_TEMP/jre.zip" -DestinationPath "$env:RUNNER_TEMP/jre" -Force
+          $root = (Get-ChildItem "$env:RUNNER_TEMP/jre" | Select-Object -First 1).FullName
+          Remove-Item -Recurse -Force $dest -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          Copy-Item "$root/*" $dest -Recurse -Force
+          Write-Host "resource/jre 顶层内容：" (Get-ChildItem $dest | Select-Object -ExpandProperty Name)
+
       - name: Build Tauri (NSIS installer)
         run: pnpm tauri build
 

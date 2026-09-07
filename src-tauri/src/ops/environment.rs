@@ -175,6 +175,74 @@ fn tcp_ok(port: u16) -> bool {
     health::check_tcp("127.0.0.1", port, 800)
 }
 
+/// PATH java 检测（未声明预置 JRE 的服务走这条，dev 机语义）：
+/// 第一事实 = PATH 上的 java（run_cmd 实际执行者）；不达标时盘点本机
+/// 已装 JDK，区分「配置修复」与「需要安装」（/api/env/repair 自动安装兜底）。
+fn push_path_java_check(items: &mut Vec<CheckItem>, expected_major: u32) {
+    let java = probe("java", &["-version"]);
+    let path_ok = matches!(
+        java.as_deref().and_then(java_version_tuple),
+        Some((major, _, _)) if major >= expected_major
+    );
+    let it = if path_ok {
+        let out = java.unwrap();
+        item(
+            "java",
+            "Java 运行时",
+            "运行时",
+            &format!("JDK {expected_major}+"),
+            &format!("{}（满足 JDK {expected_major}+）", out.trim()),
+            CheckStatus::Pass,
+        )
+    } else {
+        let installs = crate::ops::env_repair::installed_jdks();
+        let compatible = installs
+            .iter()
+            .filter(|j| j.major() >= expected_major)
+            .max_by_key(|j| j.version);
+        let (actual, hint) = match (java.as_deref(), compatible) {
+            (_, Some(j)) => (
+                format!(
+                    "PATH 中 java 不可用或版本过低（{}）；本机已有达标 JDK：{}（{}）",
+                    java.as_deref().map(str::trim).unwrap_or("未检测到"),
+                    j.home,
+                    j.version_label()
+                ),
+                format!(
+                    "无需安装：将 {} 的 bin 目录加入 PATH（或设为 JAVA_HOME）后重试",
+                    j.home
+                ),
+            ),
+            (Some(out), None) => (
+                format!(
+                    "{}（版本过低）；本机未安装其他 JDK {expected_major}+ 运行时",
+                    out.trim()
+                ),
+                format!(
+                    "可通过「一键修复」自动安装 Eclipse Temurin {expected_major} JRE（MSI 静默安装并配置 JAVA_HOME/PATH，需管理员确认）"
+                ),
+            ),
+            (None, None) => (
+                format!("未检测到 java；本机未安装 JDK {expected_major}+ 运行时"),
+                format!(
+                    "可通过「一键修复」自动安装 Eclipse Temurin {expected_major} JRE（MSI 静默安装并配置 JAVA_HOME/PATH，需管理员确认）"
+                ),
+            ),
+        };
+        let mut it = item(
+            "java",
+            "Java 运行时",
+            "运行时",
+            &format!("JDK {expected_major}+"),
+            &actual,
+            CheckStatus::Fail,
+        );
+        it.fix_hint = hint;
+        it
+    };
+    items.push(it);
+}
+
 /// 探测 PATH 上 java 的版本。修复决策链的第一事实：服务由 `run_cmd` 启动，
 /// 用的就是 PATH 上的 java，达标与否以它为准。
 pub fn probe_java_version() -> Option<(u32, u32, u32)> {
@@ -229,72 +297,90 @@ pub fn check_service_env(def: &ServiceDef, states: &DepStates) -> ServiceEnvRepo
     match def.kind {
         ServiceKind::Vertx => {
             // Java 运行时：期望版本声明驱动（ServiceDef.javaMajor，缺省 8）。
-            // 第一事实 = PATH 上的 java（run_cmd 实际执行者）；不达标时盘点本机
-            // 已装 JDK，区分「配置修复」（有达标 JDK，指引设 PATH/JAVA_HOME）
-            // 与「需要安装」（纯净机，走 /api/env/repair 自动安装）。
+            // 分流（绿色交付模型）：
+            // - 声明了 javaHome（预置 JRE，exe 同级 resource 目录）→ 检测预置：
+            //   检测与启动（{java} 占位符）同源，免安装、不依赖系统环境；
+            //   预置缺失 = 交付不完整 → Fail，修复 = 恢复目录（离线可用）。
+            // - 未声明（dev 机）→ 检测 PATH java，不达标时盘点本机已装 JDK，
+            //   区分「配置修复」与「需要安装」（/api/env/repair 自动安装兜底）。
             let expected_major = def.java_major.unwrap_or(8);
-            let java = probe("java", &["-version"]);
-            let path_ok = matches!(
-                java.as_deref().and_then(java_version_tuple),
-                Some((major, _, _)) if major >= expected_major
-            );
-            let it = if path_ok {
-                let out = java.unwrap();
-                item(
-                    "java",
-                    "Java 运行时",
-                    "运行时",
-                    &format!("JDK {expected_major}+"),
-                    &format!("{}（满足 JDK {expected_major}+）", out.trim()),
-                    CheckStatus::Pass,
-                )
-            } else {
-                let installs = crate::ops::env_repair::installed_jdks();
-                let compatible = installs
-                    .iter()
-                    .filter(|j| j.major() >= expected_major)
-                    .max_by_key(|j| j.version);
-                let (actual, hint) = match (java.as_deref(), compatible) {
-                    (_, Some(j)) => (
-                        format!(
-                            "PATH 中 java 不可用或版本过低（{}）；本机已有达标 JDK：{}（{}）",
-                            java.as_deref().map(str::trim).unwrap_or("未检测到"),
-                            j.home,
-                            j.version_label()
-                        ),
-                        format!(
-                            "无需安装：将 {} 的 bin 目录加入 PATH（或设为 JAVA_HOME）后重试",
-                            j.home
-                        ),
-                    ),
-                    (Some(out), None) => (
-                        format!(
-                            "{}（版本过低）；本机未安装其他 JDK {expected_major}+ 运行时",
-                            out.trim()
-                        ),
-                        format!(
-                            "可通过「一键修复」自动安装 Eclipse Temurin {expected_major} JRE（MSI 静默安装并配置 JAVA_HOME/PATH，需管理员确认）"
-                        ),
-                    ),
-                    (None, None) => (
-                        format!("未检测到 java；本机未安装 JDK {expected_major}+ 运行时"),
-                        format!(
-                            "可通过「一键修复」自动安装 Eclipse Temurin {expected_major} JRE（MSI 静默安装并配置 JAVA_HOME/PATH，需管理员确认）"
-                        ),
-                    ),
+            if let Some(rel) = &def.java_home {
+                let home = crate::ops::process::bundled_java_home(rel);
+                let it = match &home {
+                    Some(home) => {
+                        let bin = if cfg!(target_os = "windows") {
+                            home.join("bin").join("java.exe")
+                        } else {
+                            home.join("bin").join("java")
+                        };
+                        let version = probe(
+                            bin.to_string_lossy().as_ref(),
+                            &["-version"],
+                        )
+                        .as_deref()
+                        .and_then(java_version_tuple);
+                        match version {
+                            Some((major, minor, patch)) if major >= expected_major => item(
+                                "java",
+                                "Java 运行时（预置 JRE）",
+                                "运行时",
+                                &format!("JDK {expected_major}+"),
+                                &format!(
+                                    "内置 JRE {}.{}.{}（{}）随程序交付，免安装",
+                                    major, minor, patch,
+                                    home.display()
+                                ),
+                                CheckStatus::Pass,
+                            ),
+                            Some((major, _, _)) => {
+                                let mut it = item(
+                                    "java",
+                                    "Java 运行时（预置 JRE）",
+                                    "运行时",
+                                    &format!("JDK {expected_major}+"),
+                                    &format!(
+                                        "内置 JRE 版本 {} 低于期望 JDK {expected_major}+（交付包错误）",
+                                        major
+                                    ),
+                                    CheckStatus::Fail,
+                                );
+                                it.fix_hint =
+                                    "交付包内置 JRE 版本不符，请更换交付包中的 resource/jre 目录".into();
+                                it
+                            }
+                            None => {
+                                let mut it = item(
+                                    "java",
+                                    "Java 运行时（预置 JRE）",
+                                    "运行时",
+                                    &format!("JDK {expected_major}+"),
+                                    &format!("内置 java 无法执行（{}）", home.display()),
+                                    CheckStatus::Fail,
+                                );
+                                it.fix_hint = "内置 JRE 损坏，请恢复交付包中的 resource/jre 目录".into();
+                                it
+                            }
+                        }
+                    }
+                    None => {
+                        let mut it = item(
+                            "java",
+                            "Java 运行时（预置 JRE）",
+                            "运行时",
+                            &format!("JDK {expected_major}+"),
+                            &format!("预置 JRE 缺失（程序同级 {} 目录不存在）", rel),
+                            CheckStatus::Fail,
+                        );
+                        it.fix_hint = format!(
+                            "免安装部署：将交付包中的 {rel} 目录（含内置 JRE）恢复到程序同级目录即可，无需安装"
+                        );
+                        it
+                    }
                 };
-                let mut it = item(
-                    "java",
-                    "Java 运行时",
-                    "运行时",
-                    &format!("JDK {expected_major}+"),
-                    &actual,
-                    CheckStatus::Fail,
-                );
-                it.fix_hint = hint;
-                it
-            };
-            items.push(it);
+                items.push(it);
+            } else {
+                push_path_java_check(&mut items, expected_major);
+            }
         }
         ServiceKind::VueSpa | ServiceKind::AngularSpa => {
             // 前端不预设部署形态：未运行时检查可行运行路径（nginx 或 Node 任一可用）；
@@ -554,12 +640,24 @@ mod tests {
     /// dfy-backend 声明了 JAR 产物检查与 JDK 8 期望（pom.xml java.version=1.8）。
     /// jar 项按 requires 路径探测：内置 install_dir 是 Windows 部署路径，测试机上
     /// 必然找不到 → 该项 Warn（带修复提示），但其余项（Java/依赖）必须全 Pass。
+    /// （mutate 掉 javaHome 声明 → 走 PATH 检测分支，dev/CI 机的 java 均 >= 8。）
     #[test]
     fn dfy_backend_checks_jar_artifact_and_java8() {
-        let def = def_of("dfy-backend");
+        let mut def = def_of("dfy-backend");
         assert_eq!(def.java_major, Some(8), "dfy-backend 按 JDK 8 编译，期望值必须声明为 8");
         assert!(def.requires.iter().any(|r| r.check_id() == "jar"), "必须声明 JAR 产物检查");
+        assert_eq!(
+            def.java_home.as_deref(),
+            Some("resource/jre"),
+            "Windows 交付必须声明预置 JRE（exe 同级 resource 目录）"
+        );
+        assert!(
+            def.run_cmd.contains("{{java}}") || def.run_cmd.contains("{java}"),
+            "run_cmd 必须用 java 占位符（检测与启动同源）"
+        );
 
+        // dev/测试机走 PATH 分支：mutate 掉 javaHome 声明
+        def.java_home = None;
         let st = states(&[
             ("dfy-backend", false, false, &[]),
             ("mysql", true, true, &[3306]),
@@ -589,6 +687,42 @@ mod tests {
         );
     }
 
+    /// 绿色交付模式：声明 javaHome 后，Java 检测走预置 JRE。
+    /// 测试机（dev/CI）的 exe 同级没有 resource/jre → 必然 Fail，
+    /// 修复提示必须是「恢复交付包目录」（免安装），而非在线安装。
+    #[test]
+    fn bundled_java_missing_fails_with_restore_hint() {
+        let def = def_of("dfy-backend");
+        let st = states(&[("mysql", true, true, &[3306]), ("redis", true, true, &[6379])]);
+        let report = check_service_env(&def, &st);
+        let java = report
+            .items
+            .iter()
+            .find(|i| i.id == "java")
+            .expect("必须包含 java 检查项");
+        assert_eq!(java.status, CheckStatus::Fail, "测试机无预置 JRE，应 Fail: {}", java.actual);
+        assert!(
+            java.fix_hint.contains("恢复") && java.fix_hint.contains("无需安装"),
+            "修复提示应指引恢复目录且免安装: {}",
+            java.fix_hint
+        );
+    }
+
+    /// {java} 占位符解析：无预置 JRE 的机器回退 PATH java；无占位符原样返回。
+    #[test]
+    fn java_placeholder_falls_back_to_path_java() {
+        assert_eq!(
+            crate::ops::process::resolve_java_placeholder("{java} -jar x.jar"),
+            "java -jar x.jar",
+            "dev/CI 机器没有预置 JRE，应回退 PATH java"
+        );
+        assert_eq!(
+            crate::ops::process::resolve_java_placeholder("nginx -c x.conf"),
+            "nginx -c x.conf",
+            "不含占位符的命令必须原样返回"
+        );
+    }
+
     /// Java 版本低于声明期望（javaMajor）= 字节码无法加载 = Fail，修复提示指向 JDK 8。
     /// 此前提示错误地引导安装 JRE 17（与 dfy-boot-base 的 JDK 8 目标冲突）。
     #[test]
@@ -602,8 +736,10 @@ mod tests {
     /// 运行但端口不可达 → Warn；未注册 → Warn。全部由声明驱动，无硬编码端口。
     #[test]
     fn dependency_checks_driven_by_depends_on() {
-        let def = def_of("dfy-backend");
+        let mut def = def_of("dfy-backend");
         assert_eq!(def.depends_on, vec!["mysql", "redis"]);
+        // 本测试只关注依赖语义：mutate 掉 javaHome 声明，排除预置 JRE 缺失项的干扰
+        def.java_home = None;
 
         // MySQL 挂了 → fail；Redis 健康 → pass
         let st = states(&[

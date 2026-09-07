@@ -224,6 +224,23 @@ pub async fn start_env_repair(
         .clone();
     let expected = def.java_major.unwrap_or(8);
 
+    // 绿色交付模式：声明了预置 JRE（exe 同级 resource 目录）→ 修复 = 确认目录在位，
+    // 缺失则指引恢复交付包目录（免安装、离线可用），不走在线下载安装。
+    if let Some(rel) = &def.java_home {
+        let rel_for_task = rel.clone();
+        let present =
+            blocking(move || crate::ops::process::bundled_java_home(&rel_for_task).is_some()).await;
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "action": if present { "none" } else { "configure" },
+            "message": if present {
+                format!("内置 JRE 已就位（{rel}），随程序免安装交付，无需修复")
+            } else {
+                format!("内置 JRE 缺失：免安装部署，将交付包中的 {rel} 目录恢复到程序同级目录即可，无需安装")
+            }
+        })));
+    }
+
     // 第一事实：PATH 上的 java（run_cmd 实际执行者）
     let path_major = blocking(crate::ops::environment::probe_java_version).await;
     if let Some((major, _, _)) = path_major {
