@@ -23,7 +23,11 @@ export default function ReadinessCard({
   const managed = services.filter((s) => s.isDaemon);
   const own = managed.filter((s) => !s.thirdParty);
   const third = managed.filter((s) => s.thirdParty);
-  const desktopCount = services.length - managed.length;
+  const desktops = services.filter((s) => !s.isDaemon);
+  const desktopCount = desktops.length;
+  const desktopRunning = desktops.filter((s) => s.running).length;
+  /// 未运行的桌面客户端：不参与就绪度，但在未就绪区展示去向，避免「明明有两个未运行怎么只扣一个」的困惑。
+  const desktopsDown = desktops.filter((s) => !s.running);
   const total = managed.length;
 
   const isReady = (s: ServiceStatus) => {
@@ -82,7 +86,11 @@ export default function ReadinessCard({
           <Chip size="small" color="success" variant="outlined" label={`运行健康 ${runningHealthy}/${total}`} />
           <Chip size="small" color="info" variant="outlined" label={`环境满足 ${envPass}/${total}`} />
           {desktopCount > 0 && (
-            <Chip size="small" variant="outlined" label={`桌面客户端 ${desktopCount} · 不参与就绪度`} />
+            <Chip
+              size="small"
+              variant="outlined"
+              label={`桌面客户端 ${desktopRunning}/${desktopCount} 在线 · 不参与就绪度`}
+            />
           )}
         </Stack>
       </Stack>
@@ -137,6 +145,16 @@ export default function ReadinessCard({
                 size="small"
                 color={n.reason === "环境缺失" || n.reason === "未运行" ? "error" : "warning"}
                 label={`${n.name}${n.third ? "（第三方）" : ""} · ${n.reason}`}
+              />
+            ))}
+            {/* 未运行的桌面客户端：灰色 Chip 列出「去向」，说明它们不扣分的原因 */}
+            {desktopsDown.map((s) => (
+              <Chip
+                key={s.id}
+                size="small"
+                variant="outlined"
+                color="default"
+                label={`${s.name}（桌面客户端）· 未运行，不计入`}
               />
             ))}
           </Stack>
