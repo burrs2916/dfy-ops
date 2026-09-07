@@ -8,6 +8,8 @@ import type {
   AiTestResult,
   AppSettings,
   DiagnosisResponse,
+  EnvRepairJob,
+  EnvRepairStart,
   LogsResponse,
   ServiceEnvReport,
   ServiceStatus,
@@ -75,6 +77,13 @@ export const api = {
   envCheck: (id: string) =>
     request<ServiceEnvReport>(`/api/services/${id}/env`),
   envCheckAll: () => request<ServiceEnvReport[]>("/api/env"),
+  // 环境修复（java 检查项分级修复：none/configure/install）
+  startEnvRepair: (serviceId: string, checkId: string) =>
+    request<EnvRepairStart>("/api/env/repair", {
+      method: "POST",
+      body: JSON.stringify({ serviceId, checkId }),
+    }),
+  envRepairStatus: () => request<EnvRepairJob>("/api/env/repair/status"),
   startAll: () =>
     request<ActionResult[]>("/api/services/start-all", { method: "POST" }),
   stopAll: () =>

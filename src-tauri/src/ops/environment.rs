@@ -82,7 +82,7 @@ fn probe(cmd: &str, args: &[&str]) -> Option<String> {
 }
 
 /// 从 `java -version` 输出解析 (major, minor, patch)，兼容旧式 "1.8.0_382"。
-fn java_version_tuple(output: &str) -> Option<(u32, u32, u32)> {
+pub(crate) fn java_version_tuple(output: &str) -> Option<(u32, u32, u32)> {
     let start = output.find('"')? + 1;
     let end = output[start..].find('"')? + start;
     let mut it = output[start..end].split('.');
@@ -175,6 +175,12 @@ fn tcp_ok(port: u16) -> bool {
     health::check_tcp("127.0.0.1", port, 800)
 }
 
+/// 探测 PATH 上 java 的版本。修复决策链的第一事实：服务由 `run_cmd` 启动，
+/// 用的就是 PATH 上的 java，达标与否以它为准。
+pub fn probe_java_version() -> Option<(u32, u32, u32)> {
+    probe("java", &["-version"]).and_then(|out| java_version_tuple(&out))
+}
+
 /// 检测 WebView2 Runtime 是否已安装（Evergreen Bootstrap 注册表约定键）。
 /// 键：HKLM/HKCU 下 SOFTWARE(\\WOW6432Node)\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5} 的 pv 值。
 /// 64 位进程通过 KEY_WOW64_32KEY 覆盖 32 位视图（WOW6432Node 即其映射），两种写法都探测。
@@ -222,48 +228,71 @@ pub fn check_service_env(def: &ServiceDef, states: &DepStates) -> ServiceEnvRepo
     // ===== 1. 运行时检查（kind 特有） =====
     match def.kind {
         ServiceKind::Vertx => {
-            // Java 运行时：期望版本声明驱动（ServiceDef.javaMajor，缺省 8），探测并比对。
-            // 低于声明版本 = class 文件无法加载，服务无法运行 → Fail；
-            // 高于声明版本（如 8+ 的 jar 跑在 17 上）兼容可运行 → Pass。
+            // Java 运行时：期望版本声明驱动（ServiceDef.javaMajor，缺省 8）。
+            // 第一事实 = PATH 上的 java（run_cmd 实际执行者）；不达标时盘点本机
+            // 已装 JDK，区分「配置修复」（有达标 JDK，指引设 PATH/JAVA_HOME）
+            // 与「需要安装」（纯净机，走 /api/env/repair 自动安装）。
             let expected_major = def.java_major.unwrap_or(8);
             let java = probe("java", &["-version"]);
-            let it = match java {
-                None => item(
+            let path_ok = matches!(
+                java.as_deref().and_then(java_version_tuple),
+                Some((major, _, _)) if major >= expected_major
+            );
+            let it = if path_ok {
+                let out = java.unwrap();
+                item(
                     "java",
                     "Java 运行时",
                     "运行时",
                     &format!("JDK {expected_major}+"),
-                    "未检测到",
+                    &format!("{}（满足 JDK {expected_major}+）", out.trim()),
+                    CheckStatus::Pass,
+                )
+            } else {
+                let installs = crate::ops::env_repair::installed_jdks();
+                let compatible = installs
+                    .iter()
+                    .filter(|j| j.major() >= expected_major)
+                    .max_by_key(|j| j.version);
+                let (actual, hint) = match (java.as_deref(), compatible) {
+                    (_, Some(j)) => (
+                        format!(
+                            "PATH 中 java 不可用或版本过低（{}）；本机已有达标 JDK：{}（{}）",
+                            java.as_deref().map(str::trim).unwrap_or("未检测到"),
+                            j.home,
+                            j.version_label()
+                        ),
+                        format!(
+                            "无需安装：将 {} 的 bin 目录加入 PATH（或设为 JAVA_HOME）后重试",
+                            j.home
+                        ),
+                    ),
+                    (Some(out), None) => (
+                        format!(
+                            "{}（版本过低）；本机未安装其他 JDK {expected_major}+ 运行时",
+                            out.trim()
+                        ),
+                        format!(
+                            "可通过「一键修复」自动安装 Eclipse Temurin {expected_major} JRE（MSI 静默安装并配置 JAVA_HOME/PATH，需管理员确认）"
+                        ),
+                    ),
+                    (None, None) => (
+                        format!("未检测到 java；本机未安装 JDK {expected_major}+ 运行时"),
+                        format!(
+                            "可通过「一键修复」自动安装 Eclipse Temurin {expected_major} JRE（MSI 静默安装并配置 JAVA_HOME/PATH，需管理员确认）"
+                        ),
+                    ),
+                };
+                let mut it = item(
+                    "java",
+                    "Java 运行时",
+                    "运行时",
+                    &format!("JDK {expected_major}+"),
+                    &actual,
                     CheckStatus::Fail,
-                ),
-                Some(out) => {
-                    let parsed = java_version_tuple(&out);
-                    let status = match parsed {
-                        Some((major, _, _)) if major >= expected_major => CheckStatus::Pass,
-                        // 版本过低：无法加载目标字节码，启动必失败
-                        Some(_) => CheckStatus::Fail,
-                        None => CheckStatus::Warn,
-                    };
-                    let note = match parsed {
-                        Some((major, _, _)) if major >= expected_major => {
-                            format!("（满足 JDK {expected_major}+）")
-                        }
-                        Some(_) => format!("（版本过低，无法运行 JDK {expected_major} 字节码）"),
-                        None => "（无法解析版本号）".to_string(),
-                    };
-                    let mut it = item(
-                        "java",
-                        "Java 运行时",
-                        "运行时",
-                        &format!("JDK {expected_major}+"),
-                        &format!("{out}{note}"),
-                        status,
-                    );
-                    if it.status != CheckStatus::Pass {
-                        it.fix_hint = java_fix_hint(expected_major);
-                    }
-                    it
-                }
+                );
+                it.fix_hint = hint;
+                it
             };
             items.push(it);
         }

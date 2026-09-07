@@ -12,12 +12,9 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use crate::api::handlers;
 use crate::api::handlers_ai;
 use crate::ops::aimodels::AiModelConfig;
-use crate::ops::environment::ServiceEnvReport;
+use crate::ops::env_repair::{EnvCache, RepairState};
 use crate::ops::process::ProcManager;
 use crate::ops::registry::ServiceDef;
-
-/// 环境检查全量缓存：(写入时刻, 全部服务报告)。
-type EnvCache = Arc<Mutex<Option<(std::time::Instant, Vec<ServiceEnvReport>)>>>;
 
 /// 共享应用状态：服务注册表 + 进程管理器 + AI 模型配置（三层，可热更新）+ 应用设置（可热更新）+ 配置目录。
 pub struct AppState {
@@ -29,6 +26,8 @@ pub struct AppState {
     pub config_dir: PathBuf,
     /// 环境检查全量结果缓存：全量探测含子进程调用，60s TTL 内直接复用。
     pub env_cache: EnvCache,
+    /// 环境修复任务状态（JDK 自动安装等；全局单例，前端轮询）。
+    pub repair: Arc<RepairState>,
 }
 
 /// 前端页面的合法来源白名单（CORS）。
@@ -152,6 +151,15 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/services/:id/env",
             axum::routing::get(handlers::env_check),
         )
+        // 环境修复：POST 启动（分级：无需修复/配置指引/自动安装），GET 轮询任务状态
+        .route(
+            "/api/env/repair",
+            axum::routing::post(handlers::start_env_repair),
+        )
+        .route(
+            "/api/env/repair/status",
+            axum::routing::get(handlers::env_repair_status),
+        )
         .route(
             "/api/settings/app",
             axum::routing::get(handlers::get_app_settings),
@@ -225,6 +233,7 @@ mod tests {
             app_settings: Arc::new(Mutex::new(AppSettings::load(&dir))),
             config_dir: dir,
             env_cache: Arc::new(Mutex::new(None)),
+            repair: Arc::new(crate::ops::env_repair::RepairState::default()),
         })
     }
 

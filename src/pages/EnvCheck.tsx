@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -22,7 +22,7 @@ import {
 import { Check, ContentCopy, Pause, PlayArrow, Refresh } from "@mui/icons-material";
 import { api } from "../api";
 import { useAppSettingsStore } from "../store";
-import type { CheckStatus, ServiceEnvReport } from "../types";
+import type { CheckStatus, EnvRepairJob, ServiceEnvReport } from "../types";
 
 const STATUS_COLOR: Record<CheckStatus, "success" | "warning" | "error"> = {
   pass: "success",
@@ -90,18 +90,31 @@ function Stat({ value, label, color }: { value: number; label: string; color?: s
   );
 }
 
+/** 修复任务阶段 → 用户可读文案。 */
+const REPAIR_STAGE_LABEL: Record<string, string> = {
+  download: "下载安装包…",
+  install: "静默安装中（请在 UAC 弹窗确认管理员权限）…",
+  verify: "验证安装结果…",
+  done: "已完成",
+};
+
 function ServiceEnvSection({
   report,
   acked,
   onToggleAck,
   onlyProblems,
   hideAcked,
+  onRepair,
+  repairDisabled,
 }: {
   report: ServiceEnvReport;
   acked: Set<string>;
   onToggleAck: (id: string) => void;
   onlyProblems: boolean;
   hideAcked: boolean;
+  /** 支持自动修复的检查项（java）回调；未提供则不显示按钮 */
+  onRepair?: (serviceId: string, checkId: string) => void;
+  repairDisabled?: boolean;
 }) {
   const accent = STATUS_HEX[report.overall];
 
@@ -238,14 +251,28 @@ function ServiceEnvSection({
                     {/* 操作 */}
                     <TableCell>
                       {it.status !== "pass" && (
-                        <Button
-                          size="small"
-                          color={isAcked ? "inherit" : "primary"}
-                          onClick={() => onToggleAck(id)}
-                          sx={{ textTransform: "none", px: 1 }}
-                        >
-                          {isAcked ? "撤销" : "已知悉"}
-                        </Button>
+                        <Stack direction="row" spacing={0.5} alignItems="center">
+                          {it.id === "java" && onRepair && (
+                            <Button
+                              size="small"
+                              variant="contained"
+                              color="warning"
+                              disabled={repairDisabled}
+                              onClick={() => onRepair(report.id, it.id)}
+                              sx={{ textTransform: "none", px: 1 }}
+                            >
+                              一键修复
+                            </Button>
+                          )}
+                          <Button
+                            size="small"
+                            color={isAcked ? "inherit" : "primary"}
+                            onClick={() => onToggleAck(id)}
+                            sx={{ textTransform: "none", px: 1 }}
+                          >
+                            {isAcked ? "撤销" : "已知悉"}
+                          </Button>
+                        </Stack>
                       )}
                     </TableCell>
                   </TableRow>
@@ -269,6 +296,12 @@ export default function EnvCheck() {
   const [hideAcked, setHideAcked] = useState(false);
   const [live, setLive] = useState(true);
   const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+
+  // ===== 环境修复（java 一键修复） =====
+  const [repairJob, setRepairJob] = useState<EnvRepairJob | null>(null);
+  const [repairNotice, setRepairNotice] = useState<string | null>(null);
+  const [repairError, setRepairError] = useState<string | null>(null);
+  const repairPollRef = useRef<number | null>(null);
 
   const load = useCallback(async (silent = false) => {
     if (!silent) setLoading(true);
@@ -307,6 +340,53 @@ export default function EnvCheck() {
       return next;
     });
   }, []);
+
+  // 卸载时停止修复轮询
+  useEffect(() => {
+    return () => {
+      if (repairPollRef.current) window.clearInterval(repairPollRef.current);
+    };
+  }, []);
+
+  /** 一键修复：分级响应——无需修复/配置指引（直接提示）、自动安装（启动轮询）。 */
+  const startRepair = useCallback(
+    async (serviceId: string, checkId: string) => {
+      setRepairError(null);
+      setRepairNotice(null);
+      try {
+        const res = await api.startEnvRepair(serviceId, checkId);
+        if (!res.ok) {
+          setRepairError(res.error || "修复启动失败");
+          return;
+        }
+        setRepairNotice(res.message || null);
+        if (res.action === "install") {
+          if (repairPollRef.current) window.clearInterval(repairPollRef.current);
+          repairPollRef.current = window.setInterval(async () => {
+            try {
+              const job = await api.envRepairStatus();
+              setRepairJob(job);
+              if (!job.running) {
+                window.clearInterval(repairPollRef.current!);
+                repairPollRef.current = null;
+                if (job.ok) {
+                  setRepairNotice("JDK 安装完成，已刷新环境检测结果");
+                } else {
+                  setRepairError(job.error || "修复未成功，请查看日志或按修复建议手动处理");
+                }
+                load(true);
+              }
+            } catch {
+              /* 单次轮询失败忽略，下一轮重试 */
+            }
+          }, 2000);
+        }
+      } catch (e) {
+        setRepairError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [load]
+  );
 
   // 待处理项 = 未通过且未被「已知悉」的项目；此为运维真正要跟进的清单。
   const pending = useMemo(
@@ -376,6 +456,31 @@ export default function EnvCheck() {
         <Alert severity="error">{error}（请确认运维后端已在 127.0.0.1:18721 运行）</Alert>
       )}
 
+      {/* 修复任务进行中：阶段 + 最新日志 */}
+      {repairJob?.running && (
+        <Alert
+          severity="info"
+          icon={<CircularProgress size={18} color="inherit" />}
+          sx={{ "& .MuiAlert-message": { width: "100%" } }}
+        >
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            {REPAIR_STAGE_LABEL[repairJob.stage] ?? repairJob.stage}
+          </Typography>
+          {repairJob.logs.length > 0 && (
+            <Typography
+              variant="caption"
+              sx={{ fontFamily: "monospace", display: "block", mt: 0.5, wordBreak: "break-all" }}
+            >
+              {repairJob.logs[repairJob.logs.length - 1]}
+            </Typography>
+          )}
+        </Alert>
+      )}
+
+      {/* 修复结果提示（无需修复 / 配置指引 / 安装完成） */}
+      {!repairJob?.running && repairNotice && <Alert severity="success">{repairNotice}</Alert>}
+      {!repairJob?.running && repairError && <Alert severity="error">{repairError}</Alert>}
+
       {!loading && reports.length > 0 && (fail > 0 || warn > 0) && (
         <Alert
           severity={fail > 0 ? "error" : "warning"}
@@ -396,7 +501,7 @@ export default function EnvCheck() {
           }
         >
           待处理环境缺失 <b>{fail + warn}</b> 项（致命 {fail} / 警告 {warn}）。
-          请在运维中心按「修复建议」自行执行，本平台仅做探测与提醒，不直接安装依赖。
+          支持自动修复的项（Java 运行时）可直接「一键修复」，其余按修复建议执行。
         </Alert>
       )}
 
@@ -440,6 +545,8 @@ export default function EnvCheck() {
                 onToggleAck={toggleAck}
                 onlyProblems={onlyProblems}
                 hideAcked={hideAcked}
+                onRepair={startRepair}
+                repairDisabled={!!repairJob?.running}
               />
             ))}
           </Stack>

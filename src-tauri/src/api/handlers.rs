@@ -194,6 +194,85 @@ fn find_def<'a>(state: &'a AppState, id: &str) -> Option<&'a ServiceDef> {
     state.registry.iter().find(|d| d.id == id)
 }
 
+// ===== 环境修复（java 检查项的分级修复入口） =====
+
+#[derive(Debug, Deserialize)]
+pub struct EnvRepairInput {
+    #[serde(rename = "serviceId")]
+    pub service_id: String,
+    #[serde(rename = "checkId")]
+    pub check_id: String,
+}
+
+/// POST /api/env/repair —— 分级修复决策链：
+/// 1. PATH java 已达标 → action=none（无需修复）；
+/// 2. 本机已有达标 JDK（PATH 不达标）→ action=configure（返回配置指引，不擅自改）；
+/// 3. 纯净机无任何达标 JDK → action=install（启动自动安装：下载 Temurin MSI →
+///    UAC 提权静默安装并配置环境变量 → 复探验证），前端轮询 /api/env/repair/status。
+pub async fn start_env_repair(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<EnvRepairInput>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if input.check_id != "java" {
+        return Ok(Json(serde_json::json!({
+            "ok": false,
+            "error": "该检查项暂不支持自动修复，请按修复建议手动处理"
+        })));
+    }
+    let def = find_def(&state, &input.service_id)
+        .ok_or(StatusCode::NOT_FOUND)?
+        .clone();
+    let expected = def.java_major.unwrap_or(8);
+
+    // 第一事实：PATH 上的 java（run_cmd 实际执行者）
+    let path_major = blocking(crate::ops::environment::probe_java_version).await;
+    if let Some((major, _, _)) = path_major {
+        if major >= expected {
+            return Ok(Json(serde_json::json!({
+                "ok": true,
+                "action": "none",
+                "message": format!("PATH 中的 java 已满足 JDK {expected}+，无需修复")
+            })));
+        }
+    }
+
+    // 本机已有达标 JDK：配置问题而非缺失，给指引不代改
+    let compatible = blocking(move || crate::ops::env_repair::find_compatible(expected)).await;
+    if let Some(j) = compatible {
+        return Ok(Json(serde_json::json!({
+            "ok": true,
+            "action": "configure",
+            "home": j.home,
+            "message": format!(
+                "本机已有达标 JDK {}（{}）：无需安装，请将其 bin 目录加入 PATH 或设为 JAVA_HOME",
+                j.version_label(),
+                j.home
+            )
+        })));
+    }
+
+    // 纯净机：启动自动安装（Windows：下载+UAC 提权静默装；其他平台返回指引）
+    match crate::ops::env_repair::start_jdk_install(
+        expected,
+        state.env_cache.clone(),
+        state.repair.clone(),
+    ) {
+        Ok(_) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "action": "install",
+            "message": format!("开始自动安装 Eclipse Temurin {expected} JRE（下载 → 管理员确认 → 验证），进度见下方任务状态")
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({"ok": false, "error": e}))),
+    }
+}
+
+/// GET /api/env/repair/status —— 前端轮询修复任务进度。
+pub async fn env_repair_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<crate::ops::env_repair::RepairJob> {
+    Json(state.repair.snapshot())
+}
+
 pub async fn server_health(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "status": "ok",

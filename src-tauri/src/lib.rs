@@ -72,6 +72,7 @@ pub fn run() {
                 app_settings: Arc::new(Mutex::new(AppSettings::load(&config_dir))),
                 config_dir,
                 env_cache: Arc::new(Mutex::new(None)),
+                repair: Arc::new(ops::env_repair::RepairState::default()),
             });
 
             // P2-f 保活看门狗：平台拉起过的常驻服务崩了自动重新拉起

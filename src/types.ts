@@ -78,6 +78,28 @@ export interface ServiceEnvReport {
   items: EnvCheckItem[];
 }
 
+/** ===== 环境修复（java 检查项自动安装等） ===== */
+
+/** 修复任务状态（GET /api/env/repair/status，前端轮询） */
+export interface EnvRepairJob {
+  running: boolean;
+  /** download → install → verify → done */
+  stage: string;
+  logs: string[];
+  ok: boolean | null;
+  error: string | null;
+}
+
+/** POST /api/env/repair 的分级决策结果 */
+export interface EnvRepairStart {
+  ok: boolean;
+  /** none=无需修复 / configure=本机已有达标 JDK 给配置指引 / install=启动自动安装 */
+  action?: "none" | "configure" | "install";
+  message?: string;
+  home?: string;
+  error?: string;
+}
+
 /** ===== AI 模型配置（三层：供应商→接入点→模型，web-craft ModelConfigPage 同构） ===== */
 
 export interface AiProviderDto {

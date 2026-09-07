@@ -6,6 +6,7 @@ pub mod diagnosis;
 pub mod orchestrator;
 pub mod watchdog;
 pub mod environment;
+pub mod env_repair;
 pub mod ai;
 pub mod aimodels;
 pub mod appsettings;
