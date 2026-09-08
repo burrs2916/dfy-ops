@@ -377,6 +377,11 @@ pub fn listening_ports(pids: &[u32]) -> Vec<u16> {
 /// COMMAND 列（首列）命中工具噪音（shell / Electron 容器 / IDE·agent 宿主）的行
 /// 整行丢弃——pid 级过滤（`filter_tool_noise`）依赖 `ps`，ps 不可用时由这里兜底，
 /// 避免 WorkBuddy/Trae 这类命令行嵌项目路径的宿主进程把自家端口反查给服务。
+///
+/// 仅非 Windows 平台编译：本函数只被 `listening_ports` 的非 Windows 分支调用，
+/// 且其内部依赖同为非 Windows 专属的 `is_tool_noise`（漏加 cfg 曾导致
+/// Windows CI E0425：cannot find function `is_tool_noise`）。
+#[cfg(not(target_os = "windows"))]
 fn parse_lsof_ports(text: &str) -> Vec<u16> {
     let mut ports: Vec<u16> = text
         .lines()
@@ -481,6 +486,8 @@ fn spawn_to_log(cwd: &str, cmd: &str, log_path: &str) -> std::io::Result<Child> 
 mod tests {
     use super::*;
 
+    // lsof 输出解析仅存在于非 Windows 编译路径，测试同步加 cfg
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn parse_lsof_ports_extracts_listening_ports() {
         let sample = "COMMAND   PID  USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME\n\
@@ -491,6 +498,7 @@ mod tests {
         assert_eq!(parse_lsof_ports(sample), vec![4200, 8084, 48085]);
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn parse_lsof_ports_ignores_header_and_empty() {
         let expected: Vec<u16> = vec![];
@@ -503,6 +511,7 @@ mod tests {
 
     /// 工具噪音进程（Electron 宿主 / shell，命令行嵌项目路径被 pgrep 误命中）
     /// 的 LISTEN 行必须在解析层被整行丢弃——ps 不可用时这是唯一防线。
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn parse_lsof_ports_drops_tool_noise_rows() {
         let sample = "COMMAND   PID  USER   FD   TYPE             DEVICE SIZE/OFF NODE NAME\n\

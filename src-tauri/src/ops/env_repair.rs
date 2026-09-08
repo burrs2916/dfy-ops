@@ -292,7 +292,9 @@ async fn run_install(state: Arc<RepairState>, expected_major: u32, env_cache: En
     .await;
     match install {
         Ok(Ok(out)) if out.status.success() => {
-            state.log("MSI 安装完成".into());
+            // 注意：此处形参是 impl Into<String>，Windows rustc 对字面量 .into() 会报
+            // E0283 推断歧义（CI 实测），直接传 &str 即可，不要加 .into()。
+            state.log("MSI 安装完成");
         }
         Ok(Ok(out)) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
