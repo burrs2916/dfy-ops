@@ -1,4 +1,4 @@
-import { Box, Card, Chip, Stack, Typography } from "@mui/material";
+import { Box, Card, Chip, CircularProgress, Stack, Typography } from "@mui/material";
 import type { ServiceEnvReport, ServiceStatus } from "../types";
 
 type Tone = "success" | "warning" | "error";
@@ -38,9 +38,32 @@ export default function ReadinessCard({
   const ownReady = own.filter(isReady).length;
   const thirdReady = third.filter(isReady).length;
   const ready = ownReady + thirdReady;
-  const pct = total === 0 ? 100 : Math.round((ready / total) * 100);
+
+  // 首帧守卫：后端数据未到达（首轮渲染 / 后端未就绪）时 services 为空。
+  // 此前 total=0 会被折算成 100%（0/0 → 100%），首次启动闪现「100% 健康」假象。
+  if (total === 0) {
+    return (
+      <Card variant="outlined" sx={{ p: 2.5 }}>
+        <Stack direction="row" spacing={1.5} alignItems="center">
+          <CircularProgress size={16} />
+          <Box>
+            <Typography variant="h6" sx={{ fontWeight: 700 }}>
+              部署就绪度
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              正在等待服务数据…
+            </Typography>
+          </Box>
+        </Stack>
+      </Card>
+    );
+  }
+
+  const pct = Math.round((ready / total) * 100);
   const runningHealthy = managed.filter((s) => s.running && s.healthy).length;
   const envPass = managed.filter((s) => envMap[s.id]?.overall === "pass").length;
+  // 环境报告未返回时不得报「0/9」——那是「还没检测」，不是「全不满足」。
+  const envLoaded = Object.keys(envMap).length > 0;
 
   const tone: Tone = pct === 100 ? "success" : pct === 0 ? "error" : "warning";
 
@@ -85,7 +108,12 @@ export default function ReadinessCard({
         </Box>
         <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap>
           <Chip size="small" color="success" variant="outlined" label={`运行健康 ${runningHealthy}/${total}`} />
-          <Chip size="small" color="info" variant="outlined" label={`环境满足 ${envPass}/${total}`} />
+          <Chip
+            size="small"
+            color="info"
+            variant="outlined"
+            label={envLoaded ? `环境满足 ${envPass}/${total}` : "环境检测中…"}
+          />
         </Stack>
       </Stack>
 

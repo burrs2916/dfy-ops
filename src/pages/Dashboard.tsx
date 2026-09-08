@@ -4,6 +4,7 @@ import {
   Alert,
   Box,
   Button,
+  Card,
   Chip,
   CircularProgress,
   Dialog,
@@ -61,10 +62,20 @@ export default function Dashboard() {
     setLastUpdate(new Date());
   }, [refresh, refreshEnv]);
 
-  // 环境检查仅在挂载时拉取一次（依赖不常变，避免每 5s 重复探测 java/nginx 等子进程）。
+  // 首轮加载门控：状态与环境检查**都落定**后才渲染就绪度卡片。
+  // 此前两个 effect 并发拉取，状态先到、环境慢几秒，ReadinessCard 会先拿空数据
+  // 渲染出假值（total=0 折算 100% / 环境满足 0/9），过几秒才跳回真实状态。
+  // allSettled：任一请求失败也放行（错误由下方 Alert 呈现，卡片有 total=0 空态兜底）。
+  const [bootstrapped, setBootstrapped] = useState(false);
   useEffect(() => {
-    refreshEnv();
-  }, [refreshEnv]);
+    let cancelled = false;
+    Promise.allSettled([refresh(), refreshEnv()]).then(() => {
+      if (!cancelled) setBootstrapped(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [refresh, refreshEnv]);
 
   // 实时刷新：状态按「设置 → 通用」的状态间隔轮询；环境检查按独立的环境间隔轮询
   //（修复：此前写死"每 3 个状态周期复探一次"，envRefreshSecs 设置实际无效）。
@@ -175,10 +186,6 @@ export default function Dashboard() {
     }
   };
 
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
-
   if (loading && services.length === 0) {
     return (
       <Box sx={{ display: "flex", justifyContent: "center", mt: 8 }}>
@@ -262,7 +269,18 @@ export default function Dashboard() {
         </Typography>
       </Box>
 
-      <ReadinessCard services={services} envMap={envMap} />
+      {!bootstrapped ? (
+        <Card variant="outlined" sx={{ p: 2.5 }}>
+          <Stack direction="row" spacing={1.5} alignItems="center">
+            <CircularProgress size={16} />
+            <Typography variant="body2" color="text.secondary">
+              正在检测服务状态与环境…
+            </Typography>
+          </Stack>
+        </Card>
+      ) : (
+        <ReadinessCard services={services} envMap={envMap} />
+      )}
 
       {error && <Alert severity="error">{error}（请确认运维后端已在 127.0.0.1:18721 运行）</Alert>}
 
