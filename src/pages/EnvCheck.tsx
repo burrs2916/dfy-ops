@@ -525,14 +525,14 @@ function RepairCenter({
         </Alert>
       ) : null}
 
-      {/* 已安装组件管理：安装痕迹探测 + 卸载入口（当前覆盖 MySQL/Redis） */}
+      {/* 已安装组件管理：安装痕迹探测 + 卸载入口（MySQL/Redis/Java） */}
       <Paper variant="outlined" sx={{ overflow: "hidden" }}>
         <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ px: 2, pt: 1.5, pb: 1 }}>
           <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
             已安装组件
           </Typography>
           <Typography variant="caption" color="text.secondary">
-            平台内安装/卸载维护（服务级探测）
+            平台内安装/卸载维护（MySQL/Redis 服务级探测，Java 走 MSI 条目）
           </Typography>
         </Stack>
         <Divider />
@@ -565,7 +565,7 @@ function RepairCenter({
                     </TableCell>
                     <TableCell>
                       {t.serviceInstalled ? (
-                        <Chip size="small" color="success" label="已安装（服务）" />
+                        <Chip size="small" color="success" label={t.target === "java" ? "已安装（MSI）" : "已安装（服务）"} />
                       ) : t.dirExists ? (
                         <Chip size="small" color="warning" label="残留目录" />
                       ) : (
@@ -574,7 +574,7 @@ function RepairCenter({
                     </TableCell>
                     <TableCell>
                       <Typography variant="body2" sx={{ fontFamily: "monospace", wordBreak: "break-all", color: "text.secondary" }}>
-                        {t.installDir}
+                        {t.installDir || "由 Windows Installer 管理"}
                       </Typography>
                     </TableCell>
                     <TableCell>
@@ -797,36 +797,50 @@ function RepairCenter({
         </DialogActions>
       </Dialog>
 
-      {/* 卸载确认弹窗：删数据必须显式勾选（数据库数据不可恢复） */}
+      {/* 卸载确认弹窗：删数据必须显式勾选（数据库数据不可恢复）；java 走 MSI 静默卸载，无数据选项 */}
       <Dialog open={!!uninstallTarget} onClose={() => setUninstallTarget(null)} maxWidth="sm" fullWidth>
         <DialogTitle>卸载 {uninstallTarget?.label}</DialogTitle>
         <DialogContent>
-          <Typography variant="body2">
-            将停止并注销 Windows 服务
-            <b>{uninstallTarget ? `（${uninstallTarget.target === "mysql" ? "MySQL80" : "Redis"}）` : ""}</b>，
-            安装目录：
-          </Typography>
-          <Paper variant="outlined" sx={{ p: 1.5, mt: 1, bgcolor: "action.hover" }}>
-            <Typography variant="body2" sx={{ fontFamily: "monospace", wordBreak: "break-all" }}>
-              {uninstallTarget?.installDir}
-            </Typography>
-          </Paper>
-          <FormControlLabel
-            sx={{ mt: 1.5, alignItems: "flex-start" }}
-            control={
-              <Checkbox
-                checked={removeData}
-                onChange={(e) => setRemoveData(e.target.checked)}
-                sx={{ pt: 0.25 }}
-              />
-            }
-            label={
-              <Typography variant="body2" color={removeData ? "error" : "text.secondary"}>
-                同时删除程序与数据目录（<b>数据库内的所有数据将不可恢复！</b>
-                不勾选则仅注销服务并保留数据，重装可复用）
+          {uninstallTarget?.target === "java" ? (
+            <>
+              <Typography variant="body2">
+                将枚举本机以 <b>MSI 方式安装</b>的全部 Java/JDK 条目（Temurin/OpenJDK 等），一次管理员确认后<b>静默逐条卸载</b>。
+                卸载完成后已开终端里的 JAVA_HOME/PATH 是旧值，重开终端或重新登录后生效。
               </Typography>
-            }
-          />
+              <Typography variant="body2" sx={{ mt: 1, color: "text.secondary" }}>
+                zip 解压版 Java 没有卸载条目，不走此管线——请直接删除其目录并清理 JAVA_HOME/PATH。
+              </Typography>
+            </>
+          ) : (
+            <>
+              <Typography variant="body2">
+                将停止并注销 Windows 服务
+                <b>{uninstallTarget ? `（${uninstallTarget.target === "mysql" ? "MySQL80" : "Redis"}）` : ""}</b>，
+                安装目录：
+              </Typography>
+              <Paper variant="outlined" sx={{ p: 1.5, mt: 1, bgcolor: "action.hover" }}>
+                <Typography variant="body2" sx={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+                  {uninstallTarget?.installDir}
+                </Typography>
+              </Paper>
+              <FormControlLabel
+                sx={{ mt: 1.5, alignItems: "flex-start" }}
+                control={
+                  <Checkbox
+                    checked={removeData}
+                    onChange={(e) => setRemoveData(e.target.checked)}
+                    sx={{ pt: 0.25 }}
+                  />
+                }
+                label={
+                  <Typography variant="body2" color={removeData ? "error" : "text.secondary"}>
+                    同时删除程序与数据目录（<b>数据库内的所有数据将不可恢复！</b>
+                    不勾选则仅注销服务并保留数据，重装可复用）
+                  </Typography>
+                }
+              />
+            </>
+          )}
         </DialogContent>
         <DialogActions>
           <Button size="small" onClick={() => setUninstallTarget(null)}>

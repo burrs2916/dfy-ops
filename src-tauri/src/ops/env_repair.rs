@@ -667,6 +667,11 @@ fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
             let ini = mysql_ini_path(home);
             std::fs::write(&ini, build_mysql_ini(home))
                 .map_err(|e| format!("写入 my.ini 失败：{e}"))?;
+            // 卸载保留数据 → 重装复用：datadir 已初始化（含系统库）直接跳过，
+            // 再跑 --initialize-insecure 会因目录非空而失败
+            if mysql_data_initialized(home) {
+                return Ok("检测到已有数据目录，跳过初始化（复用现有数据）".into());
+            }
             let mysqld = format!("{home}\\bin\\mysqld.exe");
             let out = std::process::Command::new(&mysqld)
                 // --defaults-file 必须是首个选项（mysqld 的解析要求）
@@ -823,7 +828,7 @@ async fn run_zip_install(
     }
 }
 
-// ===== 卸载 / 维护（mysql/redis：停服务 → 注销服务 → 可选删目录） =====
+// ===== 卸载 / 维护（mysql/redis：停服务 → 注销服务 → 可选删目录；java：MSI 静默卸载） =====
 
 /// Windows 服务是否存在（sc query 退出码 0 = 存在；探测无需管理员权限）。
 pub fn service_exists(svc: &str) -> bool {
@@ -842,8 +847,69 @@ pub fn service_exists(svc: &str) -> bool {
     }
 }
 
-/// 卸载任务（mysql/redis 维护）：停止并注销 Windows 服务，可选删除安装目录
-/// （含数据——必须由用户在弹窗里显式勾选，数据库数据删除后不可恢复）。
+/// DisplayName 是否像 Java/JDK MSI 产品（避免 "JavaScript ..." 之类误伤）。
+fn java_product_name(display: &str) -> bool {
+    let d = display.to_lowercase();
+    d.contains("temurin")
+        || d.contains("adoptium")
+        || d.contains("openjdk")
+        || d.contains("jdk")
+        || d.contains("jre")
+        || (d.contains("java") && (d.contains("se ") || d.contains("update") || d.contains("development")))
+}
+
+/// 从 MSI 形态的 UninstallString 提取产品码 {GUID}；非 msiexec 条目返回 None。
+fn extract_msi_guid(uninstall_string: &str) -> Option<String> {
+    let s = uninstall_string.trim();
+    if !s.to_lowercase().contains("msiexec") {
+        return None;
+    }
+    let start = s.find('{')?;
+    let end = s.find('}')?;
+    (end > start).then(|| s[start..=end].to_string())
+}
+
+/// 注册表卸载条目里的 Java MSI 产品（DisplayName + 产品码）。
+/// 覆盖 Temurin/Adoptium/Oracle/Microsoft OpenJDK 等 MSI 安装的 JRE/JDK；
+/// zip 解压版没有卸载条目，自然不在列表（那类卸载 = 直接删目录）。
+#[cfg(target_os = "windows")]
+pub fn java_msi_entries() -> Vec<(String, String)> {
+    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::RegKey;
+    let mut out: Vec<(String, String)> = Vec::new();
+    for sub in [
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    ] {
+        let Ok(root) = RegKey::predef(HKEY_LOCAL_MACHINE).open_subkey(sub) else {
+            continue;
+        };
+        for name in root.enum_keys().flatten() {
+            let Ok(k) = root.open_subkey(&name) else { continue };
+            let dn = k.get_value::<String, _>("DisplayName").unwrap_or_default();
+            if dn.is_empty() || !java_product_name(&dn) {
+                continue;
+            }
+            let us = k.get_value::<String, _>("UninstallString").unwrap_or_default();
+            if let Some(guid) = extract_msi_guid(&us) {
+                if !out.iter().any(|(_, g)| g == &guid) {
+                    out.push((dn, guid));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 非 Windows：无 MSI 注册表，恒为空（卸载入口在 start_uninstall 已按平台挡住）。
+#[cfg(not(target_os = "windows"))]
+pub fn java_msi_entries() -> Vec<(String, String)> {
+    Vec::new()
+}
+
+/// 卸载任务（维护）：mysql/redis = 停止并注销 Windows 服务，可选删除安装目录
+/// （含数据——必须由用户在弹窗里显式勾选，数据库数据删除后不可恢复）；
+/// java = 枚举注册表 MSI 条目后 msiexec /x 静默卸载（remove_data 不适用）。
 /// install_dir 与安装管线同源（服务注册表 installDir），保证装、卸口径一致。
 /// 成败以执行后的重探为准（服务不存在时 net stop/sc delete 的报错与退出码不作数）。
 #[cfg(target_os = "windows")]
@@ -854,9 +920,9 @@ pub fn start_uninstall(
     env_cache: EnvCache,
     state: Arc<RepairState>,
 ) -> Result<(), String> {
-    if service_spec(target).is_none() {
+    if !matches!(target, "mysql" | "redis" | "java") {
         return Err(format!(
-            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis），请使用 AI 方案或控制面板手动卸载",
+            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis/Java），请使用 AI 方案或控制面板手动卸载",
             crate::ops::resource::target_label(target)
         ));
     }
@@ -901,6 +967,10 @@ async fn run_uninstall(
     install_dir: String,
     env_cache: EnvCache,
 ) {
+    if target == "java" {
+        run_java_uninstall(state, env_cache).await;
+        return;
+    }
     let label = crate::ops::resource::target_label(target);
     let (svc, _port) = service_spec(target).unwrap();
     state.log(format!("开始卸载 {label}（服务 {svc}，目录 {install_dir}）"));
@@ -972,6 +1042,73 @@ async fn run_uninstall(
     }
 }
 
+/// Java 卸载：枚举注册表 MSI 条目 → 一次 UAC 内 msiexec /x 静默逐条卸载 →
+/// 复核条目清空。zip 解压版 Java 无卸载条目，走不了这条管线（提示直接删目录）。
+#[cfg(target_os = "windows")]
+async fn run_java_uninstall(state: Arc<RepairState>, env_cache: EnvCache) {
+    state.log("正在枚举本机 MSI 方式安装的 Java/JDK 条目…");
+    let entries = tokio::task::spawn_blocking(java_msi_entries).await.unwrap_or_default();
+    if entries.is_empty() {
+        finish(
+            state,
+            env_cache,
+            false,
+            "未检测到 MSI 方式安装的 Java/JDK（zip 解压版没有卸载条目，请直接删除其目录并清理 JAVA_HOME/PATH）".into(),
+        )
+        .await;
+        return;
+    }
+    state.patch(|j| j.stage = "uninstall".into());
+    for (dn, _) in &entries {
+        state.log(format!("待卸载：{dn}"));
+    }
+    state.log(format!(
+        "共 {} 个条目，将以静默方式逐条卸载… 请在 UAC 弹窗中点击「是」…",
+        entries.len()
+    ));
+    // 一次 UAC 内串行卸载所有条目（cmd & 顺序执行；退出码不作数，以复核为准）
+    let script = entries
+        .iter()
+        .map(|(_, g)| format!("msiexec /x {g} /quiet /norestart"))
+        .collect::<Vec<_>>()
+        .join(" & ");
+    let run = tokio::task::spawn_blocking(move || runas_wait("cmd.exe", &format!("/c {script}"))).await;
+    match run {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => state.log(format!("卸载命令返回：{e}（将以实际状态复核）")),
+        Err(e) => {
+            finish(state, env_cache, false, format!("卸载任务异常：{e}")).await;
+            return;
+        }
+    }
+
+    // ===== 复核 =====
+    state.patch(|j| j.stage = "verify".into());
+    let after = tokio::task::spawn_blocking(java_msi_entries).await.unwrap_or_default();
+    if after.is_empty() {
+        state.log("卸载完成");
+        state.log("提示：已开终端里的 JAVA_HOME/PATH 是旧值，重开终端或重新登录后生效");
+        finish(state, env_cache, true, String::new()).await;
+    } else {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!(
+                "卸载未完成：仍有 {} 个 Java 条目（可能 UAC 被取消或 MSI 卸载被拒）——可到「设置 → 应用」手动处理",
+                after.len()
+            ),
+        )
+        .await;
+    }
+}
+
+/// MySQL datadir 是否已初始化（data/mysql 系统库目录存在）。
+/// 卸载时保留数据 → 重装复用时必须跳过 --initialize-insecure（目录非空会失败）。
+fn mysql_data_initialized(home: &str) -> bool {
+    std::path::Path::new(home).join("data").join("mysql").is_dir()
+}
+
 /// 收尾：更新任务终态 + 清空环境检查缓存（下一次 /api/env 全量实测）。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 async fn finish(state: Arc<RepairState>, env_cache: EnvCache, ok: bool, error: String) {
@@ -1029,5 +1166,44 @@ mod tests {
 
         // redis 兜底最小配置
         assert_eq!(build_redis_conf(), "port 6379\nbind 0.0.0.0\n");
+    }
+
+    /// Java MSI 卸载：DisplayName 过滤（防 "JavaScript" 误伤）与产品码提取。
+    #[test]
+    fn java_msi_entry_parsing() {
+        assert!(java_product_name("Eclipse Temurin JRE 21 (x64)"));
+        assert!(java_product_name("Java 8 Update 301"));
+        assert!(java_product_name("Microsoft OpenJDK 17"));
+        assert!(java_product_name("Java SE Development Kit 21"));
+        assert!(!java_product_name("JavaScript Runtime"));
+        assert!(!java_product_name("MySQL Server 8.0"));
+
+        assert_eq!(
+            extract_msi_guid(r"MsiExec.exe /I{A1B2C3D4-1111-2222-3333-444455556666}"),
+            Some("{A1B2C3D4-1111-2222-3333-444455556666}".into())
+        );
+        assert_eq!(
+            extract_msi_guid(r"MsiExec.exe /X{ABCDEF00-0000-0000-0000-000000000000}"),
+            Some("{ABCDEF00-0000-0000-0000-000000000000}".into())
+        );
+        // 非 MSI 条目（exe 卸载器）不进 java 卸载管线
+        assert_eq!(extract_msi_guid(r#""C:\x\uninstall.exe" /silent"#), None);
+        assert_eq!(extract_msi_guid("MsiExec.exe /I no-guid"), None);
+    }
+
+    /// MySQL 重装复用数据目录：datadir 已初始化（data/mysql 存在）→ 跳过 initialize。
+    #[test]
+    fn mysql_data_initialized_detects_system_schema() {
+        let tmp = std::env::temp_dir().join(format!("dfy-mysql-init-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("data").join("mysql")).unwrap();
+        assert!(mysql_data_initialized(tmp.to_str().unwrap()));
+        // 未初始化：data 存在但无系统库（比如 initialize 中途中断）
+        let partial = std::env::temp_dir().join(format!("dfy-mysql-partial-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&partial);
+        std::fs::create_dir_all(partial.join("data")).unwrap();
+        assert!(!mysql_data_initialized(partial.to_str().unwrap()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = std::fs::remove_dir_all(&partial);
     }
 }

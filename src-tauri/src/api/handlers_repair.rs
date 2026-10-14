@@ -144,9 +144,9 @@ pub async fn start_generic_repair(
 
 // ===== 卸载 / 维护 =====
 
-/// 平台内卸载当前覆盖 zip 管线目标（mysql/redis）——服务名、安装目录、数据位置
-/// 全部由平台掌控，卸载可干净执行；其余目标建议 AI 方案或控制面板手动卸载。
-pub const UNINSTALLABLE: [&str; 2] = ["mysql", "redis"];
+/// 平台内卸载覆盖：mysql/redis（zip 管线，服务+目录全由平台掌控）+ java
+/// （MSI 注册表条目静默卸载）。其余目标建议 AI 方案或控制面板手动卸载。
+pub const UNINSTALLABLE: [&str; 3] = ["mysql", "redis", "java"];
 
 fn registry_install_dir(state: &AppState, target: &str) -> String {
     state
@@ -157,8 +157,12 @@ fn registry_install_dir(state: &AppState, target: &str) -> String {
         .unwrap_or_else(|| format!("C:\\services\\{target}"))
 }
 
-/// 探测一个 zip 管线目标的安装痕迹（服务存在 + 目录存在）。
+/// 探测一个目标的安装痕迹（服务存在 + 目录存在；java = 有无 MSI 卸载条目）。
 async fn probe_target(state: &AppState, target: &str) -> (bool, bool) {
+    if target == "java" {
+        let installed = blocking(|| !crate::ops::env_repair::java_msi_entries().is_empty()).await;
+        return (installed, false);
+    }
     let Some((svc, _)) = crate::ops::env_repair::service_spec(target) else {
         return (false, false);
     };
@@ -181,7 +185,8 @@ pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_
         targets.push(serde_json::json!({
             "target": t,
             "label": resource::target_label(t),
-            "installDir": registry_install_dir(&state, t),
+            // java 没有平台掌控的安装目录（MSI 自己管理），前端按 target 特判展示
+            "installDir": if t == "java" { String::new() } else { registry_install_dir(&state, t) },
             "serviceInstalled": service_installed,
             "dirExists": dir_exists,
             "canUninstall": service_installed || dir_exists,
@@ -198,9 +203,9 @@ pub struct UninstallInput {
     pub remove_data: bool,
 }
 
-/// POST /api/env/repair/uninstall —— 卸载（mysql/redis）：一次 UAC 完成
-/// 停服务 + 注销服务（removeData 时连安装目录一起删）。任务状态复用
-/// /api/env/repair/status（与安装任务同一全局单例，前端轮询逻辑不变）。
+/// POST /api/env/repair/uninstall —— 卸载：mysql/redis 一次 UAC 完成停服务 +
+/// 注销服务（removeData 时连安装目录一起删）；java 为 MSI 条目静默卸载
+/// （removeData 不适用）。任务状态复用 /api/env/repair/status（同一全局单例）。
 pub async fn uninstall(
     State(state): State<Arc<AppState>>,
     Json(input): Json<UninstallInput>,
@@ -209,9 +214,18 @@ pub async fn uninstall(
         return Json(serde_json::json!({"ok": false, "error": "未知的目标组件"}));
     };
     if !UNINSTALLABLE.contains(&target) {
-        return Json(serde_json::json!({"ok": false, "error": "该组件暂不支持平台内卸载（当前覆盖 MySQL/Redis），请使用 AI 方案或控制面板手动卸载"}));
+        return Json(serde_json::json!({"ok": false, "error": "该组件暂不支持平台内卸载（当前覆盖 MySQL/Redis/Java），请使用 AI 方案或控制面板手动卸载"}));
     }
     let install_dir = registry_install_dir(&state, target);
+    let message = if target == "java" {
+        "开始卸载 Java 运行时（枚举 MSI 条目 → 静默逐条卸载）→ 管理员确认 → 复核，进度见下方任务状态".to_string()
+    } else {
+        format!(
+            "开始卸载 {}（{}数据目录）→ 管理员确认 → 复核，进度见下方任务状态",
+            resource::target_label(target),
+            if input.remove_data { "含" } else { "保留" }
+        )
+    };
     match crate::ops::env_repair::start_uninstall(
         target,
         input.remove_data,
@@ -219,15 +233,7 @@ pub async fn uninstall(
         state.env_cache.clone(),
         state.repair.clone(),
     ) {
-        Ok(()) => Json(serde_json::json!({
-            "ok": true,
-            "action": "uninstall",
-            "message": format!(
-                "开始卸载 {}（{}数据目录）→ 管理员确认 → 复核，进度见下方任务状态",
-                resource::target_label(target),
-                if input.remove_data { "含" } else { "保留" }
-            )
-        })),
+        Ok(()) => Json(serde_json::json!({"ok": true, "action": "uninstall", "message": message})),
         Err(e) => Json(serde_json::json!({"ok": false, "error": e})),
     }
 }
