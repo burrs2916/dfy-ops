@@ -162,6 +162,8 @@ pub struct RepairJob {
     pub running: bool,
     /// download → install → verify → done
     pub stage: String,
+    /// 修复目标软件（java/mysql/redis/vernemq/…；None = 旧接口未标注）
+    pub target: Option<String>,
     pub logs: Vec<String>,
     pub ok: Option<bool>,
     pub error: Option<String>,
@@ -212,6 +214,7 @@ pub fn start_jdk_install(
             return Err("已有修复任务在执行，请等待其完成".into());
         }
         job.running = true;
+        job.target = Some("java".into());
         job.stage = "download".into();
         job.ok = None;
         job.error = None;
@@ -221,6 +224,55 @@ pub fn start_jdk_install(
         run_install(state, expected_major, env_cache).await;
     });
     Ok(())
+}
+
+/// 通用修复任务：本地资源目录里的 MSI 静默安装（java/mysql/redis/vernemq）。
+/// 安装命令由 resource::msi_install_command 按目标软件生成（java 带
+/// FeatureJavaHome/FeatureEnvironment 自动写 JAVA_HOME 与 PATH，其余 /quiet）。
+/// 返回 Err 表示无法启动（已有任务在跑 / 平台不支持 / 无预置安装链路）。
+#[cfg(target_os = "windows")]
+pub fn start_resource_install(
+    target: &'static str,
+    msi_path: String,
+    env_cache: EnvCache,
+    state: Arc<RepairState>,
+) -> Result<(), String> {
+    if crate::ops::resource::msi_install_command(target, &msi_path).is_none() {
+        return Err(format!(
+            "{} 没有预置的静默安装链路，请使用 AI 方案或手动安装",
+            crate::ops::resource::target_label(target)
+        ));
+    }
+    {
+        let mut job = state.job.lock().unwrap();
+        if job.running {
+            return Err("已有修复任务在执行，请等待其完成".into());
+        }
+        job.running = true;
+        job.target = Some(target.into());
+        job.stage = "install".into();
+        job.ok = None;
+        job.error = None;
+        job.logs.clear();
+    }
+    tokio::spawn(async move {
+        run_resource_install(state, target, msi_path, env_cache).await;
+    });
+    Ok(())
+}
+
+/// 非 Windows 平台：dev 机不提供本地安装包安装（交付平台是 Windows）。
+#[cfg(not(target_os = "windows"))]
+pub fn start_resource_install(
+    target: &'static str,
+    _msi_path: String,
+    _env_cache: EnvCache,
+    _state: Arc<RepairState>,
+) -> Result<(), String> {
+    Err(format!(
+        "本地安装包安装仅支持 Windows 目标机，{} 请手动安装",
+        crate::ops::resource::target_label(target)
+    ))
 }
 
 /// 非 Windows 平台：dev 机不提供自动安装（交付平台是 Windows）。
@@ -341,6 +393,101 @@ async fn run_install(state: Arc<RepairState>, expected_major: u32, env_cache: En
             )
             .await;
         }
+    }
+}
+
+/// 本地资源包安装流水线（Windows）：UAC 提权 msiexec 静默安装 → 复探验证。
+/// 与 run_install 的差异：安装包来自资源目录（离线），无需下载；验证仅 java
+/// 有可靠的注册表/目录扫描口径，其余目标以 msiexec 退出码为准并提示重新检测。
+#[cfg(target_os = "windows")]
+async fn run_resource_install(
+    state: Arc<RepairState>,
+    target: &'static str,
+    msi_path: String,
+    env_cache: EnvCache,
+) {
+    state.log(format!(
+        "开始修复：{}（本地安装包 {}）",
+        crate::ops::resource::target_label(target),
+        msi_path
+    ));
+
+    state.patch(|j| j.stage = "install".into());
+    // msi_install_command 返回 "msiexec /i \"path\" ..."，取首 token 之后的参数串
+    // 交给 Start-Process 的 ArgumentList（无 shell 解释层，无注入面）。
+    let Some(cmd) = crate::ops::resource::msi_install_command(target, &msi_path) else {
+        finish(state, env_cache, false, "该目标没有预置的静默安装链路".into()).await;
+        return;
+    };
+    let args_part = cmd["msiexec".len()..].trim().to_string();
+    // PowerShell 单引号字面量转义（路径含单引号时防破坏命令结构）
+    let args_part = args_part.replace('\'', "''");
+    state.log("正在启动 MSI 静默安装…请在弹出的 UAC 管理员确认框中点击「是」…");
+    let install = tokio::task::spawn_blocking(move || {
+        let ps = if args_part.is_empty() {
+            "Start-Process msiexec -Verb RunAs -Wait".to_string()
+        } else {
+            format!("Start-Process msiexec -ArgumentList '{args_part}' -Verb RunAs -Wait")
+        };
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps])
+            .output()
+    })
+    .await;
+    match install {
+        Ok(Ok(out)) if out.status.success() => {
+            state.log("MSI 安装完成");
+        }
+        Ok(Ok(out)) => {
+            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            finish(
+                state,
+                env_cache,
+                false,
+                format!("安装执行失败（可能用户在 UAC 中点了取消）：{stderr}"),
+            )
+            .await;
+            return;
+        }
+        Ok(Err(e)) => {
+            finish(state, env_cache, false, format!("无法启动安装器：{e}")).await;
+            return;
+        }
+        Err(e) => {
+            finish(state, env_cache, false, format!("安装任务异常：{e}")).await;
+            return;
+        }
+    }
+
+    // ===== 复探验证 =====
+    state.patch(|j| j.stage = "verify".into());
+    if target == "java" {
+        // java：注册表/目录扫描 + 绝对路径探测（新 PATH 对本进程不可见，不能靠 `java -version`）
+        let found = tokio::task::spawn_blocking(move || find_compatible(8)).await.ok().flatten();
+        match found {
+            Some(j) => {
+                state.log(format!(
+                    "验证通过：检测到 JDK {}（{}）已安装并配置环境变量",
+                    j.version_label(),
+                    j.home
+                ));
+                finish(state, env_cache, true, String::new()).await;
+            }
+            None => {
+                finish(
+                    state,
+                    env_cache,
+                    false,
+                    "安装流程已执行但未检测到达标 JDK，请查看安装日志或手动安装".into(),
+                )
+                .await;
+            }
+        }
+    } else {
+        // mysql/redis/vernemq：安装器返回成功即视为安装完成；服务注册/端口监听
+        // 状态由「重新检查」重新实测（本进程看不到安装器写的新 PATH）
+        state.log("安装流程已执行完成，请点击「重新检查」验证环境状态");
+        finish(state, env_cache, true, String::new()).await;
     }
 }
 

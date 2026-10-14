@@ -1,28 +1,37 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Alert,
+  Badge,
   Box,
   Button,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Divider,
   FormControlLabel,
   IconButton,
   Paper,
+  Snackbar,
   Stack,
   Switch,
+  Tab,
   Table,
   TableBody,
   TableCell,
   TableContainer,
   TableHead,
   TableRow,
+  Tabs,
+  TextField,
   Typography,
 } from "@mui/material";
-import { Check, ContentCopy, Pause, PlayArrow, Refresh } from "@mui/icons-material";
+import { Check, ContentCopy, Pause, PlayArrow, Refresh, SmartToy } from "@mui/icons-material";
 import { api } from "../api";
 import { useAppSettingsStore, useOpsStore } from "../store";
-import type { CheckStatus, EnvRepairJob, ServiceEnvReport } from "../types";
+import type { CheckStatus, EnvCheckItem, EnvRepairJob, RepairPlan, ResourceScan, ServiceEnvReport } from "../types";
 
 const STATUS_COLOR: Record<CheckStatus, "success" | "warning" | "error"> = {
   pass: "success",
@@ -61,6 +70,22 @@ function saveAck(set: Set<string>) {
 function ackId(reportId: string, itemId: string) {
   return `${reportId}::${itemId}`;
 }
+
+/** 与后端 ops/resource.rs 的 repair_target 口径一致：dep- 与 service- 前缀折叠后匹配。 */
+const REPAIR_TARGETS = new Set(["java", "mysql", "redis", "vernemq", "minio", "greptime"]);
+function repairTarget(checkId: string): string | null {
+  const c = checkId.replace(/^dep-/, "").replace(/^service-/, "");
+  return REPAIR_TARGETS.has(c) ? c : null;
+}
+
+const TARGET_LABEL: Record<string, string> = {
+  java: "Java 运行时",
+  mysql: "MySQL",
+  redis: "Redis",
+  vernemq: "VerneMQ",
+  minio: "MinIO",
+  greptime: "GreptimeDB",
+};
 
 function StatusDot({ status }: { status: CheckStatus }) {
   return (
@@ -286,12 +311,350 @@ function ServiceEnvSection({
   );
 }
 
+/** 修复中心：问题项汇总 + 一键修复（资源包→在线）+ AI 方案（代执行/复制 + 追问）。 */
+function RepairCenter({
+  pending,
+  repairDisabled,
+  onRepair,
+}: {
+  pending: { reportId: string; reportName: string; item: EnvCheckItem }[];
+  repairDisabled: boolean;
+  onRepair: (target: string) => void;
+}) {
+  const resourceDir = useAppSettingsStore((s) => s.settings.resourceDir);
+  const [scan, setScan] = useState<ResourceScan | null>(null);
+  const [plan, setPlan] = useState<RepairPlan | null>(null);
+  const [planItems, setPlanItems] = useState<EnvCheckItem[]>([]);
+  const [planning, setPlanning] = useState(false);
+  const [planError, setPlanError] = useState<string | null>(null);
+  const [followUp, setFollowUp] = useState("");
+  // 代执行确认弹窗：仅保存待确认命令，确认后才发请求
+  const [execCommand, setExecCommand] = useState<string | null>(null);
+  const [executing, setExecuting] = useState(false);
+  const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" }>({
+    open: false,
+    msg: "",
+    severity: "success",
+  });
+
+  // 进入修复中心（或目录配置变化）时扫一次资源目录，展示可用安装包
+  useEffect(() => {
+    if (!resourceDir) {
+      setScan(null);
+      return;
+    }
+    let alive = true;
+    api
+      .resources()
+      .then((s) => {
+        if (alive) setScan(s);
+      })
+      .catch(() => {
+        if (alive) setScan(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [resourceDir]);
+
+  /** AI 方案：首次用当前问题项；追问时携带上一轮方案文本。 */
+  const generatePlan = useCallback(
+    async (items: EnvCheckItem[], previous?: string, question?: string) => {
+      setPlanning(true);
+      setPlanError(null);
+      try {
+        const p = await api.repairPlan(items, previous, question);
+        if (!p.ok) {
+          setPlanError(p.error || "生成方案失败");
+        } else {
+          setPlan(p);
+          setPlanItems(items);
+          setFollowUp("");
+        }
+      } catch (e) {
+        setPlanError(e instanceof Error ? e.message : String(e));
+      } finally {
+        setPlanning(false);
+      }
+    },
+    []
+  );
+
+  /** 上一轮方案的可读文本（追问时作为模型上下文）。 */
+  const planAsText = useCallback(
+    (p: RepairPlan) =>
+      [p.summary, ...p.steps.map((s, i) => `${i + 1}. ${s.title}${s.detail ? `：${s.detail}` : ""}${s.command ? `（命令：${s.command}）` : ""}`)].join("\n"),
+    []
+  );
+
+  const submitFollowUp = useCallback(() => {
+    const q = followUp.trim();
+    if (!q || !plan) return;
+    void generatePlan(planItems.length ? planItems : pending.map((e) => e.item), planAsText(plan), q);
+  }, [followUp, plan, planItems, pending, generatePlan, planAsText]);
+
+  const doExec = useCallback(async () => {
+    if (!execCommand) return;
+    setExecuting(true);
+    try {
+      const r = await api.repairExec(execCommand);
+      setExecCommand(null);
+      if (r.ok) {
+        setSnack({ open: true, msg: "命令执行成功，请稍后点「重新检查」验证环境", severity: "success" });
+      } else {
+        setSnack({ open: true, msg: r.error || "命令执行失败", severity: "error" });
+      }
+    } catch (e) {
+      setExecCommand(null);
+      setSnack({
+        open: true,
+        msg: e instanceof Error ? e.message : String(e),
+        severity: "error",
+      });
+    } finally {
+      setExecuting(false);
+    }
+  }, [execCommand]);
+
+  const identified = scan?.files.filter((f) => f.target) ?? [];
+
+  return (
+    <Stack spacing={2}>
+      {/* 资源目录状态：修复来源的第一环 */}
+      {!resourceDir ? (
+        <Alert severity="warning">
+          未配置本地资源目录——一键修复仅支持 Java 在线下载（需外网），MySQL / Redis / VerneMQ 等请先到
+          「设置 → 资源目录」配置离线安装包，或使用 AI 方案。
+        </Alert>
+      ) : scan && scan.exists && identified.length === 0 ? (
+        <Alert severity="warning">
+          资源目录（{resourceDir}）里未识别到安装包：请把 MySQL / Redis / VerneMQ / JDK / MinIO 的
+          msi/exe/zip 放入该目录（根目录或一级子目录均可）。
+        </Alert>
+      ) : scan && identified.length > 0 ? (
+        <Alert severity="success">
+          资源目录（{resourceDir}）已识别 <b>{identified.length}</b> 个安装包：
+          {identified.map((f) => TARGET_LABEL[f.target!] ?? f.target).join("、")}——一键修复将离线安装。
+        </Alert>
+      ) : null}
+
+      {/* 问题项汇总 */}
+      <Paper variant="outlined" sx={{ overflow: "hidden" }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ px: 2, pt: 1.5, pb: 1 }}>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+            待处理问题项（{pending.length}）
+          </Typography>
+          <Button
+            size="small"
+            variant="contained"
+            startIcon={planning ? <CircularProgress size={14} color="inherit" /> : <SmartToy />}
+            disabled={planning || pending.length === 0}
+            onClick={() => void generatePlan(pending.map((e) => e.item))}
+          >
+            {planning ? "生成中…" : "AI 生成修复方案"}
+          </Button>
+        </Stack>
+        <Divider />
+        <TableContainer>
+          <Table size="small" sx={{ tableLayout: "fixed" }}>
+            <TableHead>
+              <TableRow sx={{ bgcolor: "rgba(0,0,0,0.03)" }}>
+                <TableCell sx={{ width: 86 }}>状态</TableCell>
+                <TableCell sx={{ width: 210 }}>检查项</TableCell>
+                <TableCell>检测值</TableCell>
+                <TableCell sx={{ width: 110 }}>操作</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {pending.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={4} align="center">
+                    <Typography variant="caption" color="text.secondary">
+                      没有待处理的环境问题
+                    </Typography>
+                  </TableCell>
+                </TableRow>
+              ) : (
+                pending.map(({ reportId, reportName, item }) => {
+                  const target = repairTarget(item.id);
+                  return (
+                    <TableRow key={`${reportId}::${item.id}`} sx={{ "& td": { verticalAlign: "top", py: 1 } }}>
+                      <TableCell>
+                        <Stack direction="row" spacing={0.75} alignItems="center">
+                          <StatusDot status={item.status} />
+                          <Typography variant="caption" sx={{ color: STATUS_HEX[item.status], fontWeight: 700 }}>
+                            {STATUS_LABEL[item.status]}
+                          </Typography>
+                        </Stack>
+                      </TableCell>
+                      <TableCell>
+                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                          {item.name}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {reportName}
+                        </Typography>
+                      </TableCell>
+                      <TableCell>
+                        <Typography variant="body2" sx={{ fontFamily: "monospace", wordBreak: "break-all", color: "text.secondary" }}>
+                          {item.actual}
+                        </Typography>
+                      </TableCell>
+                      <TableCell>
+                        {target ? (
+                          <Button
+                            size="small"
+                            variant="contained"
+                            color="warning"
+                            disabled={repairDisabled}
+                            onClick={() => onRepair(target)}
+                            sx={{ textTransform: "none", px: 1 }}
+                          >
+                            一键修复
+                          </Button>
+                        ) : (
+                          <Typography variant="caption" color="text.secondary">
+                            AI 方案 / 手动
+                          </Typography>
+                        )}
+                      </TableCell>
+                    </TableRow>
+                  );
+                })
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </Paper>
+
+      {planError && <Alert severity="error">{planError}</Alert>}
+
+      {/* AI 方案卡片 */}
+      {plan && (
+        <Paper variant="outlined" sx={{ overflow: "hidden" }}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ px: 2, pt: 1.5 }}>
+            <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+              AI 修复方案{plan.mode === "text" ? "（原始建议）" : ""}
+            </Typography>
+            <Chip size="small" label={plan.mode === "ai" ? "结构化步骤" : "文本建议"} color="primary" variant="outlined" />
+          </Stack>
+          <Typography variant="body2" sx={{ px: 2, pt: 0.5, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+            {plan.summary}
+          </Typography>
+          {plan.steps.map((s, i) => (
+            <Box key={i} sx={{ px: 2, py: 1 }}>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Typography variant="body2" sx={{ fontWeight: 700, flex: 1, minWidth: 0 }}>
+                  {i + 1}. {s.title}
+                </Typography>
+                {s.command &&
+                  (s.isExecutable ? (
+                    <Button
+                      size="small"
+                      variant="contained"
+                      color="warning"
+                      onClick={() => setExecCommand(s.command)}
+                      sx={{ textTransform: "none" }}
+                    >
+                      代执行
+                    </Button>
+                  ) : (
+                    <IconButton
+                      size="small"
+                      title="复制命令（白名单外仅支持手动执行）"
+                      onClick={() => navigator.clipboard?.writeText(s.command!)}
+                    >
+                      <ContentCopy fontSize="small" sx={{ color: "text.secondary" }} />
+                    </IconButton>
+                  ))}
+              </Stack>
+              {s.detail && (
+                <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25, whiteSpace: "pre-wrap" }}>
+                  {s.detail}
+                </Typography>
+              )}
+              {s.command && (
+                <Typography
+                  variant="caption"
+                  sx={{ display: "block", mt: 0.5, fontFamily: "monospace", wordBreak: "break-all", color: "text.primary" }}
+                >
+                  {s.command}
+                </Typography>
+              )}
+            </Box>
+          ))}
+          <Divider />
+          <Stack direction="row" spacing={1} sx={{ px: 2, py: 1.5 }} alignItems="center">
+            <TextField
+              size="small"
+              fullWidth
+              placeholder="对方案有疑问？输入追问，AI 将基于当前方案继续作答"
+              value={followUp}
+              onChange={(e) => setFollowUp(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && followUp.trim()) submitFollowUp();
+              }}
+            />
+            <Button
+              size="small"
+              variant="outlined"
+              disabled={planning || !followUp.trim()}
+              onClick={submitFollowUp}
+              sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+            >
+              {planning ? "思考中…" : "追问"}
+            </Button>
+          </Stack>
+        </Paper>
+      )}
+
+      {/* 代执行确认弹窗：白名单命令 + UAC 提权，执行前必须人工确认 */}
+      <Dialog open={!!execCommand} onClose={() => !executing && setExecCommand(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>确认代执行命令</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2" color="text.secondary">
+            该命令将在本机以管理员权限执行（请在随后弹出的 UAC 窗口确认）：
+          </Typography>
+          <Paper variant="outlined" sx={{ p: 1.5, mt: 1, bgcolor: "action.hover" }}>
+            <Typography variant="body2" sx={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+              {execCommand}
+            </Typography>
+          </Paper>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
+            仅白名单程序（msiexec / winget / choco / sc / net / netsh / robocopy / xcopy / curl）的单条命令可代执行；复杂操作请复制到终端手动执行。
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button size="small" onClick={() => setExecCommand(null)} disabled={executing}>
+            取消
+          </Button>
+          <Button size="small" variant="contained" onClick={doExec} disabled={executing}>
+            {executing ? "执行中…" : "执行"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Snackbar
+        open={snack.open}
+        autoHideDuration={4000}
+        onClose={() => setSnack((s) => ({ ...s, open: false }))}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      >
+        <Alert severity={snack.severity} variant="filled" onClose={() => setSnack((s) => ({ ...s, open: false }))}>
+          {snack.msg}
+        </Alert>
+      </Snackbar>
+    </Stack>
+  );
+}
+
 export default function EnvCheck() {
   // 数据来自全局 store：App 启动时 bootstrap() 已检测一次（store 级去重），
   // 切换页面返回本页直接渲染缓存，不再触发全量重探（此前每次 mount 都全量重探，
   // Windows 上一次要十几秒）
   const { envMap, loading, error, lastUpdate, bootstrap, refreshEnvAll } =
     useOpsStore();
+  const [tab, setTab] = useState<"check" | "repair">("check");
   const [refreshing, setRefreshing] = useState(false);
   const [copiedAll, setCopiedAll] = useState(false);
   const [acked, setAcked] = useState<Set<string>>(() => loadAck());
@@ -300,7 +663,7 @@ export default function EnvCheck() {
   // 轮询开关默认关闭：默认策略「启动检测一次 + 按需手动复检」，与总览一致
   const [live, setLive] = useState(false);
 
-  // ===== 环境修复（java 一键修复） =====
+  // ===== 环境修复（java 分级链路 + 通用资源包/在线链路，共用同一任务状态） =====
   const [repairJob, setRepairJob] = useState<EnvRepairJob | null>(null);
   const [repairNotice, setRepairNotice] = useState<string | null>(null);
   const [repairError, setRepairError] = useState<string | null>(null);
@@ -354,7 +717,31 @@ export default function EnvCheck() {
     };
   }, []);
 
-  /** 一键修复：分级响应——无需修复/配置指引（直接提示）、自动安装（启动轮询）。 */
+  /** 修复任务轮询（java 与通用修复共用）：任务结束后强制复探让新环境生效。 */
+  const pollRepair = useCallback(() => {
+    if (repairPollRef.current) window.clearInterval(repairPollRef.current);
+    repairPollRef.current = window.setInterval(async () => {
+      try {
+        const job = await api.envRepairStatus();
+        setRepairJob(job);
+        if (!job.running) {
+          window.clearInterval(repairPollRef.current!);
+          repairPollRef.current = null;
+          if (job.ok) {
+            const label = job.target ? TARGET_LABEL[job.target] ?? job.target : "环境";
+            setRepairNotice(`${label} 安装完成，请点击「重新检查」确认环境状态`);
+          } else {
+            setRepairError(job.error || "修复未成功，请查看日志或按修复建议手动处理");
+          }
+          void refreshEnvAll();
+        }
+      } catch {
+        /* 单次轮询失败忽略，下一轮重试 */
+      }
+    }, 2000);
+  }, [refreshEnvAll]);
+
+  /** 检测表里的「一键修复」（java）：分级响应——无需修复/配置指引/自动安装。 */
   const startRepair = useCallback(
     async (serviceId: string, checkId: string) => {
       setRepairError(null);
@@ -366,32 +753,32 @@ export default function EnvCheck() {
           return;
         }
         setRepairNotice(res.message || null);
-        if (res.action === "install") {
-          if (repairPollRef.current) window.clearInterval(repairPollRef.current);
-          repairPollRef.current = window.setInterval(async () => {
-            try {
-              const job = await api.envRepairStatus();
-              setRepairJob(job);
-              if (!job.running) {
-                window.clearInterval(repairPollRef.current!);
-                repairPollRef.current = null;
-                if (job.ok) {
-                  setRepairNotice("JDK 安装完成，已刷新环境检测结果");
-                } else {
-                  setRepairError(job.error || "修复未成功，请查看日志或按修复建议手动处理");
-                }
-                void refreshEnvAll();
-              }
-            } catch {
-              /* 单次轮询失败忽略，下一轮重试 */
-            }
-          }, 2000);
-        }
+        if (res.action === "install") pollRepair();
       } catch (e) {
         setRepairError(e instanceof Error ? e.message : String(e));
       }
     },
-    [refreshEnvAll]
+    [pollRepair]
+  );
+
+  /** 修复中心的「一键修复」：资源包优先 → java 在线兜底 → 无包提示。 */
+  const startGenericRepair = useCallback(
+    async (target: string) => {
+      setRepairError(null);
+      setRepairNotice(null);
+      try {
+        const res = await api.startGenericRepair(target);
+        if (!res.ok) {
+          setRepairError(res.error || "修复启动失败");
+          return;
+        }
+        setRepairNotice(res.message || null);
+        pollRepair();
+      } catch (e) {
+        setRepairError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [pollRepair]
   );
 
   // 待处理项 = 未通过且未被「已知悉」的项目；此为运维真正要跟进的清单。
@@ -401,6 +788,16 @@ export default function EnvCheck() {
         r.items.filter(
           (it) => it.status !== "pass" && !acked.has(ackId(r.id, it.id))
         )
+      ),
+    [reports, acked]
+  );
+  // 修复中心的行数据（带服务名）
+  const pendingEntries = useMemo(
+    () =>
+      reports.flatMap((r) =>
+        r.items
+          .filter((it) => it.status !== "pass" && !acked.has(ackId(r.id, it.id)))
+          .map((item) => ({ reportId: r.id, reportName: r.name, item }))
       ),
     [reports, acked]
   );
@@ -428,7 +825,7 @@ export default function EnvCheck() {
       <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 700 }}>
-            运维中心 · 运行环境检测
+            运维中心 · 运行环境
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>
             仅检测运行时依赖（不含构建工具）· 部署产物已预置，此处验证各服务"能否跑起来"
@@ -464,7 +861,7 @@ export default function EnvCheck() {
         </Alert>
       )}
 
-      {/* 修复任务进行中：阶段 + 最新日志 */}
+      {/* 修复任务进行中：阶段 + 最新日志（两个 Tab 共享，随时可见） */}
       {repairJob?.running && (
         <Alert
           severity="info"
@@ -472,6 +869,7 @@ export default function EnvCheck() {
           sx={{ "& .MuiAlert-message": { width: "100%" } }}
         >
           <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            {repairJob.target ? `正在修复 ${TARGET_LABEL[repairJob.target] ?? repairJob.target}：` : ""}
             {REPAIR_STAGE_LABEL[repairJob.stage] ?? repairJob.stage}
           </Typography>
           {repairJob.logs.length > 0 && (
@@ -489,76 +887,96 @@ export default function EnvCheck() {
       {!repairJob?.running && repairNotice && <Alert severity="success">{repairNotice}</Alert>}
       {!repairJob?.running && repairError && <Alert severity="error">{repairError}</Alert>}
 
-      {!loading && reports.length > 0 && (fail > 0 || warn > 0) && (
-        <Alert
-          severity={fail > 0 ? "error" : "warning"}
-          action={
-            <Button
-              color="inherit"
-              size="small"
-              disabled={!allFixes}
-              startIcon={copiedAll ? <Check /> : <ContentCopy />}
-              onClick={() => {
-                navigator.clipboard?.writeText(allFixes);
-                setCopiedAll(true);
-                setTimeout(() => setCopiedAll(false), 1500);
-              }}
-            >
-              {copiedAll ? "已复制" : "复制全部修复命令"}
-            </Button>
+      <Tabs value={tab} onChange={(_, v: "check" | "repair") => setTab(v)}>
+        <Tab value="check" label="检测结果" />
+        <Tab
+          value="repair"
+          label={
+            <Badge color="error" badgeContent={fail + warn > 0 ? fail + warn : undefined}>
+              修复中心
+            </Badge>
           }
-        >
-          待处理环境缺失 <b>{fail + warn}</b> 项（致命 {fail} / 警告 {warn}）。
-          支持自动修复的项（Java 运行时）可直接「一键修复」，其余按修复建议执行。
-        </Alert>
+        />
+      </Tabs>
+
+      {tab === "check" && (
+        <>
+          {!loading && reports.length > 0 && (fail > 0 || warn > 0) && (
+            <Alert
+              severity={fail > 0 ? "error" : "warning"}
+              action={
+                <Button
+                  color="inherit"
+                  size="small"
+                  disabled={!allFixes}
+                  startIcon={copiedAll ? <Check /> : <ContentCopy />}
+                  onClick={() => {
+                    navigator.clipboard?.writeText(allFixes);
+                    setCopiedAll(true);
+                    setTimeout(() => setCopiedAll(false), 1500);
+                  }}
+                >
+                  {copiedAll ? "已复制" : "复制全部修复命令"}
+                </Button>
+              }
+            >
+              待处理环境缺失 <b>{fail + warn}</b> 项（致命 {fail} / 警告 {warn}）。
+              可到「修复中心」一键修复或生成 AI 方案。
+            </Alert>
+          )}
+
+          {!loading && reports.length > 0 && (
+            <>
+              {/* 统计带 */}
+              <Paper variant="outlined" sx={{ px: 2, py: 1.5 }}>
+                <Stack direction="row" alignItems="center" flexWrap="wrap" useFlexGap>
+                  <Stat value={totalCount} label="检测项总数" />
+                  <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+                  <Stat value={passCount} label="满足" color={STATUS_HEX.pass} />
+                  <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+                  <Stat value={warn} label="警告" color={STATUS_HEX.warn} />
+                  <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+                  <Stat value={fail} label="缺失（阻断）" color={STATUS_HEX.fail} />
+                  <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
+                  <Stat value={ackedCount} label="已知悉" />
+                  <Box sx={{ flexGrow: 1 }} />
+                  <FormControlLabel
+                    control={
+                      <Switch size="small" checked={onlyProblems} onChange={(e) => setOnlyProblems(e.target.checked)} />
+                    }
+                    label="仅看问题项"
+                  />
+                  <FormControlLabel
+                    control={
+                      <Switch size="small" checked={hideAcked} onChange={(e) => setHideAcked(e.target.checked)} />
+                    }
+                    label="隐藏已知悉"
+                  />
+                </Stack>
+              </Paper>
+
+              {/* 每个服务一个分区（全宽表格） */}
+              <Stack spacing={2}>
+                {reports.map((r) => (
+                  <ServiceEnvSection
+                    key={r.id}
+                    report={r}
+                    acked={acked}
+                    onToggleAck={toggleAck}
+                    onlyProblems={onlyProblems}
+                    hideAcked={hideAcked}
+                    onRepair={startRepair}
+                    repairDisabled={!!repairJob?.running}
+                  />
+                ))}
+              </Stack>
+            </>
+          )}
+        </>
       )}
 
-      {!loading && reports.length > 0 && (
-        <>
-          {/* 统计带 */}
-          <Paper variant="outlined" sx={{ px: 2, py: 1.5 }}>
-            <Stack direction="row" alignItems="center" flexWrap="wrap" useFlexGap>
-              <Stat value={totalCount} label="检测项总数" />
-              <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-              <Stat value={passCount} label="满足" color={STATUS_HEX.pass} />
-              <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-              <Stat value={warn} label="警告" color={STATUS_HEX.warn} />
-              <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-              <Stat value={fail} label="缺失（阻断）" color={STATUS_HEX.fail} />
-              <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
-              <Stat value={ackedCount} label="已知悉" />
-              <Box sx={{ flexGrow: 1 }} />
-              <FormControlLabel
-                control={
-                  <Switch size="small" checked={onlyProblems} onChange={(e) => setOnlyProblems(e.target.checked)} />
-                }
-                label="仅看问题项"
-              />
-              <FormControlLabel
-                control={
-                  <Switch size="small" checked={hideAcked} onChange={(e) => setHideAcked(e.target.checked)} />
-                }
-                label="隐藏已知悉"
-              />
-            </Stack>
-          </Paper>
-
-          {/* 每个服务一个分区（全宽表格） */}
-          <Stack spacing={2}>
-            {reports.map((r) => (
-              <ServiceEnvSection
-                key={r.id}
-                report={r}
-                acked={acked}
-                onToggleAck={toggleAck}
-                onlyProblems={onlyProblems}
-                hideAcked={hideAcked}
-                onRepair={startRepair}
-                repairDisabled={!!repairJob?.running}
-              />
-            ))}
-          </Stack>
-        </>
+      {tab === "repair" && (
+        <RepairCenter pending={pendingEntries} repairDisabled={!!repairJob?.running} onRepair={startGenericRepair} />
       )}
 
       {(loading || refreshing) && reports.length === 0 ? (

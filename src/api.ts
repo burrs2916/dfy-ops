@@ -8,9 +8,14 @@ import type {
   AiTestResult,
   AppSettings,
   DiagnosisResponse,
+  EnvCheckItem,
   EnvRepairJob,
   EnvRepairStart,
+  GenericRepairStart,
   LogsResponse,
+  RepairExecResult,
+  RepairPlan,
+  ResourceScan,
   ServiceEnvReport,
   ServiceStatus,
 } from "./types";
@@ -93,6 +98,26 @@ export const api = {
       body: JSON.stringify({ serviceId, checkId }),
     }),
   envRepairStatus: () => request<EnvRepairJob>("/api/env/repair/status"),
+  // ===== 环境修复中心（本地资源目录 → 在线 → AI 方案 → 白名单代执行） =====
+  // dir：设置页对未保存草稿目录的即时预览；缺省扫已配置的资源目录
+  resources: (dir?: string) =>
+    request<ResourceScan>(`/api/env/resources${dir ? `?dir=${encodeURIComponent(dir)}` : ""}`),
+  startGenericRepair: (target: string) =>
+    request<GenericRepairStart>("/api/env/repair/generic", {
+      method: "POST",
+      body: JSON.stringify({ target }),
+    }),
+  // previousPlan + followUp：多轮追问时携带上一轮方案与用户追问
+  repairPlan: (checkItems: EnvCheckItem[], previousPlan?: string, followUp?: string) =>
+    request<RepairPlan>("/api/env/repair/plan", {
+      method: "POST",
+      body: JSON.stringify({ checkItems, previousPlan, followUp }),
+    }),
+  repairExec: (command: string) =>
+    request<RepairExecResult>("/api/env/repair/exec", {
+      method: "POST",
+      body: JSON.stringify({ command }),
+    }),
   startAll: () =>
     request<ActionResult[]>("/api/services/start-all", { method: "POST" }),
   stopAll: () =>
@@ -103,6 +128,7 @@ export const api = {
       ok: boolean;
       statusRefreshSecs?: number;
       envRefreshSecs?: number;
+      resourceDir?: string;
       error?: string;
     }>("/api/settings/app", {
       method: "POST",

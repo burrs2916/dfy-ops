@@ -1,14 +1,14 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Divider, MenuItem, Paper, Select, Snackbar, Stack, Typography } from "@mui/material";
-import { Tune, Storage, Info } from "@mui/icons-material";
+import { Alert, Button, Divider, MenuItem, Paper, Select, Snackbar, Stack, Table, TableBody, TableCell, TableRow, TextField, Typography } from "@mui/material";
+import { Tune, Storage, Info, FolderOpen } from "@mui/icons-material";
 import { api } from "../api";
 import { useAppSettingsStore } from "../store";
 import { SettingsLayout } from "../components/SettingsLayout";
 import { SettingRow } from "../components/SettingRow";
-import type { AppSettings } from "../types";
+import type { AppSettings, ResourceScan } from "../types";
 
 /**
- * 设置：应用自身配置（通用 / 数据 / 关于）。
+ * 设置：应用自身配置（通用 / 资源目录 / 数据 / 关于）。
  * 与「AI助手」严格分离——LLM 配置在 AI 助手页，此处不涉及。
  * 布局与其他设置类页面共用 SettingsLayout（web-craft 风格）。
  */
@@ -19,10 +19,14 @@ const ENV_OPTIONS = [0, 10, 15, 30, 60];
 
 const intervalLabel = (v: number) => (v === 0 ? "关闭" : `${v} 秒`);
 
+const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+
 export default function Settings() {
   const { settings, loaded, apply } = useAppSettingsStore();
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [saving, setSaving] = useState(false);
+  const [scan, setScan] = useState<ResourceScan | null>(null);
+  const [scanning, setScanning] = useState(false);
   const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" }>({
     open: false,
     msg: "",
@@ -38,8 +42,8 @@ export default function Settings() {
     try {
       const r = await api.saveAppSettings(draft);
       if (r.ok) {
-        apply({ statusRefreshSecs: draft.statusRefreshSecs, envRefreshSecs: draft.envRefreshSecs });
-        setSnack({ open: true, msg: "已保存，刷新间隔立即生效", severity: "success" });
+        apply(draft);
+        setSnack({ open: true, msg: "已保存，设置立即生效", severity: "success" });
       } else {
         setSnack({ open: true, msg: "保存失败：" + (r.error ?? "未知错误"), severity: "error" });
       }
@@ -47,6 +51,23 @@ export default function Settings() {
       setSnack({ open: true, msg: "保存失败：" + (e instanceof Error ? e.message : String(e)), severity: "error" });
     } finally {
       setSaving(false);
+    }
+  };
+
+  // 扫描预览：对输入框里的目录（未保存也行）即时识别安装包，配置时直接看到效果
+  const doScan = async () => {
+    const dir = draft.resourceDir.trim();
+    if (!dir) {
+      setScan(null);
+      return;
+    }
+    setScanning(true);
+    try {
+      setScan(await api.resources(dir));
+    } catch {
+      setScan(null);
+    } finally {
+      setScanning(false);
     }
   };
 
@@ -61,7 +82,39 @@ export default function Settings() {
 
   const dirty =
     draft.statusRefreshSecs !== settings.statusRefreshSecs ||
-    draft.envRefreshSecs !== settings.envRefreshSecs;
+    draft.envRefreshSecs !== settings.envRefreshSecs ||
+    draft.resourceDir !== settings.resourceDir;
+
+  const resourceScanBody =
+    scan === null ? null : (
+      <Paper variant="outlined" sx={{ mt: 1.5, p: 1.5, bgcolor: "action.hover" }}>
+        {!scan.exists ? (
+          <Typography variant="body2" color="text.secondary">
+            目录不存在：{scan.dir}
+          </Typography>
+        ) : scan.files.length === 0 ? (
+          <Typography variant="body2" color="text.secondary">
+            目录存在，但未识别到安装包（支持 MySQL / Redis / VerneMQ / JDK / MinIO / GreptimeDB 的 msi/exe/zip）
+          </Typography>
+        ) : (
+          <Table size="small" aria-label="资源目录扫描结果">
+            <TableBody>
+              {scan.files.map((f) => (
+                <TableRow key={f.path}>
+                  <TableCell sx={{ fontFamily: "monospace", fontSize: 12, py: 0.5 }}>{f.fileName}</TableCell>
+                  <TableCell align="right" sx={{ py: 0.5, whiteSpace: "nowrap" }}>
+                    {f.target ? `识别为 ${f.target}` : "未识别"}
+                  </TableCell>
+                  <TableCell align="right" sx={{ py: 0.5, whiteSpace: "nowrap", color: "text.secondary" }}>
+                    {mb(f.sizeBytes)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </Paper>
+    );
 
   return (
     <>
@@ -127,6 +180,46 @@ export default function Settings() {
             ),
           },
           {
+            key: "resources",
+            icon: <FolderOpen />,
+            label: "资源目录",
+            title: "本地资源目录",
+            description: "环境修复的离线安装包来源。无外网的交付机上，把 MySQL / Redis / JDK / VerneMQ / MinIO 等安装包放到这个目录，「环境修复」会优先扫描此目录自动安装。",
+            content: (
+              <>
+                <Paper variant="outlined" sx={{ overflow: "hidden" }}>
+                  <SettingRow label="资源目录路径" description="支持根目录与一级子目录，按文件名自动识别归属软件">
+                    <TextField
+                      size="small"
+                      placeholder="例如 D:\\dfy-resources"
+                      value={draft.resourceDir}
+                      onChange={(e) => setDraft((d) => ({ ...d, resourceDir: e.target.value }))}
+                      sx={{ width: 280 }}
+                    />
+                  </SettingRow>
+                </Paper>
+                <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>
+                  <Button
+                    variant="contained"
+                    onClick={save}
+                    disabled={saving || !dirty}
+                  >
+                    保存
+                  </Button>
+                  <Button onClick={doScan} disabled={scanning || !draft.resourceDir.trim()}>
+                    {scanning ? "扫描中…" : "扫描此目录"}
+                  </Button>
+                  {dirty && (
+                    <Button onClick={() => setDraft(settings)} disabled={saving}>
+                      放弃
+                    </Button>
+                  )}
+                </Stack>
+                {resourceScanBody}
+              </>
+            ),
+          },
+          {
             key: "data",
             icon: <Storage />,
             label: "数据",
@@ -167,10 +260,10 @@ export default function Settings() {
                 <Divider />
                 <SettingRow
                   label="能力边界"
-                  description="本平台仅做运行环境探测与提醒，不自动安装依赖、不自动部署、不修改系统配置；修复由你在运维中心按建议自助完成"
+                  description="环境检测仅探测与提醒；环境修复按「本地资源目录离线安装 → 在线下载（仅 Java）→ AI 方案」分级执行，安装类操作需你在 UAC 弹窗中确认，AI 生成的命令仅白名单内且经你逐条确认后才代执行"
                 >
                   <Alert severity="info" icon={false} sx={{ py: 0.25, px: 1.5 }}>
-                    仅探测 · 提醒
+                    探测提醒 · 分级修复
                   </Alert>
                 </SettingRow>
               </Paper>

@@ -87,6 +87,8 @@ export interface EnvRepairJob {
   running: boolean;
   /** download → install → verify → done */
   stage: string;
+  /** 修复目标软件（java/mysql/redis/vernemq/…；null = 旧接口未标注） */
+  target: string | null;
   logs: string[];
   ok: boolean | null;
   error: string | null;
@@ -155,4 +157,54 @@ export interface AiTestResult {
 export interface AppSettings {
   statusRefreshSecs: number;
   envRefreshSecs: number;
+  /** 本地资源目录：环境修复离线安装包（MySQL/Redis/JDK/VerneMQ 等安装包）所在目录；空 = 未配置 */
+  resourceDir: string;
+}
+
+/** ===== 环境修复中心 ===== */
+
+/** 资源目录里的一个安装包（GET /api/env/resources） */
+export interface ResourceFile {
+  fileName: string;
+  path: string;
+  sizeBytes: number;
+  /** 识别出的目标软件；null = 未识别（仍展示，AI 方案环节会参考完整清单） */
+  target: string | null;
+}
+
+export interface ResourceScan {
+  dir: string;
+  exists: boolean;
+  files: ResourceFile[];
+}
+
+/** POST /api/env/repair/generic 启动结果 */
+export interface GenericRepairStart {
+  ok: boolean;
+  action?: "install";
+  message?: string;
+  error?: string;
+}
+
+/** AI 修复方案中的一个步骤（isExecutable = 命令在代执行白名单内，可确认后代执行） */
+export interface RepairPlanStep {
+  title: string;
+  detail: string;
+  command: string | null;
+  isExecutable: boolean;
+}
+
+/** POST /api/env/repair/plan 返回：mode=ai 结构化方案 / text 原文兜底 / none 失败 */
+export interface RepairPlan {
+  ok: boolean;
+  mode: "ai" | "text" | "none";
+  summary: string;
+  steps: RepairPlanStep[];
+  error: string | null;
+}
+
+/** POST /api/env/repair/exec 代执行结果 */
+export interface RepairExecResult {
+  ok: boolean;
+  error: string | null;
 }

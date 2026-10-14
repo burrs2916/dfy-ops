@@ -11,3 +11,4 @@ pub mod env_repair;
 pub mod ai;
 pub mod aimodels;
 pub mod appsettings;
+pub mod resource;

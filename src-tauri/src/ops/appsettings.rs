@@ -11,6 +11,10 @@ pub struct AppSettings {
     pub status_refresh_secs: u64,
     /// 运维中心环境复探间隔（秒）；0 = 关闭（默认），仅进入页面时检测。
     pub env_refresh_secs: u64,
+    /// 本地资源目录：存放环境修复所需的离线安装包（MySQL/Redis/VerneMQ/MinIO/
+    /// JDK 等的 MSI/EXE/ZIP）。交付机常无外网，修复时优先扫描此目录离线安装；
+    /// 空串 = 未配置（跳过本地来源，直接在线/AI 兜底）。
+    pub resource_dir: String,
 }
 
 impl Default for AppSettings {
@@ -18,6 +22,7 @@ impl Default for AppSettings {
         Self {
             status_refresh_secs: 0,
             env_refresh_secs: 0,
+            resource_dir: String::new(),
         }
     }
 }
@@ -52,5 +57,6 @@ impl AppSettings {
         if self.env_refresh_secs > 0 {
             self.env_refresh_secs = self.env_refresh_secs.clamp(5, 600);
         }
+        self.resource_dir = self.resource_dir.trim().trim_matches('"').to_string();
     }
 }

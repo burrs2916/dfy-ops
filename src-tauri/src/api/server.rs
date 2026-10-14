@@ -11,6 +11,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::api::handlers;
 use crate::api::handlers_ai;
+use crate::api::handlers_repair;
 use crate::ops::aimodels::AiModelConfig;
 use crate::ops::env_repair::{EnvCache, RepairState};
 use crate::ops::process::ProcManager;
@@ -167,6 +168,23 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/api/env/repair/status",
             axum::routing::get(handlers::env_repair_status),
+        )
+        // 环境修复中心：资源目录扫描 / 通用修复任务 / AI 结构化方案 / 白名单代执行
+        .route(
+            "/api/env/resources",
+            axum::routing::get(handlers_repair::resources),
+        )
+        .route(
+            "/api/env/repair/generic",
+            axum::routing::post(handlers_repair::start_generic_repair),
+        )
+        .route(
+            "/api/env/repair/plan",
+            axum::routing::post(handlers_repair::repair_plan),
+        )
+        .route(
+            "/api/env/repair/exec",
+            axum::routing::post(handlers_repair::repair_exec),
         )
         .route(
             "/api/settings/app",
