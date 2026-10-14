@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   AppBar,
   Box,
@@ -8,11 +10,22 @@ import {
 } from "@mui/material";
 import { Settings as SettingsIcon, AccountTree, SmartToy } from "@mui/icons-material";
 import { NavLink, Outlet } from "react-router-dom";
+import TitleBar from "./TitleBar";
 
 export default function Layout() {
+  // 仅 Windows 渲染自绘标题栏（Rust 侧该平台已关闭系统装饰）；
+  // macOS 保持系统原生标题栏。非 Tauri 环境调用失败，维持 false。
+  const [customTitlebar, setCustomTitlebar] = useState(false);
+  useEffect(() => {
+    invoke<boolean>("uses_custom_titlebar")
+      .then(setCustomTitlebar)
+      .catch(() => {});
+  }, []);
+
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100vh" }}>
       <CssBaseline />
+      {customTitlebar && <TitleBar />}
       <AppBar position="static" elevation={0}>
         <Toolbar>
           <Box

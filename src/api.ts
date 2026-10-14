@@ -76,7 +76,16 @@ export const api = {
   diagnosis: () => request<DiagnosisResponse>("/api/diagnosis"),
   envCheck: (id: string) =>
     request<ServiceEnvReport>(`/api/services/${id}/env`),
-  envCheckAll: () => request<ServiceEnvReport[]>("/api/env"),
+  // force：跳过后端 60s 缓存强制重探——手动刷新/轮询都要新数据，
+  // 否则刚修完环境点「重新检查」会看到缓存里的旧结论
+  envCheckAll: (force = false) =>
+    request<ServiceEnvReport[]>(`/api/env${force ? "?force=true" : ""}`),
+  // 单服务组合刷新：后端一次进程快照同时返回状态与环境（启停后局部刷新用，
+  // 原先 status+env 两个请求各采一份快照，Windows 上等待时间翻倍）
+  refreshService: (id: string) =>
+    request<{ status: ServiceStatus; env: ServiceEnvReport }>(
+      `/api/services/${id}/refresh`,
+    ),
   // 环境修复（java 检查项分级修复：none/configure/install）
   startEnvRepair: (serviceId: string, checkId: string) =>
     request<EnvRepairStart>("/api/env/repair", {

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ use crate::ops::environment;
 use crate::ops::health;
 use crate::ops::logs;
 use crate::ops::orchestrator;
-use crate::ops::process;
+use crate::ops::process::ProcSnapshot;
 use crate::ops::registry::{ServiceDef, ServiceKind};
 
 const PROBE_TIMEOUT_MS: u64 = 800;
@@ -100,7 +100,7 @@ pub struct ServiceStatus {
     pub log_paths: Vec<String>,
 }
 
-fn to_status(def: &ServiceDef, managed: bool) -> ServiceStatus {
+fn to_status(def: &ServiceDef, managed: bool, snap: &ProcSnapshot) -> ServiceStatus {
     // 受管 = 平台从安装目录拉起过，安装维度不适用；外部检测才判「装没装」
     let (run_state, ports, healthy, installed) = if managed {
         (
@@ -110,7 +110,7 @@ fn to_status(def: &ServiceDef, managed: bool) -> ServiceStatus {
             true,
         )
     } else {
-        detect_external(def)
+        detect_external(def, snap)
     };
     ServiceStatus {
         id: def.id.clone(),
@@ -150,7 +150,7 @@ fn managed_healthy(def: &ServiceDef) -> bool {
 /// 外部运行服务的检测：**进程是事实来源，端口由进程反查**。
 ///
 /// 平台不规定服务用什么端口——按 `processNames`（运行器特征，如 `ng serve`、
-/// `dfy-server.jar`）定位 PID，再用 `lsof`/`netstat` 反查这些 PID 实际监听的端口：
+/// `dfy-server.jar`）定位 PID，再反查这些 PID 实际监听的端口：
 /// 反查到什么就上报什么（前端展示与 healthy 判定均以实际端口为准）。
 /// 仅当未配置进程名或未命中时，才回退到按配置端口探测（兼容 nginx 多实例这类
 /// 不适合按进程名区分的部署形态）。
@@ -159,8 +159,11 @@ fn managed_healthy(def: &ServiceDef) -> bool {
 /// - 声明了 `productNames` → 注册表实查，未装如实上报 installed=false；
 /// - 未声明 → true（不适用，维持既有显示逻辑）。
 ///
+/// `snap`：调用方采集一次的全量进程快照（批量检测的关键——逐服务起子进程
+/// 在 Windows 上要 O(N) 次 tasklist/netstat/PowerShell，快照摊薄为 O(1)）。
+///
 /// 返回（状态，端口，健康，已安装）。
-fn detect_external(def: &ServiceDef) -> (RunState, Vec<u16>, bool, bool) {
+fn detect_external(def: &ServiceDef, snap: &ProcSnapshot) -> (RunState, Vec<u16>, bool, bool) {
     // 「装没装」与「跑没跑」是两个独立事实：注册表安装记录毫秒级可得，
     // 且不受进程检测的任何启发式影响——没装就是没装，别让兜底探测把它洗成「正常」。
     let installed = if def.product_names.is_empty() {
@@ -175,19 +178,15 @@ fn detect_external(def: &ServiceDef) -> (RunState, Vec<u16>, bool, bool) {
     };
     // 无端口预期（桌面客户端）：只信镜像名，禁用命令行兜底——查询自身与
     // IDE 等的命令行可能含目标名，会把「没装没跑」误判成「检测到在运行」。
-    let pids: Vec<u32> = def
+    let mut pids: Vec<u32> = def
         .process_names
         .iter()
-        .flat_map(|n| {
-            if def.ports.is_empty() {
-                process::process_pids_image_only(n)
-            } else {
-                process::process_pids(n)
-            }
-        })
+        .flat_map(|n| snap.pids_for(n, !def.ports.is_empty()))
         .collect();
+    pids.sort_unstable();
+    pids.dedup();
     if !pids.is_empty() {
-        let discovered = process::listening_ports(&pids);
+        let discovered = snap.ports_of(&pids);
         if !discovered.is_empty() {
             // 进程在且端口在监听：以实际监听端口为准
             return (RunState::Detected, discovered, true, installed);
@@ -203,21 +202,22 @@ fn detect_external(def: &ServiceDef) -> (RunState, Vec<u16>, bool, bool) {
         };
         return (RunState::Detected, def.ports.clone(), healthy, installed);
     }
-    // 兜底：未配置进程名或未命中 → 按配置端口探测
-    let port_up = def
+    // 兜底：未配置进程名或未命中 → 按配置端口探测。
+    // 一轮探测同时得出 port_up（any）与 healthy（all）：此前同一组端口
+    // 各探一遍，端口不通时 800ms 超时 × 2，全量串行下白白翻倍。
+    let results: Vec<bool> = def
         .ports
         .iter()
-        .any(|p| health::check_tcp("127.0.0.1", *p, PROBE_TIMEOUT_MS));
+        .map(|p| health::check_tcp("127.0.0.1", *p, PROBE_TIMEOUT_MS))
+        .collect();
     let healthy = if let Some(url) = &def.health_url {
         health::check_http(url, PROBE_TIMEOUT_MS)
     } else if def.ports.is_empty() {
         false
     } else {
-        def.ports
-            .iter()
-            .all(|p| health::check_tcp("127.0.0.1", *p, PROBE_TIMEOUT_MS))
+        results.iter().all(|&b| b)
     };
-    let state = if port_up {
+    let state = if results.iter().any(|&b| b) {
         RunState::Detected
     } else {
         RunState::Down
@@ -333,13 +333,30 @@ pub async fn server_health(State(state): State<Arc<AppState>>) -> Json<serde_jso
     }))
 }
 
-pub async fn list_services(State(state): State<Arc<AppState>>) -> Json<Vec<ServiceStatus>> {
-    let out = blocking(move || {
-        state
+/// 全量状态探测：一次进程快照 + 并行逐服务检测。
+///
+/// 服务间无共享可变状态，各自的 TCP 探测/注册表查询完全独立——此前串行
+/// 执行，端口不通的服务每个要吃 800ms 超时，9 个服务叠加数秒；并行后
+/// 总耗时 ≈ 最慢单服务。快照把 Windows 的 tasklist/netstat/PowerShell
+/// 子进程调用摊薄为固定 2-3 次，与注册表服务数无关。
+fn statuses(state: &AppState, snap: &ProcSnapshot) -> Vec<ServiceStatus> {
+    std::thread::scope(|s| {
+        let handles: Vec<_> = state
             .registry
             .iter()
-            .map(|d| to_status(d, state.procs.is_running(&d.id)))
-            .collect::<Vec<_>>()
+            .map(|d| s.spawn(move || to_status(d, state.procs.is_running(&d.id), snap)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().expect("服务状态探测线程 panic"))
+            .collect()
+    })
+}
+
+pub async fn list_services(State(state): State<Arc<AppState>>) -> Json<Vec<ServiceStatus>> {
+    let out = blocking(move || {
+        let snap = ProcSnapshot::capture();
+        statuses(&state, &snap)
     })
     .await;
     Json(out)
@@ -350,8 +367,13 @@ pub async fn get_service(
     Path(id): Path<String>,
 ) -> Result<Json<ServiceStatus>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?.clone();
-    let running = blocking(move || state.procs.is_running(&id)).await;
-    Ok(Json(to_status(&def, running)))
+    let st = state.clone();
+    let status = blocking(move || {
+        let snap = ProcSnapshot::capture();
+        to_status(&def, st.procs.is_running(&id), &snap)
+    })
+    .await;
+    Ok(Json(status))
 }
 
 pub async fn start_service(
@@ -473,19 +495,32 @@ pub async fn service_logs(
 pub async fn diagnosis(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     // 阶段一（阻塞）：端口探测 + 子进程环境探测 + 规则诊断，整体挪到 blocking 池，
     // 避免探测耗时把 worker 线程占住（这是诊断接口里最重的一段）。
+    // 探测内部并行化（快照 + thread::scope + ProbeCache），与 /api/env 同一套优化。
     let llm_state = state.clone();
     let (status, env_reports, findings) = blocking(move || {
         // 依赖检查视图：同一份「进程是事实来源」的状态，同时驱动服务状态与环境/依赖检查。
-        let deps = dep_states(&state);
+        let snap = ProcSnapshot::capture();
+        let deps = dep_states(&state, &snap);
         let status: HashMap<String, (bool, bool)> = deps
             .iter()
             .map(|(id, dep)| (id.clone(), (dep.running, dep.healthy)))
             .collect();
         // 环境检查：探测各服务的运行时依赖 + requires 声明 + dependsOn 依赖，并纳入诊断。
-        let mut env_reports: Vec<environment::ServiceEnvReport> = Vec::new();
-        for d in &state.registry {
-            env_reports.push(environment::check_service_env(d, &deps));
-        }
+        let cache = environment::ProbeCache::default();
+        let env_reports: Vec<environment::ServiceEnvReport> = std::thread::scope(|s| {
+            // move 闭包捕获引用本身（Copy），避免把 deps/cache 整体 move 进闭包
+            let deps = &deps;
+            let cache = &cache;
+            let handles: Vec<_> = state
+                .registry
+                .iter()
+                .map(|d| s.spawn(move || environment::check_service_env_with(d, deps, Some(cache))))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("环境检查线程 panic"))
+                .collect()
+        });
         let findings = diagnosis::diagnose(&state.registry, &status, &env_reports);
         (status, env_reports, findings)
     })
@@ -522,18 +557,51 @@ pub async fn diagnosis(State(state): State<Arc<AppState>>) -> Json<serde_json::V
 
 /// 构建依赖检查视图：遍历注册表，把每个服务的实时状态（进程级检测，事实来源）
 /// 汇总为 DepState 映射，供环境检查的 dependsOn 段消费。
-fn dep_states(state: &AppState) -> environment::DepStates {
+/// 依赖端口沿用声明值（DepState.ports 仅作展示），实际端口已包含在 statuses 的检测里。
+fn dep_states(state: &AppState, snap: &ProcSnapshot) -> environment::DepStates {
+    statuses(state, snap)
+        .into_iter()
+        .map(|s| {
+            let ports = state
+                .registry
+                .iter()
+                .find(|d| d.id == s.id)
+                .map(|d| d.ports.clone())
+                .unwrap_or_default();
+            (
+                s.id.clone(),
+                environment::DepState {
+                    name: s.name.clone(),
+                    running: s.running,
+                    healthy: s.healthy,
+                    ports,
+                },
+            )
+        })
+        .collect()
+}
+
+/// 只构建环境检查所需服务子集的状态视图：自身 + 直接 dependsOn。
+///
+/// 单服务刷新不需要全量扫描——此前 env_check 为图省事构建全部服务的
+/// statuses()，Windows 上等于为一个服务付一轮全量 TCP 探测的代价。
+fn dep_states_for(
+    state: &AppState,
+    snap: &ProcSnapshot,
+    ids: &[String],
+) -> environment::DepStates {
     state
         .registry
         .iter()
+        .filter(|d| ids.contains(&d.id))
         .map(|d| {
-            let s = to_status(d, state.procs.is_running(&d.id));
+            let st = to_status(d, state.procs.is_running(&d.id), snap);
             (
-                d.id.clone(),
+                st.id.clone(),
                 environment::DepState {
-                    name: d.name.clone(),
-                    running: s.running,
-                    healthy: s.healthy,
+                    name: st.name.clone(),
+                    running: st.running,
+                    healthy: st.healthy,
                     ports: d.ports.clone(),
                 },
             )
@@ -547,38 +615,125 @@ pub async fn env_check(
     Path(id): Path<String>,
 ) -> Result<Json<environment::ServiceEnvReport>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?.clone();
-    Ok(Json(
-        blocking(move || {
-            let deps = dep_states(&state);
-            environment::check_service_env(&def, &deps)
-        })
-        .await,
-    ))
+    let st = state.clone();
+    let report = blocking(move || {
+        let snap = ProcSnapshot::capture();
+        // 环境检查只消费「自身 + 直接依赖」的状态（check_service_env_with 的
+        // 全部读取点），无需全量 statuses 扫描
+        let mut ids = def.depends_on.clone();
+        ids.push(def.id.clone());
+        let deps = dep_states_for(&st, &snap, &ids);
+        environment::check_service_env_with(&def, &deps, None)
+    })
+    .await;
+    // 单服务刷新结果同步进全量缓存对应项：「刷新此服务」后，缓存未过期的
+    // 全量视图立即与最新探测一致，不会出现单服务/全量两份数据打架。
+    if let Some((_, reports)) = state.env_cache.lock().unwrap().as_mut() {
+        if let Some(slot) = reports.iter_mut().find(|r| r.id == report.id) {
+            *slot = report.clone();
+        }
+    }
+    Ok(Json(report))
 }
 
 /// 环境检查全量结果的缓存有效期：全量探测含多次子进程调用（java/-version 等），开销大。
 const ENV_CACHE_TTL: Duration = Duration::from_secs(60);
 
-/// 检查全部服务的运行环境（60s TTL 缓存，前端自动轮询场景下避免重复子进程探测）。
+/// GET /api/env 查询参数：`force=1` 跳过缓存强制重探。
+///
+/// 手动「重新检查」必须走 force——用户刚修完环境（装了 JDK / 起了中间件）
+/// 点复检，若被 60s 缓存吞掉，看到的是修复前的旧结论，属于准确度 bug。
+#[derive(Debug, Deserialize)]
+pub struct EnvCheckQuery {
+    #[serde(default)]
+    force: bool,
+}
+
+/// 检查全部服务的运行环境（60s TTL 缓存 + single-flight + 并行探测）。
+///
+/// - 缓存：自动检测（bootstrap/轮询兜底）命中 TTL 内缓存，避免重复子进程探测；
+/// - single-flight：缓存过期瞬间的并发请求只放一个进去重探（tokio 异步锁），
+///   其余等锁后命中新缓存——否则 N 个并发请求就是 N 轮全量子进程探测（击穿风暴）；
+/// - 并行探测：状态视图（快照 + 并行 to_status）与环境检查（thread::scope +
+///   ProbeCache）并行执行，java -version 等重复命令收敛为一次子进程调用。
 pub async fn env_check_all(
     State(state): State<Arc<AppState>>,
+    Query(q): Query<EnvCheckQuery>,
 ) -> Json<Vec<environment::ServiceEnvReport>> {
-    if let Some((at, reports)) = state.env_cache.lock().unwrap().as_ref() {
-        if at.elapsed() < ENV_CACHE_TTL {
-            return Json(reports.clone());
+    if !q.force {
+        if let Some((at, reports)) = state.env_cache.lock().unwrap().as_ref() {
+            if at.elapsed() < ENV_CACHE_TTL {
+                return Json(reports.clone());
+            }
+        }
+    }
+    // 异步锁等待期间不占用 worker 线程；拿到锁后双检，防止等锁期间已被其他请求重建
+    // （force 请求跳过双检：等锁期间即便有重建，本请求的语义仍是「此刻强制重探」）
+    let _guard = state.env_rebuild.lock().await;
+    if !q.force {
+        if let Some((at, reports)) = state.env_cache.lock().unwrap().as_ref() {
+            if at.elapsed() < ENV_CACHE_TTL {
+                return Json(reports.clone());
+            }
         }
     }
     let st = state.clone();
     let reports = blocking(move || {
-        let deps = dep_states(&st);
-        st.registry
-            .iter()
-            .map(|d| environment::check_service_env(d, &deps))
-            .collect::<Vec<_>>()
+        let snap = ProcSnapshot::capture();
+        let deps = dep_states(&st, &snap);
+        let cache = environment::ProbeCache::default();
+        std::thread::scope(|s| {
+            // move 闭包捕获引用本身（Copy），避免把 deps/cache 整体 move 进闭包
+            let deps = &deps;
+            let cache = &cache;
+            let handles: Vec<_> = st
+                .registry
+                .iter()
+                .map(|d| {
+                    s.spawn(move || {
+                        environment::check_service_env_with(d, deps, Some(cache))
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("环境检查线程 panic"))
+                .collect::<Vec<_>>()
+        })
     })
     .await;
     *state.env_cache.lock().unwrap() = Some((Instant::now(), reports.clone()));
     Json(reports)
+}
+
+/// 单服务组合刷新：一次进程快照同时产出状态与环境报告。
+///
+/// 前端「启停后局部刷新 / 刷新此服务」原先要打 status + env 两个请求，
+/// 各采一份进程快照（Windows 上 tasklist+netstat 各跑两轮）；合并后一份
+/// 快照两份产出，单服务刷新的等待时间近乎减半。
+pub async fn service_refresh(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?.clone();
+    let st = state.clone();
+    let (status, report) = blocking(move || {
+        let snap = ProcSnapshot::capture();
+        let status = to_status(&def, st.procs.is_running(&id), &snap);
+        let mut ids = def.depends_on.clone();
+        ids.push(def.id.clone());
+        let deps = dep_states_for(&st, &snap, &ids);
+        let report = environment::check_service_env_with(&def, &deps, None);
+        (status, report)
+    })
+    .await;
+    // 同步进全量缓存对应项（与 env_check 相同口径，保持单服务/全量视图一致）
+    if let Some((_, reports)) = state.env_cache.lock().unwrap().as_mut() {
+        if let Some(slot) = reports.iter_mut().find(|r| r.id == report.id) {
+            *slot = report.clone();
+        }
+    }
+    Ok(Json(serde_json::json!({ "status": status, "env": report })))
 }
 
 // ===== 应用设置（「设置」页，与 AI 助手配置分离） =====

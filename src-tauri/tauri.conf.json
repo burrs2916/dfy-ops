@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "DFY运维平台",
         "width": 1280,
         "height": 820,

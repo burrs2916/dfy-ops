@@ -24,14 +24,23 @@ import { useOpsStore, useAppSettingsStore } from "../store";
 import { ServiceCard } from "../components/ServiceCard";
 import ReadinessCard from "../components/ReadinessCard";
 import { api } from "../api";
-import type { DiagnosisResponse, ServiceEnvReport } from "../types";
+import type { DiagnosisResponse } from "../types";
 
 export default function Dashboard() {
-  const { services, loading, error, refresh } = useOpsStore();
+  const {
+    services,
+    envMap,
+    bootstrapped,
+    loading,
+    error,
+    lastUpdate,
+    bootstrap,
+    refreshAll,
+    refreshEnvAll,
+  } = useOpsStore();
   const statusRefreshMs = useAppSettingsStore((s) => s.settings.statusRefreshSecs) * 1000;
   const envRefreshMs = useAppSettingsStore((s) => s.settings.envRefreshSecs) * 1000;
   const navigate = useNavigate();
-  const [envMap, setEnvMap] = useState<Record<string, ServiceEnvReport>>({});
   const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" | "info" }>({
     open: false,
     msg: "",
@@ -41,60 +50,40 @@ export default function Dashboard() {
   const [diagnosing, setDiagnosing] = useState(false);
   const [bulkBusy, setBulkBusy] = useState<null | "start" | "stop">(null);
   const [confirmStop, setConfirmStop] = useState(false);
-  const [live, setLive] = useState(true);
-  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+  // 轮询开关默认关闭：默认策略是「启动检测一次 + 按需手动/单服务刷新」，
+  // 全量探测在 Windows 上开销大，常驻轮询得不偿失（需要时在设置里配间隔）
+  const [live, setLive] = useState(false);
 
-  const refreshEnv = useCallback(async () => {
-    try {
-      const all = await api.envCheckAll();
-      const m: Record<string, ServiceEnvReport> = {};
-      all.forEach((r) => (m[r.id] = r));
-      setEnvMap(m);
-    } catch {
-      /* 环境检查依赖后端，失败时静默忽略，不影响服务列表 */
-    }
-  }, []);
-
-  // 手动刷新：状态 + 环境 + 时间戳。
-  const manualRefresh = useCallback(async () => {
-    await refresh();
-    await refreshEnv();
-    setLastUpdate(new Date());
-  }, [refresh, refreshEnv]);
-
-  // 首轮加载门控：状态与环境检查**都落定**后才渲染就绪度卡片。
-  // 此前两个 effect 并发拉取，状态先到、环境慢几秒，ReadinessCard 会先拿空数据
-  // 渲染出假值（total=0 折算 100% / 环境满足 0/9），过几秒才跳回真实状态。
-  // allSettled：任一请求失败也放行（错误由下方 Alert 呈现，卡片有 total=0 空态兜底）。
-  const [bootstrapped, setBootstrapped] = useState(false);
+  // 首次检测在应用启动时完成（App.tsx → store.bootstrap，store 级去重）。
+  // bootstrapped 是全局状态：切换页面再回来直接渲染缓存，不再出现
+  // 「正在检测服务状态与环境…」（此前每次 mount 都全量重探）。
   useEffect(() => {
-    let cancelled = false;
-    Promise.allSettled([refresh(), refreshEnv()]).then(() => {
-      if (!cancelled) setBootstrapped(true);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [refresh, refreshEnv]);
+    void bootstrap();
+  }, [bootstrap]);
 
-  // 实时刷新：状态按「设置 → 通用」的状态间隔轮询；环境检查按独立的环境间隔轮询
-  //（修复：此前写死"每 3 个状态周期复探一次"，envRefreshSecs 设置实际无效）。
+  // 手动「刷新」：状态 + 环境全量并行 + 时间戳（store 内处理）
+  const manualRefresh = useCallback(() => {
+    void refreshAll();
+  }, [refreshAll]);
+
+  // 实时轮询（默认关闭）：开关打开且对应间隔 > 0 才启用
   useEffect(() => {
-    if (!live) return;
+    if (!live || statusRefreshMs <= 0) return;
     const id = window.setInterval(async () => {
-      await refresh();
-      setLastUpdate(new Date());
+      await refreshAll();
     }, statusRefreshMs);
     return () => window.clearInterval(id);
-  }, [live, refresh, statusRefreshMs]);
+  }, [live, refreshAll, statusRefreshMs]);
 
   useEffect(() => {
-    if (!live) return;
+    if (!live || envRefreshMs <= 0) return;
     const id = window.setInterval(async () => {
-      await refreshEnv();
+      await refreshEnvAll();
     }, envRefreshMs);
     return () => window.clearInterval(id);
-  }, [live, refreshEnv, envRefreshMs]);
+  }, [live, refreshEnvAll, envRefreshMs]);
+
+  const pollingActive = live && statusRefreshMs > 0;
 
   const diagnosis = async () => {
     setDiagnosing(true);
@@ -164,7 +153,7 @@ export default function Dashboard() {
     try {
       const r = await api.startAll();
       setSnack({ open: true, msg: "全部启动 " + summarize(r), severity: "success" });
-      refresh();
+      refreshAll();
     } catch (e) {
       setSnack({ open: true, msg: "启动失败：" + (e as Error).message, severity: "error" });
     } finally {
@@ -178,7 +167,7 @@ export default function Dashboard() {
     try {
       const r = await api.stopAll();
       setSnack({ open: true, msg: "全部停止 " + summarize(r), severity: "success" });
-      refresh();
+      refreshAll();
     } catch (e) {
       setSnack({ open: true, msg: "停止失败：" + (e as Error).message, severity: "error" });
     } finally {
@@ -224,11 +213,11 @@ export default function Dashboard() {
             </Button>
             <Button
               variant="outlined"
-              color={live ? "success" : "inherit"}
+              color={pollingActive ? "success" : "inherit"}
               startIcon={live ? <Pause /> : <PlayArrow />}
               onClick={() => setLive((v) => !v)}
             >
-              {live ? "实时中" : "已暂停"}
+              {pollingActive ? "实时中" : "已暂停"}
             </Button>
             <Button
               variant="outlined"
@@ -264,7 +253,7 @@ export default function Dashboard() {
           </Stack>
         </Stack>
         <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: "block" }}>
-          共 {services.length} 个服务，{healthyCount} 个健康 · 实时刷新{live ? "中" : "已暂停"} · 上次更新{" "}
+          共 {services.length} 个服务，{healthyCount} 个健康 · 实时刷新{pollingActive ? "中" : "已暂停"} · 上次更新{" "}
           {lastUpdate ? lastUpdate.toLocaleTimeString("zh-CN") : "—"}
         </Typography>
       </Box>

@@ -26,6 +26,9 @@ pub struct AppState {
     pub config_dir: PathBuf,
     /// 环境检查全量结果缓存：全量探测含子进程调用，60s TTL 内直接复用。
     pub env_cache: EnvCache,
+    /// env_check_all 的 single-flight 锁：缓存过期瞬间的并发请求只放一个重探，
+    /// 其余等锁后命中新缓存（tokio 异步锁，等待不占 worker 线程）。
+    pub env_rebuild: Arc<tokio::sync::Mutex<()>>,
     /// 环境修复任务状态（JDK 自动安装等；全局单例，前端轮询）。
     pub repair: Arc<RepairState>,
 }
@@ -151,6 +154,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/services/:id/env",
             axum::routing::get(handlers::env_check),
         )
+        // 单服务组合刷新：一次快照同时出状态与环境（启停后局部刷新走这条，减半等待）
+        .route(
+            "/api/services/:id/refresh",
+            axum::routing::get(handlers::service_refresh),
+        )
         // 环境修复：POST 启动（分级：无需修复/配置指引/自动安装），GET 轮询任务状态
         .route(
             "/api/env/repair",
@@ -233,6 +241,7 @@ mod tests {
             app_settings: Arc::new(Mutex::new(AppSettings::load(&dir))),
             config_dir: dir,
             env_cache: Arc::new(Mutex::new(None)),
+            env_rebuild: Arc::new(tokio::sync::Mutex::new(())),
             repair: Arc::new(crate::ops::env_repair::RepairState::default()),
         })
     }
@@ -357,5 +366,25 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("http://tauri.localhost")
         );
+    }
+
+    /// env_check_all 的 force 查询参数必须被正确解析：手动「重新检查」依赖它
+    /// 跳过 60s 缓存——参数解析失败会退化成 400，前端复检拿不到任何数据。
+    #[tokio::test]
+    async fn env_check_accepts_force_query() {
+        let base = spawn_server().await;
+        let client = reqwest::Client::new();
+        let res = client
+            .get(format!("{base}/api/env?force=true"))
+            .header(CLIENT_HEADER, CLIENT_HEADER_VALUE)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            res.status(),
+            reqwest::StatusCode::OK,
+            "?force=true 必须被接受为合法查询参数"
+        );
+        assert!(res.json::<serde_json::Value>().await.unwrap().is_array());
     }
 }

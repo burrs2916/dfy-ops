@@ -21,7 +21,7 @@ import {
 } from "@mui/material";
 import { Check, ContentCopy, Pause, PlayArrow, Refresh } from "@mui/icons-material";
 import { api } from "../api";
-import { useAppSettingsStore } from "../store";
+import { useAppSettingsStore, useOpsStore } from "../store";
 import type { CheckStatus, EnvRepairJob, ServiceEnvReport } from "../types";
 
 const STATUS_COLOR: Record<CheckStatus, "success" | "warning" | "error"> = {
@@ -287,15 +287,18 @@ function ServiceEnvSection({
 }
 
 export default function EnvCheck() {
-  const [reports, setReports] = useState<ServiceEnvReport[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // 数据来自全局 store：App 启动时 bootstrap() 已检测一次（store 级去重），
+  // 切换页面返回本页直接渲染缓存，不再触发全量重探（此前每次 mount 都全量重探，
+  // Windows 上一次要十几秒）
+  const { envMap, loading, error, lastUpdate, bootstrap, refreshEnvAll } =
+    useOpsStore();
+  const [refreshing, setRefreshing] = useState(false);
   const [copiedAll, setCopiedAll] = useState(false);
   const [acked, setAcked] = useState<Set<string>>(() => loadAck());
   const [onlyProblems, setOnlyProblems] = useState(false);
   const [hideAcked, setHideAcked] = useState(false);
-  const [live, setLive] = useState(true);
-  const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+  // 轮询开关默认关闭：默认策略「启动检测一次 + 按需手动复检」，与总览一致
+  const [live, setLive] = useState(false);
 
   // ===== 环境修复（java 一键修复） =====
   const [repairJob, setRepairJob] = useState<EnvRepairJob | null>(null);
@@ -303,33 +306,36 @@ export default function EnvCheck() {
   const [repairError, setRepairError] = useState<string | null>(null);
   const repairPollRef = useRef<number | null>(null);
 
-  const load = useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
-    setError(null);
-    try {
-      const r = await api.envCheckAll();
-      setReports(r);
-      setLastUpdate(new Date());
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      if (!silent) setLoading(false);
-    }
-  }, []);
+  const reports = useMemo(() => Object.values(envMap), [envMap]);
 
   useEffect(() => {
-    load();
-  }, [load]);
+    void bootstrap();
+  }, [bootstrap]);
 
-  // 实时刷新：按「设置 → 通用」配置的间隔静默复探，使修复后状态自动反映。
+  // 实时刷新（默认关闭）：按「设置 → 通用」配置的间隔强制复探（force 跳过
+  // 后端 60s 缓存），使修复后状态自动反映。间隔 0 时不轮询。
   const envRefreshMs = useAppSettingsStore((s) => s.settings.envRefreshSecs) * 1000;
   useEffect(() => {
-    if (!live) return;
+    if (!live || envRefreshMs <= 0) return;
     const id = window.setInterval(() => {
-      load(true);
+      void refreshEnvAll();
     }, envRefreshMs);
     return () => window.clearInterval(id);
-  }, [live, load, envRefreshMs]);
+  }, [live, refreshEnvAll, envRefreshMs]);
+  // 「实时中」只在轮询真正生效时显示：间隔为 0（默认关闭）时如实显示已暂停
+  const pollingActive = live && envRefreshMs > 0;
+
+  // 手动「重新检查」：强制重探——用户刚修完环境点复检，必须拿到新结论
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+  const manualRefresh = useCallback(async () => {
+    setRefreshing(true);
+    setRefreshError(null);
+    const ok = await refreshEnvAll();
+    if (!ok) {
+      setRefreshError("环境检测请求失败");
+    }
+    setRefreshing(false);
+  }, [refreshEnvAll]);
 
   const toggleAck = useCallback((id: string) => {
     setAcked((prev) => {
@@ -374,7 +380,7 @@ export default function EnvCheck() {
                 } else {
                   setRepairError(job.error || "修复未成功，请查看日志或按修复建议手动处理");
                 }
-                load(true);
+                void refreshEnvAll();
               }
             } catch {
               /* 单次轮询失败忽略，下一轮重试 */
@@ -385,7 +391,7 @@ export default function EnvCheck() {
         setRepairError(e instanceof Error ? e.message : String(e));
       }
     },
-    [load]
+    [refreshEnvAll]
   );
 
   // 待处理项 = 未通过且未被「已知悉」的项目；此为运维真正要跟进的清单。
@@ -431,29 +437,31 @@ export default function EnvCheck() {
         <Stack direction="row" spacing={1} alignItems="center">
           <Button
             variant="outlined"
-            color={live ? "success" : "inherit"}
+            color={pollingActive ? "success" : "inherit"}
             startIcon={live ? <Pause /> : <PlayArrow />}
             onClick={() => setLive((v) => !v)}
           >
-            {live ? "实时中" : "已暂停"}
+            {pollingActive ? "实时中" : "已暂停"}
           </Button>
           <Button
             variant="contained"
-            startIcon={loading ? <CircularProgress size={16} color="inherit" /> : <Refresh />}
-            onClick={() => load(false)}
-            disabled={loading}
+            startIcon={refreshing ? <CircularProgress size={16} color="inherit" /> : <Refresh />}
+            onClick={manualRefresh}
+            disabled={refreshing || loading}
           >
             重新检查
           </Button>
         </Stack>
       </Stack>
       <Typography variant="caption" color="text.secondary">
-        实时刷新{live ? "中" : "已暂停"} · 上次更新{" "}
+        实时刷新{pollingActive ? "中" : "已暂停"} · 上次更新{" "}
         {lastUpdate ? lastUpdate.toLocaleTimeString("zh-CN") : "—"}
       </Typography>
 
-      {error && (
-        <Alert severity="error">{error}（请确认运维后端已在 127.0.0.1:18721 运行）</Alert>
+      {(error || refreshError) && (
+        <Alert severity="error">
+          {error || refreshError}（请确认运维后端已在 127.0.0.1:18721 运行）
+        </Alert>
       )}
 
       {/* 修复任务进行中：阶段 + 最新日志 */}
@@ -553,7 +561,7 @@ export default function EnvCheck() {
         </>
       )}
 
-      {loading && reports.length === 0 ? (
+      {(loading || refreshing) && reports.length === 0 ? (
         <Box sx={{ display: "flex", justifyContent: "center", mt: 8 }}>
           <CircularProgress />
         </Box>

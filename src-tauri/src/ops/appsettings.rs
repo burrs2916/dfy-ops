@@ -6,17 +6,18 @@ use std::path::Path;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
-    /// 服务总览（Dashboard）状态轮询间隔（秒）。
+    /// 服务总览状态自动轮询间隔（秒）；0 = 关闭（默认）——启动时检测一次，
+    /// 此后按需手动/单服务刷新。全量探测在 Windows 上开销大，常驻轮询得不偿失。
     pub status_refresh_secs: u64,
-    /// 运维中心环境复探间隔（秒）。
+    /// 运维中心环境复探间隔（秒）；0 = 关闭（默认），仅进入页面时检测。
     pub env_refresh_secs: u64,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
-            status_refresh_secs: 5,
-            env_refresh_secs: 15,
+            status_refresh_secs: 0,
+            env_refresh_secs: 0,
         }
     }
 }
@@ -42,9 +43,14 @@ impl AppSettings {
         std::fs::write(path, s)
     }
 
-    /// 约束到合法区间（防手改配置文件把轮询设成 0 或天文数字）。
+    /// 约束到合法区间（防手改配置文件把轮询设成天文数字）。
+    /// 0 合法（= 关闭自动轮询）；>0 时钳到合理下限，避免 1 秒级高频探测。
     pub fn sanitize(&mut self) {
-        self.status_refresh_secs = self.status_refresh_secs.clamp(2, 120);
-        self.env_refresh_secs = self.env_refresh_secs.clamp(5, 600);
+        if self.status_refresh_secs > 0 {
+            self.status_refresh_secs = self.status_refresh_secs.clamp(2, 120);
+        }
+        if self.env_refresh_secs > 0 {
+            self.env_refresh_secs = self.env_refresh_secs.clamp(5, 600);
+        }
     }
 }

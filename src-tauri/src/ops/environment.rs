@@ -1,6 +1,9 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -65,20 +68,81 @@ pub struct DepState {
 pub type DepStates = HashMap<String, DepState>;
 
 /// 执行命令并取首行有效输出（兼容 java/nginx 输出到 stderr 的情况）。
+///
+/// 带硬超时（3s）：`java -version` 在杀软扫描/冷启动下可能显著变慢，
+/// 损坏的运行时甚至可能挂起——无超时的 `output()` 会把整轮检测永久卡死。
 fn probe(cmd: &str, args: &[&str]) -> Option<String> {
-    let out = Command::new(cmd).args(args).output().ok()?;
-    if !out.status.success() {
+    const TIMEOUT: Duration = Duration::from_millis(3000);
+    let mut child = Command::new(cmd)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + TIMEOUT;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break Some(st),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
+            // 超时：杀掉并视为探测失败（输出不再读取，进程死后管道自然 EOF）
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+            Err(_) => return None,
+        }
+    }?;
+    if !status.success() {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut stdout = String::new();
+    if let Some(s) = child.stdout.as_mut() {
+        let _ = s.read_to_string(&mut stdout);
+    }
     let text = if stdout.trim().is_empty() {
-        String::from_utf8_lossy(&out.stderr)
+        let mut stderr = String::new();
+        if let Some(s) = child.stderr.as_mut() {
+            let _ = s.read_to_string(&mut stderr);
+        }
+        stderr
     } else {
         stdout
     };
     text.lines()
         .find(|l| !l.trim().is_empty())
         .map(|l| l.trim().to_string())
+}
+
+/// 一次全量检查会话内共享的探测缓存：同一命令（java -version / nginx -v / node -v）
+/// 只真正执行一次子进程调用，其余服务复用结果。
+///
+/// 全量检查并行化后，多个 Vertx 服务会同时要 `java -version`——不共享就是
+/// N 次 JVM 冷启动（每次 0.3-1s）。锁内查、锁外探，并发重复探测天然收敛为一次。
+#[derive(Default)]
+pub struct ProbeCache {
+    map: Mutex<HashMap<String, Option<String>>>,
+}
+
+impl ProbeCache {
+    fn probe(&self, cmd: &str, args: &[&str]) -> Option<String> {
+        let key = format!("{cmd}?{}", args.join(" "));
+        if let Some(v) = self.map.lock().unwrap().get(&key) {
+            return v.clone();
+        }
+        let v = probe(cmd, args);
+        self.map.lock().unwrap().insert(key, v.clone());
+        v
+    }
+}
+
+/// 会话缓存的探测入口：cache=None 时直接探测（单服务检查量小，无需共享）。
+fn probe_cached(cache: Option<&ProbeCache>, cmd: &str, args: &[&str]) -> Option<String> {
+    match cache {
+        Some(c) => c.probe(cmd, args),
+        None => probe(cmd, args),
+    }
 }
 
 /// 从 `java -version` 输出解析 (major, minor, patch)，兼容旧式 "1.8.0_382"。
@@ -178,8 +242,8 @@ fn tcp_ok(port: u16) -> bool {
 /// PATH java 检测（未声明预置 JRE 的服务走这条，dev 机语义）：
 /// 第一事实 = PATH 上的 java（run_cmd 实际执行者）；不达标时盘点本机
 /// 已装 JDK，区分「配置修复」与「需要安装」（/api/env/repair 自动安装兜底）。
-fn push_path_java_check(items: &mut Vec<CheckItem>, expected_major: u32) {
-    let java = probe("java", &["-version"]);
+fn push_path_java_check(items: &mut Vec<CheckItem>, expected_major: u32, cache: Option<&ProbeCache>) {
+    let java = probe_cached(cache, "java", &["-version"]);
     let path_ok = matches!(
         java.as_deref().and_then(java_version_tuple),
         Some((major, _, _)) if major >= expected_major
@@ -289,7 +353,12 @@ fn detect_webview2() -> Option<String> {
 ///    检测结果），依赖未运行即 Fail（启动它没有意义）、运行但端口不可达即 Warn。
 ///
 /// `states`：全部服务的实时状态视图（调用方从 to_status 构建）。
-pub fn check_service_env(def: &ServiceDef, states: &DepStates) -> ServiceEnvReport {
+/// `cache`：全量检查共享的探测会话缓存；单服务检查传 None。
+pub fn check_service_env_with(
+    def: &ServiceDef,
+    states: &DepStates,
+    cache: Option<&ProbeCache>,
+) -> ServiceEnvReport {
     let mut items: Vec<CheckItem> = Vec::new();
     let running = states.get(&def.id).map(|s| s.running).unwrap_or(false);
 
@@ -313,7 +382,8 @@ pub fn check_service_env(def: &ServiceDef, states: &DepStates) -> ServiceEnvRepo
                         } else {
                             home.join("bin").join("java")
                         };
-                        let version = probe(
+                        let version = probe_cached(
+                            cache,
                             bin.to_string_lossy().as_ref(),
                             &["-version"],
                         )
@@ -379,15 +449,15 @@ pub fn check_service_env(def: &ServiceDef, states: &DepStates) -> ServiceEnvRepo
                 };
                 items.push(it);
             } else {
-                push_path_java_check(&mut items, expected_major);
+                push_path_java_check(&mut items, expected_major, cache);
             }
         }
         ServiceKind::VueSpa | ServiceKind::AngularSpa => {
             // 前端不预设部署形态：未运行时检查可行运行路径（nginx 或 Node 任一可用）；
             // 运行中则事实已回答，交给依赖检查（如 dfy-ui → dfy-backend）。
             if !running {
-                let nginx = probe("nginx", &["-v"]);
-                let node = probe("node", &["-v"]);
+                let nginx = probe_cached(cache, "nginx", &["-v"]);
+                let node = probe_cached(cache, "node", &["-v"]);
                 let ok = nginx.is_some() || node.is_some();
                 let actual = format!(
                     "nginx: {}；Node.js: {}",
@@ -627,7 +697,7 @@ mod tests {
         ]);
         for id in ["dfy-ui", "gateway-console", "biosphere-spatial"] {
             let def = def_of(id);
-            let report = check_service_env(&def, &st);
+            let report = check_service_env_with(&def, &st, None);
             assert_eq!(
                 report.overall,
                 CheckStatus::Pass,
@@ -663,7 +733,7 @@ mod tests {
             ("mysql", true, true, &[3306]),
             ("redis", true, true, &[6379]),
         ]);
-        let report = check_service_env(&def, &st);
+        let report = check_service_env_with(&def, &st, None);
 
         // jar 项存在且非 Pass（产物不在内置 Windows 路径下）
         let jar = report
@@ -694,7 +764,7 @@ mod tests {
     fn bundled_java_missing_fails_with_restore_hint() {
         let def = def_of("dfy-backend");
         let st = states(&[("mysql", true, true, &[3306]), ("redis", true, true, &[6379])]);
-        let report = check_service_env(&def, &st);
+        let report = check_service_env_with(&def, &st, None);
         let java = report
             .items
             .iter()
@@ -747,7 +817,7 @@ mod tests {
             ("mysql", false, false, &[]),
             ("redis", true, true, &[6379]),
         ]);
-        let report = check_service_env(&def, &st);
+        let report = check_service_env_with(&def, &st, None);
         let mysql = report.items.iter().find(|i| i.id == "dep-mysql").unwrap();
         let redis = report.items.iter().find(|i| i.id == "dep-redis").unwrap();
         assert_eq!(mysql.status, CheckStatus::Fail, "依赖未运行应为 fail（启动无意义）");
@@ -760,7 +830,7 @@ mod tests {
             ("mysql", true, false, &[]),
             ("redis", true, true, &[6379]),
         ]);
-        let report = check_service_env(&def, &st);
+        let report = check_service_env_with(&def, &st, None);
         let mysql = report.items.iter().find(|i| i.id == "dep-mysql").unwrap();
         assert_eq!(mysql.status, CheckStatus::Warn);
         assert_eq!(report.overall, CheckStatus::Warn);
@@ -770,7 +840,7 @@ mod tests {
     #[test]
     fn stopped_frontend_env_accepts_node_or_nginx() {
         let def = def_of("gateway-console");
-        let report = check_service_env(&def, &states(&[]));
+        let report = check_service_env_with(&def, &states(&[]), None);
         let has_runtime = report
             .items
             .iter()
@@ -788,7 +858,7 @@ mod tests {
         let def = def_of("edge-conductor");
         assert!(def.requires.iter().any(|r| r.check_id() == "greptime"));
         // 未提供状态视图时 running=false，但 requires 照常探测
-        let report = check_service_env(&def, &states(&[]));
+        let report = check_service_env_with(&def, &states(&[]), None);
         assert!(
             report.items.iter().any(|i| i.id == "greptime"),
             "requires 声明的检查项必须出现: {:?}",
@@ -801,7 +871,7 @@ mod tests {
     #[test]
     fn tauri_env_passes_on_macos_without_running() {
         let def = def_of("biosphere-spatial");
-        let report = check_service_env(&def, &states(&[]));
+        let report = check_service_env_with(&def, &states(&[]), None);
         assert_eq!(report.overall, CheckStatus::Pass);
     }
 }

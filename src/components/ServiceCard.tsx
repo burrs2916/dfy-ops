@@ -9,7 +9,7 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { PlayArrow, Replay, Stop } from "@mui/icons-material";
+import { PlayArrow, Refresh, Replay, Stop } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useOpsStore } from "../store";
@@ -40,22 +40,32 @@ function envChip(env?: ServiceEnvReport) {
 
 export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvReport }) {
   const navigate = useNavigate();
-  const refresh = useOpsStore((st) => st.refresh);
+  const refreshServices = useOpsStore((st) => st.refreshServices);
   const [busy, setBusy] = useState(false);
+  const [reloading, setReloading] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
 
-  // 卡片级快捷操作：执行期间禁点，完成后刷新全局状态，失败就地显示错误
+  // 卡片级快捷操作：执行期间禁点，完成后只刷新本服务 + 其依赖
+  //（启动会级联拉起 dependsOn，依赖的状态也可能变化），不做全量探测，
+  // 失败就地显示错误
   const act = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(true);
     setErrMsg(null);
     try {
       await fn();
-      await refresh();
+      await refreshServices([s.id, ...s.dependsOn]);
     } catch (e) {
       setErrMsg(`${label}失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setBusy(false);
     }
+  };
+
+  // 单服务状态刷新：只探测本服务（状态 + 环境），秒级返回
+  const reload = async () => {
+    setReloading(true);
+    await refreshServices([s.id]);
+    setReloading(false);
   };
 
   // 卡片整体可点击跳转详情。不能用 CardActionArea——它渲染成 <button>，
@@ -130,6 +140,16 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
                     </Tooltip>
                   </>
                 )}
+                {/* 单服务刷新：只重探本服务，替代全量轮询 */}
+                <Tooltip title="刷新此服务状态">
+                  <IconButton size="small" onClick={reload} disabled={reloading || busy}>
+                    {reloading ? (
+                      <CircularProgress size={14} />
+                    ) : (
+                      <Refresh fontSize="small" />
+                    )}
+                  </IconButton>
+                </Tooltip>
               </Stack>
             )}
           </Stack>

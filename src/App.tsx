@@ -7,13 +7,16 @@ import EnvCheck from "./pages/EnvCheck";
 import Settings from "./pages/Settings";
 import AiAssistant from "./pages/AiAssistant";
 import Topology from "./pages/Topology";
-import { useAppSettingsStore } from "./store";
+import { useAppSettingsStore, useOpsStore } from "./store";
 
 export default function App() {
   const loadAppSettings = useAppSettingsStore((s) => s.load);
+  const bootstrap = useOpsStore((s) => s.bootstrap);
   useEffect(() => {
     loadAppSettings();
-  }, [loadAppSettings]);
+    // 应用启动时检测一次服务状态与环境（store 级去重：切页面/返回总览不再重复探测）
+    void bootstrap();
+  }, [loadAppSettings, bootstrap]);
 
   return (
     <Routes>

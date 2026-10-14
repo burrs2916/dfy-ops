@@ -41,6 +41,14 @@ fn set_dock_icon_dev() {
     tracing::info!("dev Dock 图标已设置: {path_str}");
 }
 
+/// 前端据此决定是否渲染自绘标题栏：仅 Windows 关闭系统窗口装饰改自绘——
+/// 原生标题栏左上角的系统小图标与界面 AppBar 已有的品牌大 logo 重复，且
+/// 整条原生标题栏与主题风格割裂。macOS 保持系统原生标题栏（红绿灯），恒 false。
+#[tauri::command]
+fn uses_custom_titlebar() -> bool {
+    cfg!(target_os = "windows")
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -72,6 +80,7 @@ pub fn run() {
                 app_settings: Arc::new(Mutex::new(AppSettings::load(&config_dir))),
                 config_dir,
                 env_cache: Arc::new(Mutex::new(None)),
+                env_rebuild: Arc::new(tokio::sync::Mutex::new(())),
                 repair: Arc::new(ops::env_repair::RepairState::default()),
             });
 
@@ -109,6 +118,7 @@ pub fn run() {
             });
             Ok(())
         })
+        .invoke_handler(tauri::generate_handler![uses_custom_titlebar])
         .run(tauri::generate_context!())
         .expect("error while running DFY 运维平台");
 }

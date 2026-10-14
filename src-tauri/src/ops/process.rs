@@ -190,103 +190,244 @@ impl ProcManager {
     }
 }
 
-/// 本机命令行匹配给定名字的全部 PID（全命令行 substring 匹配，best-effort）。
+/// 一次全量进程快照：把「逐服务起子进程」的探测合并为「一轮子进程 + 内存匹配」。
 ///
-/// 这是「进程是事实来源」检测模型的入口：先按进程名定位 PID，再用
-/// [`listening_ports`] 反查它们实际监听的端口——**平台不规定端口，端口由进程反查得出**。
-/// 注意：pattern 应使用运行器特征（如 `ng serve`、`dfy-server.jar`、`edgecd-daemon`），
-/// 不要用项目路径——IDE 语言服务进程的命令行里常带全部项目路径，会误命中。
-pub fn process_pids(name: &str) -> Vec<u32> {
-    process_pids_inner(name, true)
+/// Windows 上每次 tasklist / netstat / PowerShell 都是 0.1-2s 的子进程调用，
+/// 全量检测若逐服务执行（9 服务 × 1-3 次调用，串行）要数秒——这是「检测服务状态
+/// 与环境」在 Windows 上慢的最大来源。快照只做两次全量采集（tasklist + netstat），
+/// 命令行映射懒加载（仅存在镜像未命中且允许兜底的服务时取一次），之后全部在内存
+/// 匹配：全量检测的子进程调用从 O(N) 降到 O(1)。
+pub struct ProcSnapshot {
+    /// 归一化镜像名（小写、去 .exe）→ PID 列表。Unix 上为空（pgrep 按名即时查，本身很快）。
+    #[cfg(target_os = "windows")]
+    image_pids: HashMap<String, Vec<u32>>,
+    /// PID → 正在 LISTEN 的本地端口。Unix 上为空（按需 lsof）。
+    #[cfg(target_os = "windows")]
+    pid_ports: HashMap<u32, Vec<u16>>,
+    /// Windows 全量命令行映射（PID → 完整命令行），首次命令行兜底时懒加载一次
+    /// （PowerShell Get-CimInstance 全量 1-2s，替代逐 token 查询的 N×1-2s）。
+    #[cfg(target_os = "windows")]
+    cmdline: std::sync::OnceLock<HashMap<u32, String>>,
 }
 
-/// 仅按进程镜像名匹配（跳过命令行兜底）。
-///
-/// 无端口的桌面客户端（TauriApp）必须走这里：主程序 exe 镜像名命中即可信。
-/// 命令行兜底是全进程子串匹配——查询自身的命令行里就带着目标名，且 Windows
-/// 部署机上任何命令行含该名字的进程（如打开过项目目录的 IDE）都会误命中，
-/// 导致「没安装/没运行」被误报成「检测到在运行」（2026-10-14 Windows 实测踩坑）。
-pub fn process_pids_image_only(name: &str) -> Vec<u32> {
-    process_pids_inner(name, false)
+/// 镜像名归一化：小写、去 .exe 后缀。tasklist 报 "java.exe"、配置写 "java"，
+/// 归一化后同一键，「含/不含 .exe 各试一次」的旧逻辑在此自动等价。
+#[allow(dead_code)] // 解析纯函数跨平台编译供测试使用；Unix 上无生产调用方
+fn normalize_image(name: &str) -> String {
+    let n = name.trim().to_lowercase();
+    n.strip_suffix(".exe").unwrap_or(&n).to_string()
 }
 
+/// 解析 `tasklist /FO CSV /NH` 全量输出：归一化镜像名 → PID 列表。纯函数便于测试
+/// （Windows 解析逻辑在 macOS/CI 上即可验证，不必到 Windows 主机试错）。
+#[allow(dead_code)] // 同上
+fn parse_tasklist_csv(text: &str) -> HashMap<String, Vec<u32>> {
+    let mut map: HashMap<String, Vec<u32>> = HashMap::new();
+    for line in text.lines() {
+        // CSV 行："镜像名","PID","会话名",...
+        let cols: Vec<&str> = line.split('"').collect();
+        if cols.len() < 4 {
+            continue;
+        }
+        if let Ok(pid) = cols[3].trim().parse::<u32>() {
+            map.entry(normalize_image(cols[1])).or_default().push(pid);
+        }
+    }
+    map
+}
+
+/// 解析 `netstat -ano -p tcp` 全量输出：PID → LISTENING 本地端口。纯函数便于测试。
+#[allow(dead_code)] // 同上
+fn parse_netstat_snapshot(text: &str) -> HashMap<u32, Vec<u16>> {
+    let mut map: HashMap<u32, Vec<u16>> = HashMap::new();
+    for line in text.lines() {
+        if !line.contains("LISTENING") {
+            continue;
+        }
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 5 {
+            continue;
+        }
+        let port = cols[1]
+            .rsplit_once(':')
+            .and_then(|(_, p)| p.parse::<u16>().ok());
+        if let (Some(port), Ok(pid)) = (port, cols[4].parse::<u32>()) {
+            map.entry(pid).or_default().push(port);
+        }
+    }
+    map
+}
+
+#[cfg(not(target_os = "windows"))]
+impl Default for ProcSnapshot {
+    fn default() -> Self {
+        Self::capture()
+    }
+}
+
+impl ProcSnapshot {
+    #[cfg(target_os = "windows")]
+    pub fn capture() -> Self {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        // 一次全量 tasklist（无 /FI 过滤）+ 一次全量 netstat，替代逐服务的多次调用
+        let image_pids = Command::new("tasklist")
+            .args(["/FO", "CSV", "/NH"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| parse_tasklist_csv(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default();
+        let pid_ports = Command::new("netstat")
+            .args(["-ano", "-p", "tcp"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stderr(Stdio::null())
+            .output()
+            .map(|o| parse_netstat_snapshot(&String::from_utf8_lossy(&o.stdout)))
+            .unwrap_or_default();
+        Self {
+            image_pids,
+            pid_ports,
+            cmdline: std::sync::OnceLock::new(),
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    pub fn capture() -> Self {
+        Self {}
+    }
+
+    /// 按运行器特征取 PID：先镜像名精确匹配（归一化后含/不含 .exe 等价），
+    /// 未命中且允许兜底再按命令行子串匹配（Erlang 系 beam.smp / Java jar 的唯一通道）。
+    /// 匹配语义与 [`process_pids`] / [`process_pids_image_only`] 一致，仅数据来源换为快照。
+    pub fn pids_for(&self, name: &str, allow_cli_fallback: bool) -> Vec<u32> {
+        if name.trim().is_empty() {
+            return vec![];
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let key = normalize_image(name);
+            let mut pids = self.image_pids.get(&key).cloned().unwrap_or_default();
+            if pids.is_empty() && allow_cli_fallback {
+                // 命令行兜底改为内存子串匹配：与 PowerShell -like 同为不区分大小写，
+                // 且排除自身 PID（查询结果的幽灵 PID 会把「未运行」误判成「在运行」）
+                let token = name.trim().to_lowercase();
+                let self_pid = std::process::id();
+                pids = self
+                    .commandline_map()
+                    .iter()
+                    .filter(|(pid, cmd)| **pid != self_pid && cmd.to_lowercase().contains(&token))
+                    .map(|(pid, _)| *pid)
+                    .collect();
+            }
+            pids.sort_unstable();
+            pids.dedup();
+            pids
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = self;
+            process_pids_inner(name, allow_cli_fallback)
+        }
+    }
+
+    /// 反查 PID 集合正在 LISTEN 的本地端口（去重升序）。
+    pub fn ports_of(&self, pids: &[u32]) -> Vec<u16> {
+        if pids.is_empty() {
+            return vec![];
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let mut ports: Vec<u16> = pids
+                .iter()
+                .filter_map(|p| self.pid_ports.get(p))
+                .flatten()
+                .copied()
+                .collect();
+            ports.sort_unstable();
+            ports.dedup();
+            ports
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = self;
+            listening_ports(pids)
+        }
+    }
+
+    /// Windows 全量命令行映射（懒加载，并发调用只初始化一次）。
+    #[cfg(target_os = "windows")]
+    fn commandline_map(&self) -> &HashMap<u32, String> {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        self.cmdline.get_or_init(|| {
+            const TIMEOUT_MS: u64 = 5000;
+            let mut child = match Command::new("powershell")
+                .args([
+                    "-NoProfile",
+                    "-Command",
+                    "Get-CimInstance Win32_Process | ForEach-Object { \"{0}`t{1}\" -f $_.ProcessId, $_.CommandLine }",
+                ])
+                .creation_flags(CREATE_NO_WINDOW)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(c) => c,
+                Err(_) => return HashMap::new(),
+            };
+            // 硬超时兜底：PowerShell 偶发挂起不能拖死整轮检测
+            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(TIMEOUT_MS);
+            let done = loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break true,
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(20))
+                    }
+                    _ => break false,
+                }
+            };
+            if !done {
+                let _ = child.kill();
+                let _ = child.wait();
+                return HashMap::new();
+            }
+            let mut map = HashMap::new();
+            if let Some(out) = child.stdout.take() {
+                let text = std::io::read_to_string(out).unwrap_or_default();
+                for line in text.lines() {
+                    // 输出行："PID\t完整命令行"
+                    if let Some((pid, cmd)) = line.split_once('\t') {
+                        if let Ok(pid) = pid.trim().parse::<u32>() {
+                            map.insert(pid, cmd.to_string());
+                        }
+                    }
+                }
+            }
+            map
+        })
+    }
+}
+
+/// 按进程特征匹配 PID 的统一入口（快照数据源在 Windows 上为全量采集，Unix 为 pgrep）。
+///
+/// `allow_cli_fallback`：镜像名未命中时是否按命令行子串兜底。
+/// 无端口的桌面客户端（TauriApp）必须传 false：命令行兜底是全进程子串匹配——
+/// 查询自身的命令行里就带着目标名，且 Windows 部署机上任何命令行含该名字的
+/// 进程（如打开过项目目录的 IDE）都会误命中，导致「没安装/没运行」被误报成
+/// 「检测到在运行」（2026-10-14 Windows 实测踩坑）。
+/// Unix：pgrep -f 按命令行匹配进程（镜像名/命令行之分在 Unix 不存在，
+/// pgrep 本身就是命令行匹配）。快照在 Unix 上不做预采集——pgrep 单次
+/// 查询毫秒级，按名即时调用即可；Windows 才需要全量快照摊薄子进程开销。
+#[cfg(not(target_os = "windows"))]
 fn process_pids_inner(name: &str, allow_cli_fallback: bool) -> Vec<u32> {
+    let _ = allow_cli_fallback;
     if name.trim().is_empty() {
         return vec![];
     }
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        let image_match = |image: &str| {
-            Command::new("tasklist")
-                .args(["/FI", &format!("IMAGENAME eq {image}"), "/NH", "/FO", "CSV"])
-                .creation_flags(CREATE_NO_WINDOW)
-                .stderr(Stdio::null())
-                .output()
-                .map(|o| {
-                    // tasklist CSV 每行: "镜像名","PID","会话名",...
-                    String::from_utf8_lossy(&o.stdout)
-                        .lines()
-                        .filter_map(|l| l.split('"').nth(3))
-                        .filter_map(|pid| pid.parse().ok())
-                        .collect::<Vec<u32>>()
-                })
-                .unwrap_or_default()
-        };
-        // 先按镜像名匹配（含/不含 .exe 各试一次）；
-        // 都未命中再按命令行子串匹配——Erlang 系应用（VerneMQ）的实际进程是
-        // beam.smp.exe，与 RabbitMQ 等共用镜像名，只能靠命令行里的应用标识区分。
-        let mut pids = image_match(name);
-        if pids.is_empty() && !name.ends_with(".exe") {
-            pids = image_match(&format!("{name}.exe"));
-        }
-        if allow_cli_fallback && pids.is_empty() {
-            pids = windows_commandline_pids(name);
-        }
-        pids
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        // Unix 只有 pgrep -f 一条路，镜像名/命令行之分不存在
-        let _ = allow_cli_fallback;
-        let pids: Vec<u32> = Command::new("pgrep")
-            .args(["-f", name])
-            .stderr(Stdio::null())
-            .output()
-            .map(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .split_whitespace()
-                    .filter_map(|t| t.parse().ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        filter_tool_noise(pids)
-    }
-}
-
-/// Windows：按命令行子串匹配进程（PowerShell Get-CimInstance，比 wmic 现代）。
-///
-/// 用途：VerneMQ 这类 Erlang 应用，进程镜像名（beam.smp.exe）与 RabbitMQ 等共用，
-/// 镜像名匹配会误命中；其命令行里含应用标识（如 `...\vernemq\...`），按命令行匹配才准。
-/// 注意：查询本身约 1-2s，仅在镜像名匹配落空时作为兜底调用，不进高频轮询路径。
-///
-/// 必须排除自身 PID：powershell 进程自己的命令行含 `-Command "...token..."`
-/// 原文，不排除就会匹配到自己，返回一个注定已退出的「幽灵 PID」，
-/// 把「未运行」误判成「检测到在运行」（2026-10-14 Windows 实测踩坑）。
-#[cfg(target_os = "windows")]
-fn windows_commandline_pids(token: &str) -> Vec<u32> {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    // token 来自 services.toml（本机受信配置），无注入面；like 通配符转义 % 即可
-    let pattern = format!("*{}*", token.replace('%', ""));
-    let self_pid = std::process::id();
-    let ps = format!(
-        "Get-CimInstance Win32_Process | Where-Object {{ $_.ProcessId -ne {self_pid} -and $_.CommandLine -like '{pattern}' }} | Select-Object -ExpandProperty ProcessId"
-    );
-    Command::new("powershell")
-        .args(["-NoProfile", "-Command", &ps])
-        .creation_flags(CREATE_NO_WINDOW)
+    let pids: Vec<u32> = Command::new("pgrep")
+        .args(["-f", name])
         .stderr(Stdio::null())
         .output()
         .map(|o| {
@@ -295,7 +436,8 @@ fn windows_commandline_pids(token: &str) -> Vec<u32> {
                 .filter_map(|t| t.parse().ok())
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    filter_tool_noise(pids)
 }
 
 /// 进程匹配后剔除「工具噪音」PID。
@@ -352,43 +494,29 @@ fn is_tool_noise(comm: &str) -> bool {
         .any(|k| base.contains(k))
 }
 
-/// 反查给定 PID 集合正在 LISTEN 的本地端口（去重升序）。
+/// 反查给定 PID 集合正在 LISTEN 的本地端口（去重升序）。Unix 专用：
+/// Windows 走 [`ProcSnapshot`] 的全量 netstat 快照（`ports_of`），不再逐服务调用。
 ///
-/// 「服务实际监听什么端口就检测什么端口」的实现：Unix/macOS 走
-/// `lsof -nP -iTCP -sTCP:LISTEN -a -p <pids>`，Windows 走 `netstat -ano`。
-/// Best-effort：命令不可用（如部分 Linux 无 lsof）时返回空，调用方自行回退。
+/// 「服务实际监听什么端口就检测什么端口」的实现：`lsof -nP -iTCP -sTCP:LISTEN -a -p <pids>`。
+/// Best-effort：lsof 不可用（如部分 Linux）时返回空，调用方自行回退。
+#[cfg(not(target_os = "windows"))]
 pub fn listening_ports(pids: &[u32]) -> Vec<u16> {
     if pids.is_empty() {
         return vec![];
     }
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        let pid_set: Vec<String> = pids.iter().map(|p| p.to_string()).collect();
-        Command::new("netstat")
-            .args(["-ano", "-p", "tcp"])
-            .creation_flags(0x0800_0000)
-            .stderr(Stdio::null())
-            .output()
-            .map(|o| parse_netstat_ports(&String::from_utf8_lossy(&o.stdout), &pid_set))
-            .unwrap_or_default()
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let pid_list = pids
-            .iter()
-            .map(|p| p.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        // +c0：不截断 COMMAND 列，供解析层做工具噪音过滤
-        // （pid 级过滤依赖 ps，ps 不可用的环境下这里是最后一道防线）。
-        Command::new("lsof")
-            .args(["-nP", "+c0", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &pid_list])
-            .stderr(Stdio::null())
-            .output()
-            .map(|o| parse_lsof_ports(&String::from_utf8_lossy(&o.stdout)))
-            .unwrap_or_default()
-    }
+    let pid_list = pids
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    // +c0：不截断 COMMAND 列，供解析层做工具噪音过滤
+    // （pid 级过滤依赖 ps，ps 不可用的环境下这里是最后一道防线）。
+    Command::new("lsof")
+        .args(["-nP", "+c0", "-iTCP", "-sTCP:LISTEN", "-a", "-p", &pid_list])
+        .stderr(Stdio::null())
+        .output()
+        .map(|o| parse_lsof_ports(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
 }
 
 /// 解析 `lsof -iTCP -sTCP:LISTEN` 输出，提取 NAME 列（如 `*:4200`、`127.0.0.1:48085`、
@@ -417,27 +545,6 @@ fn parse_lsof_ports(text: &str) -> Vec<u16> {
             l.split_whitespace()
                 .rev()
                 .find_map(|t| t.rsplit_once(':')?.1.parse().ok())
-        })
-        .collect();
-    ports.sort_unstable();
-    ports.dedup();
-    ports
-}
-
-/// 解析 Windows `netstat -ano -p tcp` 输出：取 LISTENING 行，本地地址列的端口，
-/// 且 PID 在给定集合内。纯函数便于测试。
-#[cfg(target_os = "windows")]
-fn parse_netstat_ports(text: &str, pids: &[String]) -> Vec<u16> {
-    let mut ports: Vec<u16> = text
-        .lines()
-        .filter(|l| l.contains("LISTENING"))
-        .filter_map(|l| {
-            let cols: Vec<&str> = l.split_whitespace().collect();
-            // Proto Local Foreign State PID
-            if cols.len() < 5 || !pids.contains(&cols[4].to_string()) {
-                return None;
-            }
-            cols[1].rsplit_once(':')?.1.parse().ok()
         })
         .collect();
     ports.sort_unstable();
@@ -506,6 +613,63 @@ fn spawn_to_log(cwd: &str, cmd: &str, log_path: &str) -> std::io::Result<Child> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// tasklist 全量 CSV 解析：镜像名归一化（大小写/.exe 折叠为同一键），
+    /// 同名多实例 PID 全收。这是 Windows「进程是事实来源」的第一步，纯函数可跨平台测。
+    #[test]
+    fn parse_tasklist_csv_normalizes_and_groups() {
+        let sample = concat!(
+            "\"Image Name\",\"PID\",\"Session Name\",\"Session#\",\"Mem Usage\"\r\n",
+            "\"java.exe\",\"35668\",\"Services\",\"0\",\"12,345 K\"\r\n",
+            "\"JAVA.EXE\",\"35669\",\"Console\",\"1\",\"30,000 K\"\r\n",
+            "\"mysqld\",\"812\",\"Services\",\"0\",\"99,999 K\"\r\n",
+            "INFO: No tasks are running which match the specified criteria.\r\n",
+        );
+        let map = parse_tasklist_csv(sample);
+        assert_eq!(
+            map.get("java"),
+            Some(&vec![35668, 35669]),
+            "大小写/.exe 差异必须折叠为同一镜像键，PID 全保留"
+        );
+        assert_eq!(map.get("mysqld"), Some(&vec![812]));
+        assert!(!map.contains_key("java.exe"), "归一化后不得出现带 .exe 的键");
+        // 非数据行（INFO 提示/表头）不得产生假 PID
+        assert_eq!(map.len(), 2);
+    }
+
+    /// 镜像名归一化：含/不含 .exe 等价——快照下「各试一次」的旧逻辑自动覆盖。
+    #[test]
+    fn normalize_image_folds_exe_suffix_and_case() {
+        assert_eq!(normalize_image("Java.EXE"), normalize_image("java"));
+        assert_eq!(normalize_image(" edgecd-daemon.exe "), "edgecd-daemon");
+        assert_eq!(normalize_image("minio"), "minio");
+    }
+
+    /// netstat 全量解析：只收 LISTENING 行、按 PID 分组、多端口去重前的原始列表。
+    #[test]
+    fn parse_netstat_snapshot_groups_by_pid() {
+        let sample = concat!(
+            "\r\n",
+            "Active Connections\r\n",
+            "\r\n",
+            "  Proto  Local Address          Foreign Address        State           PID\r\n",
+            "  TCP    0.0.0.0:48085          0.0.0.0:0              LISTENING       35668\r\n",
+            "  TCP    127.0.0.1:48085        0.0.0.0:0              LISTENING       35668\r\n",
+            "  TCP    0.0.0.0:3306           0.0.0.0:0              LISTENING       812\r\n",
+            "  TCP    10.0.0.2:52114         20.1.2.3:443           ESTABLISHED     999\r\n",
+            "  UDP    0.0.0.0:5353           *:*                                    1000\r\n",
+        );
+        let map = parse_netstat_snapshot(sample);
+        assert_eq!(
+            map.get(&35668),
+            Some(&vec![48085, 48085]),
+            "同一 PID 的多条 LISTEN 行全收（ports_of 层负责去重）"
+        );
+        assert_eq!(map.get(&812), Some(&vec![3306]));
+        // ESTABLISHED / UDP 行不得混入
+        assert!(!map.contains_key(&999));
+        assert!(!map.contains_key(&1000));
+    }
 
     // lsof 输出解析仅存在于非 Windows 编译路径，测试同步加 cfg
     #[cfg(not(target_os = "windows"))]

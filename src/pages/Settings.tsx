@@ -13,8 +13,11 @@ import type { AppSettings } from "../types";
  * 布局与其他设置类页面共用 SettingsLayout（web-craft 风格）。
  */
 
-const STATUS_OPTIONS = [3, 5, 10];
-const ENV_OPTIONS = [10, 15, 30, 60];
+// 0 = 关闭自动轮询（默认）：启动时检测一次，此后按需手动/单服务刷新
+const STATUS_OPTIONS = [0, 3, 5, 10, 30];
+const ENV_OPTIONS = [0, 10, 15, 30, 60];
+
+const intervalLabel = (v: number) => (v === 0 ? "关闭" : `${v} 秒`);
 
 export default function Settings() {
   const { settings, loaded, apply } = useAppSettingsStore();
@@ -76,7 +79,7 @@ export default function Settings() {
                 <Paper variant="outlined" sx={{ overflow: "hidden" }}>
                   <SettingRow
                     label="服务状态刷新间隔"
-                    description="「服务总览」页轮询各服务运行状态的频率"
+                    description="自动轮询各服务运行状态的频率；关闭 = 启动时检测一次，此后用卡片上的「刷新此服务」按钮按需刷新"
                   >
                     <Select
                       size="small"
@@ -86,7 +89,7 @@ export default function Settings() {
                     >
                       {STATUS_OPTIONS.map((v) => (
                         <MenuItem key={v} value={v}>
-                          {v} 秒
+                          {intervalLabel(v)}
                         </MenuItem>
                       ))}
                     </Select>
@@ -94,7 +97,7 @@ export default function Settings() {
                   <Divider />
                   <SettingRow
                     label="环境复探间隔"
-                    description="「运维中心」页重新探测运行环境依赖的频率（探测会执行命令，不宜过快）"
+                    description="重新探测运行环境依赖的频率（探测会执行命令，不宜过快）；关闭 = 仅进入页面时检测"
                   >
                     <Select
                       size="small"
@@ -104,7 +107,7 @@ export default function Settings() {
                     >
                       {ENV_OPTIONS.map((v) => (
                         <MenuItem key={v} value={v}>
-                          {v} 秒
+                          {intervalLabel(v)}
                         </MenuItem>
                       ))}
                     </Select>
