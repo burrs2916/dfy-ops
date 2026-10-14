@@ -96,6 +96,16 @@ const TARGET_LABEL: Record<string, string> = {
   greptime: "GreptimeDB",
 };
 
+/** 与后端 resource::TARGETS 一致：资源目录可识别/可修复的目标软件。 */
+const RESOURCE_TARGETS = ["java", "mysql", "redis", "vernemq", "minio", "greptime"];
+
+/** 包体积 → 人读文案（KB/MB/GB，1 位小数）。 */
+function fmtSize(bytes: number): string {
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
 function StatusDot({ status }: { status: CheckStatus }) {
   return (
     <Box
@@ -462,24 +472,56 @@ function RepairCenter({
   }, [uninstallTarget, removeData, onUninstall]);
 
   const identified = scan?.files.filter((f) => f.target) ?? [];
+  // 就绪度清单：6 个目标软件逐项「找到（哪个包）/ 未找到」；约定布局是
+  // 根目录下按 <软件名>/ 子目录放包（目录名也参与识别），缺失只提示不阻断
+  const missing = RESOURCE_TARGETS.filter((t) => !identified.some((f) => f.target === t));
 
   return (
     <Stack spacing={2}>
-      {/* 资源目录状态：修复来源的第一环 */}
+      {/* 资源目录就绪度清单：修复来源的第一环 */}
       {!resourceDir ? (
         <Alert severity="warning">
           未配置本地资源目录——一键修复仅支持 Java 在线下载（需外网），MySQL / Redis / VerneMQ 等请先到
           「设置 → 资源目录」配置离线安装包，或使用 AI 方案。
         </Alert>
-      ) : scan && scan.exists && identified.length === 0 ? (
-        <Alert severity="warning">
-          资源目录（{resourceDir}）里未识别到安装包：请把 MySQL / Redis / VerneMQ / JDK / MinIO 的
-          msi/exe/zip 放入该目录（根目录或一级子目录均可）。MySQL 与 Redis 优先放 ZIP 免安装版——离线解压、初始化、注册服务一条龙。
+      ) : scan?.exists ? (
+        <Alert severity={missing.length === 0 ? "success" : "warning"}>
+          <Stack>
+            <Typography variant="body2">
+              资源目录（{resourceDir}）就绪度——已识别 <b>{identified.length}</b> 个安装包：
+            </Typography>
+            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.75, mt: 0.75 }}>
+              {RESOURCE_TARGETS.map((t) => {
+                const hits = identified.filter((f) => f.target === t);
+                if (hits.length === 0) {
+                  return (
+                    <Chip key={t} size="small" variant="outlined" label={`${TARGET_LABEL[t]} 未找到`} />
+                  );
+                }
+                // 同一目标多个包时展示最大者（与后端 find_msi/find_zip 取包口径一致）
+                const best = hits.reduce((a, b) => (b.sizeBytes > a.sizeBytes ? b : a));
+                return (
+                  <Chip
+                    key={t}
+                    size="small"
+                    color="success"
+                    variant="outlined"
+                    label={`${TARGET_LABEL[t]} ✓ ${best.fileName}（${fmtSize(best.sizeBytes)}）`}
+                  />
+                );
+              })}
+            </Box>
+            {missing.length > 0 && (
+              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75 }}>
+                还缺 {missing.map((t) => TARGET_LABEL[t]).join("、")} 的包：把 msi/exe/zip 放入该目录（推荐按
+                mysql\、redis\ 等软件名子目录组织；MySQL 与 Redis 优先 ZIP 免安装版——离线解压、初始化、注册服务一条龙）。
+              </Typography>
+            )}
+          </Stack>
         </Alert>
-      ) : scan && identified.length > 0 ? (
-        <Alert severity="success">
-          资源目录（{resourceDir}）已识别 <b>{identified.length}</b> 个安装包：
-          {identified.map((f) => TARGET_LABEL[f.target!] ?? f.target).join("、")}——一键修复将离线安装。
+      ) : scan ? (
+        <Alert severity="error">
+          资源目录（{resourceDir}）不存在或不可访问，请检查「设置 → 资源目录」里的路径。
         </Alert>
       ) : null}
 

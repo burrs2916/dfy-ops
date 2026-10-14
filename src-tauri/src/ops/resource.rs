@@ -36,32 +36,90 @@ pub struct ResourceScan {
     pub files: Vec<ResourceFile>,
 }
 
-/// 按文件名小写模式识别归属软件。扩展名决定「能不能自动装」：
-/// MSI → msiexec 静默安装；EXE/ZIP/其他 → 只识别，安装走 AI 方案/手动。
-pub fn classify(file_name: &str) -> Option<&'static str> {
-    let n = file_name.to_lowercase();
-    // 顺序敏感：vernemq 含 "mq" 但不含 "mysql"；memurai 是 Windows 原生 Redis
-    let target = if n.contains("vernemq") {
-        "vernemq"
-    } else if n.contains("mysql") {
-        "mysql"
-    } else if n.contains("redis") || n.contains("memurai") {
-        "redis"
-    } else if n.contains("minio") {
-        "minio"
-    } else if n.contains("greptime") {
-        "greptime"
-    } else if n.contains("temurin") || n.contains("openjdk") || n.contains("jre") || n.contains("jdk") {
-        "java"
-    } else {
-        return None;
-    };
-    // 安装包类扩展名才识别；随机同名文件（如 readme.pdf）不认
-    const PKG_EXTS: [&str; 4] = [".msi", ".exe", ".zip", ".msix"];
-    PKG_EXTS.iter().any(|e| n.ends_with(e)).then_some(target)
+/// 安装包扩展名（决定「能不能自动装/识别」；随机同名文件如 readme.pdf 不认）。
+const PKG_EXTS: [&str; 4] = [".msi", ".exe", ".zip", ".msix"];
+
+fn is_pkg_ext(name_lower: &str) -> bool {
+    PKG_EXTS.iter().any(|e| name_lower.ends_with(e))
 }
 
-/// 扫描资源目录（根目录 + 一级子目录，交付场景常按软件分子目录）。
+/// 名字 token 匹配归属软件（不含扩展名过滤）——文件名与目录名共用同一套规则。
+/// 目录名兜底识别依赖它：约定布局 `resources/mysql/…`、`resources/redis/…`。
+fn match_target(name_lower: &str) -> Option<&'static str> {
+    // 顺序敏感：vernemq 含 "mq" 但不含 "mysql"；memurai 是 Windows 原生 Redis
+    if name_lower.contains("vernemq") {
+        Some("vernemq")
+    } else if name_lower.contains("mysql") {
+        Some("mysql")
+    } else if name_lower.contains("redis") || name_lower.contains("memurai") {
+        Some("redis")
+    } else if name_lower.contains("minio") {
+        Some("minio")
+    } else if name_lower.contains("greptime") {
+        Some("greptime")
+    } else if name_lower.contains("temurin")
+        || name_lower.contains("openjdk")
+        || name_lower.contains("jre")
+        || name_lower.contains("jdk")
+    {
+        Some("java")
+    } else {
+        None
+    }
+}
+
+/// 按文件名识别归属软件：安装包扩展名 + 名字模式。
+pub fn classify(file_name: &str) -> Option<&'static str> {
+    let n = file_name.to_lowercase();
+    is_pkg_ext(&n).then_some(()).and_then(|()| match_target(&n))
+}
+
+/// 递归扫描目录（根 + 两级子目录，覆盖 `数据库/mysql/xx.zip` 的「类别/软件」分层）。
+///
+/// 目录名参与兜底识别：文件名认不出的安装包，落在名字命中目标软件的目录里
+/// （如 `redis/db-cache.zip`）即归属该软件；最近一级目录优先，认不出则继承父目录。
+fn visit_dir(d: &std::path::Path, depth: u8, parent_target: Option<&'static str>, files: &mut Vec<ResourceFile>) {
+    if depth > 2 {
+        return;
+    }
+    // 本目录的兜底目标：目录名命中 → 用之；否则继承父目录（`数据库/mysql/` 里
+    // 「数据库」认不出，进入「mysql」后命中，其下再嵌套目录继承 mysql）
+    let dir_target = d
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(|n| n.to_lowercase())
+        .and_then(|n| match_target(&n))
+        .or(parent_target);
+    let Ok(entries) = std::fs::read_dir(d) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            visit_dir(&p, depth + 1, dir_target, files);
+            continue;
+        }
+        let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let n = name.to_lowercase();
+        let target = match match_target(&n) {
+            Some(t) if is_pkg_ext(&n) => Some(t),
+            _ => {
+                // 文件名认不出：仅当扩展名是安装包且所在目录名命中目标时兜底
+                if is_pkg_ext(&n) { dir_target } else { None }
+            }
+        };
+        let Some(target) = target else { continue };
+        let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+        files.push(ResourceFile {
+            file_name: name,
+            path: p.to_string_lossy().to_string(),
+            size_bytes: size,
+            target: Some(target.into()),
+        });
+    }
+}
+
+/// 扫描资源目录（根目录 + 两级子目录 + 目录名兜底识别）。
 pub fn scan(dir: &str) -> ResourceScan {
     let mut files = Vec::new();
     if dir.is_empty() {
@@ -79,44 +137,7 @@ pub fn scan(dir: &str) -> ResourceScan {
             files,
         };
     }
-    let mut visit = |d: &std::path::Path| {
-        if let Ok(entries) = std::fs::read_dir(d) {
-            for e in entries.flatten() {
-                let p = e.path();
-                if !p.is_file() {
-                    continue;
-                }
-                let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-                let Some(target) = classify(&name) else { continue };
-                let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                files.push(ResourceFile {
-                    file_name: name,
-                    path: p.to_string_lossy().to_string(),
-                    size_bytes: size,
-                    target: Some(target.into()),
-                });
-            }
-        }
-    };
-    visit(root);
-    // 子目录扫描到两级（如 resources/数据库/mysql/mysql-8.0.42.zip），覆盖按
-    // 「类别/软件」分层的目录组织；再深就不可控且收益趋零
-    if let Ok(entries) = std::fs::read_dir(root) {
-        for e in entries.flatten() {
-            let d = e.path();
-            if !d.is_dir() {
-                continue;
-            }
-            visit(&d);
-            if let Ok(sub) = std::fs::read_dir(&d) {
-                for s in sub.flatten() {
-                    if s.path().is_dir() {
-                        visit(&s.path());
-                    }
-                }
-            }
-        }
-    }
+    visit_dir(root, 0, None, &mut files);
     files.sort_by(|a, b| a.target.cmp(&b.target).then(a.file_name.cmp(&b.file_name)));
     ResourceScan {
         dir: dir.to_string(),
@@ -235,6 +256,47 @@ mod tests {
         // 未识别 / 非安装包
         assert_eq!(classify("readme.pdf"), None);
         assert_eq!(classify("mysql-notes.txt"), None, "非安装包扩展名不识别");
+    }
+
+    /// 目录名兜底识别（约定布局 `resources/<软件>/包`）：
+    /// 文件名认不出的安装包按所在目录归属；非安装包扩展不兜底；最近一级目录优先。
+    #[test]
+    fn scan_uses_directory_name_fallback() {
+        let base = std::env::temp_dir().join(format!("dfy-res-dirfb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // 约定布局：文件名不规范但目录名命中 → 兜底归属
+        let redis_dir = base.join("redis");
+        std::fs::create_dir_all(&redis_dir).unwrap();
+        std::fs::write(redis_dir.join("db-cache.zip"), b"x").unwrap();
+        // 目录名命中但扩展名不是安装包 → 不兜底
+        std::fs::write(redis_dir.join("readme.txt"), b"x").unwrap();
+        // 文件名优先：目录 minio 里放命名规范的 vernemq 包 → 归 vernemq
+        let minio_dir = base.join("minio");
+        std::fs::create_dir_all(&minio_dir).unwrap();
+        std::fs::write(minio_dir.join("vernemq-2.1.0.msi"), b"x").unwrap();
+        // 两级继承：`mysql/8.0.42/` 里「mysql」命中，「8.0.42」认不出 → 继承 mysql；
+        // （扫描上限：根 + 两级子目录，`数据库/mysql/8.0.42/` 的第三层文件不在范围）
+        let nested = base.join("mysql").join("8.0.42");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("pkg.zip"), b"x").unwrap();
+
+        let targets: Vec<(String, String)> = scan(base.to_str().unwrap())
+            .files
+            .into_iter()
+            .map(|f| (f.file_name, f.target.unwrap_or_default()))
+            .collect();
+        let of = |n: &str| {
+            targets
+                .iter()
+                .find(|(name, _)| name == n)
+                .map(|(_, t)| t.clone())
+                .unwrap_or_default()
+        };
+        assert_eq!(of("db-cache.zip"), "redis", "目录名兜底归属");
+        assert_eq!(of("readme.txt"), "", "非安装包扩展名不兜底");
+        assert_eq!(of("vernemq-2.1.0.msi"), "vernemq", "文件名识别优先于目录名");
+        assert_eq!(of("pkg.zip"), "mysql", "两级目录继承兜底目标");
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// 命令白名单：允许的程序通过；元字符拼接一律拒绝（防提权命令注入）；
