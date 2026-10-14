@@ -491,6 +491,338 @@ async fn run_resource_install(
     }
 }
 
+// ===== ZIP 免安装版多步流水线（mysql/redis） =====
+
+/// 目标软件的 Windows 服务名与默认端口（zip 免安装版管线）。
+/// 端口取服务注册表内置默认（registry::builtin 与之一致）。
+fn service_spec(target: &str) -> Option<(&'static str, u16)> {
+    match target {
+        "mysql" => Some(("MySQL80", 3306)),
+        "redis" => Some(("Redis", 6379)),
+        _ => None,
+    }
+}
+
+fn mysql_ini_path(home: &str) -> String {
+    format!("{home}\\my.ini")
+}
+
+/// my.ini 内容：路径统一用正斜杠（MySQL 兼容），datadir 指向 home/data。
+fn build_mysql_ini(home: &str) -> String {
+    let h = home.replace('\\', "/");
+    format!(
+        "[mysqld]\nbasedir={h}\ndatadir={h}/data\nport=3306\ncharacter-set-server=utf8mb4\ncollation-server=utf8mb4_unicode_ci\ndefault-storage-engine=INNODB\n"
+    )
+}
+
+/// Redis 配置路径：zip 自带 redis.windows.conf 则用之，否则用平台最小配置。
+fn redis_conf_path(home: &str) -> String {
+    let bundled = format!("{home}\\redis.windows.conf");
+    if std::path::Path::new(&bundled).is_file() {
+        bundled
+    } else {
+        format!("{home}\\redis-dfy.conf")
+    }
+}
+
+/// Redis 最小配置（zip 不带 redis.windows.conf 时的兜底）。
+fn build_redis_conf() -> String {
+    "port 6379\nbind 0.0.0.0\n".to_string()
+}
+
+/// 通用修复任务：ZIP 免安装版离线安装（mysql/redis 的可靠离线路径——
+/// MySQL 官方 msi 多为 Installer 束，静默执行装不上 Server，zip 才能完全离线装好）。
+/// 流水线：解压定位 → 写配置+初始化数据 → 注册并启动 Windows 服务（一次 UAC）→ 端口验证。
+/// install_dir 取服务注册表该服务的 installDir（如 C:/services/mysql）。
+#[cfg(target_os = "windows")]
+pub fn start_zip_install(
+    target: &'static str,
+    zip_path: String,
+    install_dir: String,
+    env_cache: EnvCache,
+    state: Arc<RepairState>,
+) -> Result<(), String> {
+    if service_spec(target).is_none() {
+        return Err(format!(
+            "{} 没有免安装版（zip）安装管线，请使用 MSI 安装包或 AI 方案",
+            crate::ops::resource::target_label(target)
+        ));
+    }
+    {
+        let mut job = state.job.lock().unwrap();
+        if job.running {
+            return Err("已有修复任务在执行，请等待其完成".into());
+        }
+        job.running = true;
+        job.target = Some(target.into());
+        job.stage = "extract".into();
+        job.ok = None;
+        job.error = None;
+        job.logs.clear();
+    }
+    tokio::spawn(async move {
+        run_zip_install(state, target, zip_path, install_dir, env_cache).await;
+    });
+    Ok(())
+}
+
+/// 非 Windows：dev 机不提供免安装版管线（交付平台是 Windows）。
+#[cfg(not(target_os = "windows"))]
+pub fn start_zip_install(
+    target: &'static str,
+    _zip_path: String,
+    _install_dir: String,
+    _env_cache: EnvCache,
+    _state: Arc<RepairState>,
+) -> Result<(), String> {
+    Err(format!(
+        "免安装版（zip）安装仅支持 Windows 目标机，{} 请手动安装",
+        crate::ops::resource::target_label(target)
+    ))
+}
+
+/// PowerShell 单引号字面量转义（路径含空格/引号时保结构）。
+#[cfg(target_os = "windows")]
+fn ps_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
+
+/// UAC 提权执行单条命令（程序 + 参数串），等待完成；返回 Err = 非零退出/取消。
+#[cfg(target_os = "windows")]
+fn runas_wait(exe: &str, args: &str) -> Result<(), String> {
+    let body = if args.is_empty() {
+        format!(
+            "$p = Start-Process -FilePath {} -Verb RunAs -Wait -PassThru; if ($p) {{ exit $p.ExitCode }} else {{ exit 1 }}",
+            ps_quote(exe)
+        )
+    } else {
+        format!(
+            "$p = Start-Process -FilePath {} -ArgumentList {} -Verb RunAs -Wait -PassThru; if ($p) {{ exit $p.ExitCode }} else {{ exit 1 }}",
+            ps_quote(exe),
+            ps_quote(args)
+        )
+    };
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &body])
+        .output()
+        .map_err(|e| format!("无法启动 PowerShell：{e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        Err(if err.is_empty() {
+            format!("命令执行失败（退出码 {:?}，可能用户在 UAC 中点了取消）", out.status.code())
+        } else {
+            err
+        })
+    }
+}
+
+/// 解压 zip 到目标目录：优先系统自带 bsdtar（快），失败回退 Expand-Archive。
+#[cfg(target_os = "windows")]
+fn extract_zip(zip: &str, dest: &str) -> Result<(), String> {
+    std::fs::create_dir_all(dest).map_err(|e| format!("创建目标目录失败：{e}"))?;
+    let tar = std::process::Command::new("tar").args(["-xf", zip, "-C", dest]).output();
+    let tar_ok = matches!(&tar, Ok(o) if o.status.success());
+    if !tar_ok {
+        let ps = format!(
+            "Expand-Archive -LiteralPath {} -DestinationPath {} -Force",
+            ps_quote(zip),
+            ps_quote(dest)
+        );
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &ps])
+            .output()
+            .map_err(|e| format!("无法启动解压工具：{e}"))?;
+        if !out.status.success() {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(format!("解压失败：{err}"));
+        }
+    }
+    Ok(())
+}
+
+/// 解压后在目标目录里定位「程序主目录」：zip 可能带顶层目录（如
+/// mysql-8.0.42-winx64/），以标志二进制所在层为准。
+#[cfg(target_os = "windows")]
+fn locate_home(dest: &std::path::Path, marker: &str) -> Result<String, String> {
+    if dest.join(marker).is_file() {
+        return Ok(dest.to_string_lossy().to_string());
+    }
+    if let Ok(entries) = std::fs::read_dir(dest) {
+        for e in entries.flatten() {
+            if e.path().is_dir() && e.path().join(marker).is_file() {
+                return Ok(e.path().to_string_lossy().to_string());
+            }
+        }
+    }
+    Err(format!("解压完成但未找到标志文件 {marker}，请确认安装包内容完整"))
+}
+
+/// 写配置 + 初始化数据（mysql 初始化数据目录较慢，分钟级属正常）。
+#[cfg(target_os = "windows")]
+fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
+    match target {
+        "mysql" => {
+            let ini = mysql_ini_path(home);
+            std::fs::write(&ini, build_mysql_ini(home))
+                .map_err(|e| format!("写入 my.ini 失败：{e}"))?;
+            let mysqld = format!("{home}\\bin\\mysqld.exe");
+            let out = std::process::Command::new(&mysqld)
+                // --defaults-file 必须是首个选项（mysqld 的解析要求）
+                .args([format!("--defaults-file={ini}"), "--initialize-insecure", "--console"])
+                .output()
+                .map_err(|e| format!("无法运行 mysqld.exe：{e}"))?;
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let tail: String = err.lines().rev().take(5).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(" | ");
+                return Err(format!("数据目录初始化失败：{tail}"));
+            }
+            Ok("已写入 my.ini 并初始化数据目录（root 空密码，装好后请尽快改密）".into())
+        }
+        "redis" => {
+            if !std::path::Path::new(&redis_conf_path(home)).is_file() {
+                std::fs::write(format!("{home}\\redis-dfy.conf"), build_redis_conf())
+                    .map_err(|e| format!("写入 redis 配置失败：{e}"))?;
+                Ok("已写入最小配置 redis-dfy.conf（端口 6379）".into())
+            } else {
+                Ok("使用安装包自带的 redis.windows.conf".into())
+            }
+        }
+        _ => Err("该目标没有配置步骤".into()),
+    }
+}
+
+/// 注册并启动 Windows 服务（清理旧服务 + 安装 + 启动合并为一次 UAC 提权，
+/// 避免用户连点三次确认框）。
+#[cfg(target_os = "windows")]
+fn register_and_start(target: &str, home: &str) -> Result<(), String> {
+    let (svc, _port) = service_spec(target).unwrap();
+    let script = match target {
+        "mysql" => format!(
+            "net stop {svc} & sc delete {svc} & \"{}\" --install {svc} --defaults-file=\"{}\" & net start {svc}",
+            format!("{home}\\bin\\mysqld.exe"),
+            mysql_ini_path(home)
+        ),
+        "redis" => format!(
+            "net stop {svc} & sc delete {svc} & \"{}\" --service-install \"{}\" --service-name {svc} & net start {svc}",
+            format!("{home}\\redis-server.exe"),
+            redis_conf_path(home)
+        ),
+        _ => return Err("该目标没有服务注册管线".into()),
+    };
+    runas_wait("cmd.exe", &format!("/c {script}"))
+}
+
+#[cfg(target_os = "windows")]
+async fn run_zip_install(
+    state: Arc<RepairState>,
+    target: &'static str,
+    zip_path: String,
+    install_dir: String,
+    env_cache: EnvCache,
+) {
+    let label = crate::ops::resource::target_label(target);
+    let (svc, port) = service_spec(target).unwrap();
+    state.log(format!("开始安装 {label}（免安装版）：{zip_path} → {install_dir}"));
+
+    // ===== 解压 + 定位主目录 =====
+    state.patch(|j| j.stage = "extract".into());
+    state.log("正在解压安装包（大包需 1-2 分钟）…");
+    let marker = if target == "mysql" { r"bin\mysqld.exe" } else { "redis-server.exe" };
+    let located = {
+        let zp = zip_path.clone();
+        let dd = install_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            extract_zip(&zp, &dd).and_then(|()| locate_home(std::path::Path::new(&dd), marker))
+        })
+        .await
+    };
+    let home = match located {
+        Ok(Ok(h)) => {
+            state.log(format!("解压完成，程序目录：{h}"));
+            h
+        }
+        Ok(Err(e)) => {
+            finish(state, env_cache, false, e).await;
+            return;
+        }
+        Err(e) => {
+            finish(state, env_cache, false, format!("解压任务异常：{e}")).await;
+            return;
+        }
+    };
+
+    // ===== 写配置 + 初始化数据 =====
+    state.patch(|j| j.stage = "configure".into());
+    let cfg = {
+        let home = home.clone();
+        let t = target;
+        tokio::task::spawn_blocking(move || configure_zip_target(t, &home)).await
+    };
+    match cfg {
+        Ok(Ok(msg)) => state.log(msg),
+        Ok(Err(e)) => {
+            finish(state, env_cache, false, e).await;
+            return;
+        }
+        Err(e) => {
+            finish(state, env_cache, false, format!("配置任务异常：{e}")).await;
+            return;
+        }
+    }
+
+    // ===== 注册 + 启动服务（一次 UAC） =====
+    state.patch(|j| j.stage = "install".into());
+    state.log(format!("正在注册并启动 Windows 服务 {svc}… 请在 UAC 弹窗中点击「是」…"));
+    let reg = {
+        let home = home.clone();
+        let t = target;
+        tokio::task::spawn_blocking(move || register_and_start(t, &home)).await
+    };
+    match reg {
+        Ok(Ok(())) => state.log(format!("服务 {svc} 已注册并启动")),
+        Ok(Err(e)) => {
+            finish(
+                state,
+                env_cache,
+                false,
+                format!("服务注册/启动失败：{e}（可到 Windows 服务管理器查看 {svc} 状态）"),
+            )
+            .await;
+            return;
+        }
+        Err(e) => {
+            finish(state, env_cache, false, format!("服务注册任务异常：{e}")).await;
+            return;
+        }
+    }
+
+    // ===== 端口验证 =====
+    state.patch(|j| j.stage = "verify".into());
+    state.log(format!("等待 {label} 在端口 {port} 监听…（首次启动较慢）"));
+    let mut ok = false;
+    for _ in 0..45 {
+        if crate::ops::health::check_tcp("127.0.0.1", port, 800) {
+            ok = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    if ok {
+        state.log(format!("验证通过：端口 {port} 正在监听"));
+        finish(state, env_cache, true, String::new()).await;
+    } else {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!("服务已注册但端口 {port} 未监听，请到 Windows 服务管理器检查 {svc} 启动状态或查看 MySQL 错误日志（datadir 内 *.err）"),
+        )
+        .await;
+    }
+}
+
 /// 收尾：更新任务终态 + 清空环境检查缓存（下一次 /api/env 全量实测）。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 async fn finish(state: Arc<RepairState>, env_cache: EnvCache, ok: bool, error: String) {
@@ -530,5 +862,23 @@ mod tests {
         assert_eq!(paths.len(), 3, "应提取 3 个 JVM Home 路径: {paths:?}");
         assert!(paths[0].ends_with("jbr-21.0.8/Contents/Home"));
         assert!(paths[1].contains("openjdk@17"));
+    }
+
+    /// zip 免安装版管线：服务名/端口映射与配置生成。
+    #[test]
+    fn zip_pipeline_spec_and_configs() {
+        assert_eq!(service_spec("mysql"), Some(("MySQL80", 3306)));
+        assert_eq!(service_spec("redis"), Some(("Redis", 6379)));
+        assert_eq!(service_spec("java"), None, "java 走 msi/在线，无 zip 管线");
+
+        // my.ini：路径转正斜杠，datadir 固定 home/data，端口 3306
+        let ini = build_mysql_ini(r"C:\services\mysql");
+        assert!(ini.contains("basedir=C:/services/mysql"));
+        assert!(ini.contains("datadir=C:/services/mysql/data"));
+        assert!(ini.contains("port=3306"));
+        assert!(!ini.contains('\\'), "my.ini 路径不应含反斜杠: {ini}");
+
+        // redis 兜底最小配置
+        assert_eq!(build_redis_conf(), "port 6379\nbind 0.0.0.0\n");
     }
 }

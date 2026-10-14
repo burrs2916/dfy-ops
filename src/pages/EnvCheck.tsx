@@ -429,7 +429,7 @@ function RepairCenter({
       ) : scan && scan.exists && identified.length === 0 ? (
         <Alert severity="warning">
           资源目录（{resourceDir}）里未识别到安装包：请把 MySQL / Redis / VerneMQ / JDK / MinIO 的
-          msi/exe/zip 放入该目录（根目录或一级子目录均可）。
+          msi/exe/zip 放入该目录（根目录或一级子目录均可）。MySQL 与 Redis 优先放 ZIP 免安装版——离线解压、初始化、注册服务一条龙。
         </Alert>
       ) : scan && identified.length > 0 ? (
         <Alert severity="success">

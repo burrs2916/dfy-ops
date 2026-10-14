@@ -58,9 +58,11 @@ pub struct GenericRepairInput {
 }
 
 /// POST /api/env/repair/generic —— 通用修复决策链：
-/// 1. 资源目录有该目标的 MSI → 本地静默安装；
-/// 2. 无包且 target=java → 在线下载 Adoptium Temurin（现有链路）；
-/// 3. 无包且其他目标 → 提示配置资源目录或使用 AI 方案。
+/// 1. 资源目录有该目标的 ZIP 免安装版（mysql/redis）→ 解压 → 配置 → 注册服务（可靠离线管线，
+///    MySQL 官方 msi 是 Installer 束，静默执行装不上 Server，故 zip 优先）；
+/// 2. 有 MSI（java/vernemq/memurai 等）→ msiexec 静默安装；
+/// 3. 无包且 target=java → 在线下载 Adoptium Temurin（现有链路）；
+/// 4. 无包且其他目标 → 提示配置资源目录或使用 AI 方案。
 /// 任务状态复用 /api/env/repair/status（与 java 修复同一全局单例，前端轮询逻辑不变）。
 pub async fn start_generic_repair(
     State(state): State<Arc<AppState>>,
@@ -75,42 +77,65 @@ pub async fn start_generic_repair(
     let label = resource::target_label(target);
 
     let dir = state.app_settings.lock().unwrap().resource_dir.clone();
-    let msi = if dir.is_empty() {
-        None
+    let (zip, msi) = if dir.is_empty() {
+        (None, None)
     } else {
-        blocking(move || resource::find_msi(&dir, target)).await
+        blocking(move || (resource::find_zip(&dir, target), resource::find_msi(&dir, target))).await
     };
 
-    let started = match &msi {
-        Some(f) => {
-            crate::ops::env_repair::start_resource_install(
-                target,
-                f.path.clone(),
-                state.env_cache.clone(),
-                state.repair.clone(),
-            )
+    let started = if (target == "mysql" || target == "redis") && zip.is_some() {
+        // 免安装版管线：解压到服务注册表声明的 installDir（如 C:/services/mysql）
+        let z = zip.clone().unwrap();
+        let install_dir = state
+            .registry
+            .iter()
+            .find(|d| d.id == target)
+            .map(|d| d.install_dir.clone())
+            .unwrap_or_else(|| format!("C:\\services\\{target}"));
+        crate::ops::env_repair::start_zip_install(
+            target,
+            z.path,
+            install_dir,
+            state.env_cache.clone(),
+            state.repair.clone(),
+        )
+    } else if let Some(f) = msi.clone().or_else(|| {
+        // 非 mysql/redis 目标没有 msi 管线时不吃 zip（java zip 不是安装器）
+        if target != "mysql" && target != "redis" {
+            zip.clone()
+        } else {
+            None
         }
-        None if target == "java" => {
-            // 无本地包的 java 在线兜底（expected 按注册表最低声明 8；
-            // find_compatible 验证只升不降，装更高版本同样通过）
-            crate::ops::env_repair::start_jdk_install(
-                8,
-                state.env_cache.clone(),
-                state.repair.clone(),
-            )
-        }
-        None => Err(format!(
-            "本地资源目录中没有 {label} 的可静默安装包（.msi）。请将安装包放入「设置 → 本地资源目录」后重试，或使用 AI 方案"
-        )),
+    }) {
+        crate::ops::env_repair::start_resource_install(
+            target,
+            f.path,
+            state.env_cache.clone(),
+            state.repair.clone(),
+        )
+    } else if target == "java" && zip.is_none() && msi.is_none() {
+        // 无本地包的 java 在线兜底（expected 按注册表最低声明 8；
+        // find_compatible 验证只升不降，装更高版本同样通过）
+        crate::ops::env_repair::start_jdk_install(8, state.env_cache.clone(), state.repair.clone())
+    } else {
+        Err(format!(
+            "本地资源目录中没有 {label} 的可安装包。请将 MSI 安装包（或 MySQL/Redis 的 ZIP 免安装版）放入「设置 → 本地资源目录」后重试，或使用 AI 方案"
+        ))
     };
 
+    let source = if target == "mysql" || target == "redis" {
+        zip.as_ref().map(|_| "zip")
+    } else {
+        msi.as_ref().map(|_| "msi")
+    };
     match started {
         Ok(()) => Json(serde_json::json!({
             "ok": true,
             "action": "install",
-            "message": match msi {
-                Some(f) => format!("开始离线安装 {label}（{}）→ 管理员确认 → 验证，进度见下方任务状态", f.file_name),
-                None => format!("资源目录无 {label} 安装包，开始在线安装（下载 → 管理员确认 → 验证）"),
+            "message": match source {
+                Some("zip") => format!("开始离线安装 {label}（免安装版：解压 → 初始化 → 注册服务），全程只需一次管理员确认，进度见下方任务状态"),
+                Some("msi") => format!("开始离线安装 {label}（{}）→ 管理员确认 → 验证，进度见下方任务状态", msi.as_ref().map(|f| f.file_name.as_str()).unwrap_or_default()),
+                _ => format!("资源目录无 {label} 安装包，开始在线安装（下载 → 管理员确认 → 验证）"),
             }
         })),
         Err(e) => Json(serde_json::json!({"ok": false, "error": e})),

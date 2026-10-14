@@ -125,6 +125,16 @@ pub fn find_msi(dir: &str, target: &str) -> Option<ResourceFile> {
         .max_by_key(|f| f.size_bytes)
 }
 
+/// 找目标软件的 ZIP 免安装版（mysql/redis 的可靠离线管线：解压 → 配置 → 注册服务）。
+/// MySQL 的官方 msi 多为 Installer 束（静默执行装不上 Server），zip 是首选离线来源。
+pub fn find_zip(dir: &str, target: &str) -> Option<ResourceFile> {
+    scan(dir)
+        .files
+        .into_iter()
+        .filter(|f| f.target.as_deref() == Some(target) && f.file_name.to_lowercase().ends_with(".zip"))
+        .max_by_key(|f| f.size_bytes)
+}
+
 /// 命令白名单：AI 方案与预置命令的代执行边界。首 token 必须在列，
 /// 且命令不得含 shell 元字符——AI 生成的内容不可信，元字符拼接（`cmd1 & cmd2`、
 /// 反引号/变量展开）会在提权 PowerShell 里变成任意命令执行。
@@ -284,10 +294,14 @@ mod tests {
         assert!(targets.contains(&"minio"));
         assert!(!result.files.iter().any(|f| f.file_name == "readme.txt"), "非安装包不列出");
 
-        // find_msi：同目标多个 MSI 取最大
+        // find_msi / find_zip：同目标多个包取最大
         std::fs::write(base.join("mysql-installer-community-9.0.0.msi"), b"xxxxxx").unwrap();
+        std::fs::write(base.join("mysql-8.0.42-winx64.zip"), b"xxxxx").unwrap();
         let msi = find_msi(base.to_str().unwrap(), "mysql").unwrap();
         assert!(msi.file_name.contains("9.0.0"), "应取更大的包: {msi:?}");
+        let zip = find_zip(base.to_str().unwrap(), "mysql").unwrap();
+        assert_eq!(zip.file_name, "mysql-8.0.42-winx64.zip");
+        assert!(find_zip(base.to_str().unwrap(), "vernemq").is_none(), "无 zip 的目标返回 None");
 
         let missing = scan("Z:/definitely-not-exist-dfy-ops");
         assert!(!missing.exists && missing.files.is_empty());
