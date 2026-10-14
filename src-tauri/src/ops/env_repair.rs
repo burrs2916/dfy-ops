@@ -495,7 +495,7 @@ async fn run_resource_install(
 
 /// 目标软件的 Windows 服务名与默认端口（zip 免安装版管线）。
 /// 端口取服务注册表内置默认（registry::builtin 与之一致）。
-fn service_spec(target: &str) -> Option<(&'static str, u16)> {
+pub fn service_spec(target: &str) -> Option<(&'static str, u16)> {
     match target {
         "mysql" => Some(("MySQL80", 3306)),
         "redis" => Some(("Redis", 6379)),
@@ -818,6 +818,155 @@ async fn run_zip_install(
             env_cache,
             false,
             format!("服务已注册但端口 {port} 未监听，请到 Windows 服务管理器检查 {svc} 启动状态或查看 MySQL 错误日志（datadir 内 *.err）"),
+        )
+        .await;
+    }
+}
+
+// ===== 卸载 / 维护（mysql/redis：停服务 → 注销服务 → 可选删目录） =====
+
+/// Windows 服务是否存在（sc query 退出码 0 = 存在；探测无需管理员权限）。
+pub fn service_exists(svc: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("sc")
+            .args(["query", svc])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = svc;
+        false
+    }
+}
+
+/// 卸载任务（mysql/redis 维护）：停止并注销 Windows 服务，可选删除安装目录
+/// （含数据——必须由用户在弹窗里显式勾选，数据库数据删除后不可恢复）。
+/// install_dir 与安装管线同源（服务注册表 installDir），保证装、卸口径一致。
+/// 成败以执行后的重探为准（服务不存在时 net stop/sc delete 的报错与退出码不作数）。
+#[cfg(target_os = "windows")]
+pub fn start_uninstall(
+    target: &'static str,
+    remove_data: bool,
+    install_dir: String,
+    env_cache: EnvCache,
+    state: Arc<RepairState>,
+) -> Result<(), String> {
+    if service_spec(target).is_none() {
+        return Err(format!(
+            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis），请使用 AI 方案或控制面板手动卸载",
+            crate::ops::resource::target_label(target)
+        ));
+    }
+    {
+        let mut job = state.job.lock().unwrap();
+        if job.running {
+            return Err("已有修复任务在执行，请等待其完成".into());
+        }
+        job.running = true;
+        job.target = Some(target.into());
+        job.stage = "uninstall".into();
+        job.ok = None;
+        job.error = None;
+        job.logs.clear();
+    }
+    tokio::spawn(async move {
+        run_uninstall(state, target, remove_data, install_dir, env_cache).await;
+    });
+    Ok(())
+}
+
+/// 非 Windows：卸载管线仅在 Windows 目标机可用。
+#[cfg(not(target_os = "windows"))]
+pub fn start_uninstall(
+    target: &'static str,
+    _remove_data: bool,
+    _install_dir: String,
+    _env_cache: EnvCache,
+    _state: Arc<RepairState>,
+) -> Result<(), String> {
+    Err(format!(
+        "平台内卸载仅支持 Windows 目标机，{} 请手动卸载",
+        crate::ops::resource::target_label(target)
+    ))
+}
+
+#[cfg(target_os = "windows")]
+async fn run_uninstall(
+    state: Arc<RepairState>,
+    target: &'static str,
+    remove_data: bool,
+    install_dir: String,
+    env_cache: EnvCache,
+) {
+    let label = crate::ops::resource::target_label(target);
+    let (svc, _port) = service_spec(target).unwrap();
+    state.log(format!("开始卸载 {label}（服务 {svc}，目录 {install_dir}）"));
+
+    // 前置探测：无服务且无目录 = 没装过，不用折腾 UAC
+    let svc_installed = {
+        let s = svc;
+        tokio::task::spawn_blocking(move || service_exists(s)).await.unwrap_or(false)
+    };
+    let dir_exists = std::path::Path::new(&install_dir).is_dir();
+    if !svc_installed && !dir_exists {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!("未检测到 {label} 的安装痕迹（无 Windows 服务 {svc}，目录 {install_dir} 也不存在）"),
+        )
+        .await;
+        return;
+    }
+    if svc_installed {
+        state.log(format!("检测到 Windows 服务 {svc}，将停止并注销… 请在 UAC 弹窗中点击「是」…"));
+    }
+
+    state.patch(|j| j.stage = "uninstall".into());
+    // 一次 UAC：停服务 + 注销服务 (+ 删目录)。服务不存在时前两条报错无碍，
+    // 退出码也不作数——成败以执行后的重探为准
+    let script = if remove_data {
+        format!("net stop {svc} & sc delete {svc} & rmdir /s /q \"{install_dir}\"")
+    } else {
+        format!("net stop {svc} & sc delete {svc}")
+    };
+    let run = tokio::task::spawn_blocking(move || runas_wait("cmd.exe", &format!("/c {script}"))).await;
+    match run {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => state.log(format!("清理命令返回：{e}（将以实际状态复核）")),
+        Err(e) => {
+            finish(state, env_cache, false, format!("卸载任务异常：{e}")).await;
+            return;
+        }
+    }
+
+    // ===== 复核 =====
+    state.patch(|j| j.stage = "verify".into());
+    let svc_gone = {
+        let s = svc;
+        tokio::task::spawn_blocking(move || service_exists(s)).await.unwrap_or(true)
+    };
+    let dir_gone = !std::path::Path::new(&install_dir).exists();
+    if svc_gone && (!remove_data || dir_gone) {
+        state.log("卸载完成");
+        if !remove_data {
+            state.log(format!("已保留程序与数据目录 {install_dir}（重装可复用数据）"));
+        }
+        state.log("请点击「重新检查」刷新环境状态");
+        finish(state, env_cache, true, String::new()).await;
+    } else {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!(
+                "卸载未完成：服务 {svc} {}，目录 {}（可能 UAC 被取消）——请重试或到 Windows 服务管理器手动处理",
+                if svc_gone { "已注销" } else { "仍存在" },
+                if dir_gone { "已删除" } else { "仍保留" }
+            ),
         )
         .await;
     }

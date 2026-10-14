@@ -186,6 +186,15 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/env/repair/exec",
             axum::routing::post(handlers_repair::repair_exec),
         )
+        // 卸载 / 维护：安装痕迹探测 + 卸载任务（停服务/注销服务/删目录）
+        .route(
+            "/api/env/repair/uninstall/status",
+            axum::routing::get(handlers_repair::uninstall_status),
+        )
+        .route(
+            "/api/env/repair/uninstall",
+            axum::routing::post(handlers_repair::uninstall),
+        )
         .route(
             "/api/settings/app",
             axum::routing::get(handlers::get_app_settings),

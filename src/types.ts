@@ -208,3 +208,21 @@ export interface RepairExecResult {
   ok: boolean;
   error: string | null;
 }
+
+/** GET /api/env/repair/uninstall/status：一个可卸载组件的安装痕迹 */
+export interface UninstallTargetStatus {
+  target: string;
+  label: string;
+  installDir: string;
+  serviceInstalled: boolean;
+  dirExists: boolean;
+  canUninstall: boolean;
+}
+
+/** POST /api/env/repair/uninstall 启动结果 */
+export interface GenericUninstallStart {
+  ok: boolean;
+  action?: "uninstall";
+  message?: string;
+  error?: string;
+}

@@ -4,6 +4,7 @@ import {
   Badge,
   Box,
   Button,
+  Checkbox,
   Chip,
   CircularProgress,
   Dialog,
@@ -28,10 +29,18 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { Check, ContentCopy, Pause, PlayArrow, Refresh, SmartToy } from "@mui/icons-material";
+import { Check, ContentCopy, DeleteOutline, Pause, PlayArrow, Refresh, SmartToy } from "@mui/icons-material";
 import { api } from "../api";
 import { useAppSettingsStore, useOpsStore } from "../store";
-import type { CheckStatus, EnvCheckItem, EnvRepairJob, RepairPlan, ResourceScan, ServiceEnvReport } from "../types";
+import type {
+  CheckStatus,
+  EnvCheckItem,
+  EnvRepairJob,
+  RepairPlan,
+  ResourceScan,
+  ServiceEnvReport,
+  UninstallTargetStatus,
+} from "../types";
 
 const STATUS_COLOR: Record<CheckStatus, "success" | "warning" | "error"> = {
   pass: "success",
@@ -119,7 +128,10 @@ function Stat({ value, label, color }: { value: number; label: string; color?: s
 const REPAIR_STAGE_LABEL: Record<string, string> = {
   download: "下载安装包…",
   install: "静默安装中（请在 UAC 弹窗确认管理员权限）…",
-  verify: "验证安装结果…",
+  extract: "解压安装包…",
+  configure: "写配置并初始化…",
+  uninstall: "卸载中（停止并注销服务）…",
+  verify: "验证结果…",
   done: "已完成",
 };
 
@@ -311,18 +323,24 @@ function ServiceEnvSection({
   );
 }
 
-/** 修复中心：问题项汇总 + 一键修复（资源包→在线）+ AI 方案（代执行/复制 + 追问）。 */
+/** 修复中心：问题项汇总 + 一键修复（资源包→在线）+ AI 方案（代执行/复制 + 追问）+ 已安装组件卸载。 */
 function RepairCenter({
   pending,
   repairDisabled,
+  repairRunning,
   onRepair,
+  onUninstall,
 }: {
   pending: { reportId: string; reportName: string; item: EnvCheckItem }[];
   repairDisabled: boolean;
+  /** 修复/卸载任务是否在跑：结束后自动刷新安装痕迹与资源目录 */
+  repairRunning: boolean;
   onRepair: (target: string) => void;
+  onUninstall: (target: string, removeData: boolean) => void;
 }) {
   const resourceDir = useAppSettingsStore((s) => s.settings.resourceDir);
   const [scan, setScan] = useState<ResourceScan | null>(null);
+  const [installed, setInstalled] = useState<UninstallTargetStatus[]>([]);
   const [plan, setPlan] = useState<RepairPlan | null>(null);
   const [planItems, setPlanItems] = useState<EnvCheckItem[]>([]);
   const [planning, setPlanning] = useState(false);
@@ -331,31 +349,50 @@ function RepairCenter({
   // 代执行确认弹窗：仅保存待确认命令，确认后才发请求
   const [execCommand, setExecCommand] = useState<string | null>(null);
   const [executing, setExecuting] = useState(false);
+  // 卸载确认弹窗：target 待卸载组件；removeData 默认不勾（数据库数据不可恢复）
+  const [uninstallTarget, setUninstallTarget] = useState<UninstallTargetStatus | null>(null);
+  const [removeData, setRemoveData] = useState(false);
   const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" }>({
     open: false,
     msg: "",
     severity: "success",
   });
 
-  // 进入修复中心（或目录配置变化）时扫一次资源目录，展示可用安装包
+  // 进入修复中心 / 目录配置变化 / 任务结束时：扫资源目录 + 探测安装痕迹
   useEffect(() => {
     if (!resourceDir) {
       setScan(null);
-      return;
+    } else {
+      let alive = true;
+      api
+        .resources()
+        .then((s) => {
+          if (alive) setScan(s);
+        })
+        .catch(() => {
+          if (alive) setScan(null);
+        });
+      return () => {
+        alive = false;
+      };
     }
+  }, [resourceDir]);
+
+  useEffect(() => {
+    if (repairRunning) return; // 任务进行中不探（结束时会再刷）
     let alive = true;
     api
-      .resources()
+      .uninstallStatus()
       .then((s) => {
-        if (alive) setScan(s);
+        if (alive) setInstalled(s.targets);
       })
       .catch(() => {
-        if (alive) setScan(null);
+        if (alive) setInstalled([]);
       });
     return () => {
       alive = false;
     };
-  }, [resourceDir]);
+  }, [repairRunning]);
 
   /** AI 方案：首次用当前问题项；追问时携带上一轮方案文本。 */
   const generatePlan = useCallback(
@@ -416,6 +453,14 @@ function RepairCenter({
     }
   }, [execCommand]);
 
+  /** 卸载确认：removeData=true 时连数据目录一起删（不可恢复，弹窗里已显式勾选）。 */
+  const doUninstall = useCallback(() => {
+    if (!uninstallTarget) return;
+    const t = uninstallTarget;
+    setUninstallTarget(null);
+    onUninstall(t.target, removeData);
+  }, [uninstallTarget, removeData, onUninstall]);
+
   const identified = scan?.files.filter((f) => f.target) ?? [];
 
   return (
@@ -437,6 +482,82 @@ function RepairCenter({
           {identified.map((f) => TARGET_LABEL[f.target!] ?? f.target).join("、")}——一键修复将离线安装。
         </Alert>
       ) : null}
+
+      {/* 已安装组件管理：安装痕迹探测 + 卸载入口（当前覆盖 MySQL/Redis） */}
+      <Paper variant="outlined" sx={{ overflow: "hidden" }}>
+        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ px: 2, pt: 1.5, pb: 1 }}>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+            已安装组件
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            平台内安装/卸载维护（服务级探测）
+          </Typography>
+        </Stack>
+        <Divider />
+        <TableContainer>
+          <Table size="small" sx={{ tableLayout: "fixed" }}>
+            <TableHead>
+              <TableRow sx={{ bgcolor: "rgba(0,0,0,0.03)" }}>
+                <TableCell sx={{ width: 140 }}>组件</TableCell>
+                <TableCell sx={{ width: 170 }}>安装状态</TableCell>
+                <TableCell>安装目录</TableCell>
+                <TableCell sx={{ width: 92 }}>操作</TableCell>
+              </TableRow>
+            </TableHead>
+            <TableBody>
+              {installed.length === 0 ? (
+                <TableRow>
+                  <TableCell colSpan={4} align="center">
+                    <Typography variant="caption" color="text.secondary">
+                      探测不可用（仅 Windows 目标机支持平台内卸载）
+                    </Typography>
+                  </TableCell>
+                </TableRow>
+              ) : (
+                installed.map((t) => (
+                  <TableRow key={t.target} sx={{ "& td": { verticalAlign: "top", py: 1 } }}>
+                    <TableCell>
+                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                        {t.label}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      {t.serviceInstalled ? (
+                        <Chip size="small" color="success" label="已安装（服务）" />
+                      ) : t.dirExists ? (
+                        <Chip size="small" color="warning" label="残留目录" />
+                      ) : (
+                        <Chip size="small" variant="outlined" label="未安装" />
+                      )}
+                    </TableCell>
+                    <TableCell>
+                      <Typography variant="body2" sx={{ fontFamily: "monospace", wordBreak: "break-all", color: "text.secondary" }}>
+                        {t.installDir}
+                      </Typography>
+                    </TableCell>
+                    <TableCell>
+                      <Button
+                        size="small"
+                        color="error"
+                        variant="outlined"
+                        startIcon={<DeleteOutline />}
+                        disabled={!t.canUninstall || repairDisabled}
+                        onClick={() => {
+                          setRemoveData(false);
+                          setUninstallTarget(t);
+                        }}
+                        sx={{ textTransform: "none", px: 1 }}
+                      >
+                        卸载
+                      </Button>
+                    </TableCell>
+                  </TableRow>
+                ))
+              )}
+            </TableBody>
+          </Table>
+        </TableContainer>
+      </Paper>
 
       {/* 问题项汇总 */}
       <Paper variant="outlined" sx={{ overflow: "hidden" }}>
@@ -634,6 +755,47 @@ function RepairCenter({
         </DialogActions>
       </Dialog>
 
+      {/* 卸载确认弹窗：删数据必须显式勾选（数据库数据不可恢复） */}
+      <Dialog open={!!uninstallTarget} onClose={() => setUninstallTarget(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>卸载 {uninstallTarget?.label}</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            将停止并注销 Windows 服务
+            <b>{uninstallTarget ? `（${uninstallTarget.target === "mysql" ? "MySQL80" : "Redis"}）` : ""}</b>，
+            安装目录：
+          </Typography>
+          <Paper variant="outlined" sx={{ p: 1.5, mt: 1, bgcolor: "action.hover" }}>
+            <Typography variant="body2" sx={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+              {uninstallTarget?.installDir}
+            </Typography>
+          </Paper>
+          <FormControlLabel
+            sx={{ mt: 1.5, alignItems: "flex-start" }}
+            control={
+              <Checkbox
+                checked={removeData}
+                onChange={(e) => setRemoveData(e.target.checked)}
+                sx={{ pt: 0.25 }}
+              />
+            }
+            label={
+              <Typography variant="body2" color={removeData ? "error" : "text.secondary"}>
+                同时删除程序与数据目录（<b>数据库内的所有数据将不可恢复！</b>
+                不勾选则仅注销服务并保留数据，重装可复用）
+              </Typography>
+            }
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button size="small" onClick={() => setUninstallTarget(null)}>
+            取消
+          </Button>
+          <Button size="small" variant="contained" color="error" onClick={doUninstall}>
+            确认卸载
+          </Button>
+        </DialogActions>
+      </Dialog>
+
       <Snackbar
         open={snack.open}
         autoHideDuration={4000}
@@ -770,6 +932,26 @@ export default function EnvCheck() {
         const res = await api.startGenericRepair(target);
         if (!res.ok) {
           setRepairError(res.error || "修复启动失败");
+          return;
+        }
+        setRepairNotice(res.message || null);
+        pollRepair();
+      } catch (e) {
+        setRepairError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [pollRepair]
+  );
+
+  /** 修复中心「卸载」：停服务/注销服务（可选删数据目录），任务状态与安装共用。 */
+  const startUninstall = useCallback(
+    async (target: string, removeData: boolean) => {
+      setRepairError(null);
+      setRepairNotice(null);
+      try {
+        const res = await api.startUninstall(target, removeData);
+        if (!res.ok) {
+          setRepairError(res.error || "卸载启动失败");
           return;
         }
         setRepairNotice(res.message || null);
@@ -976,7 +1158,13 @@ export default function EnvCheck() {
       )}
 
       {tab === "repair" && (
-        <RepairCenter pending={pendingEntries} repairDisabled={!!repairJob?.running} onRepair={startGenericRepair} />
+        <RepairCenter
+          pending={pendingEntries}
+          repairDisabled={!!repairJob?.running}
+          repairRunning={!!repairJob?.running}
+          onRepair={startGenericRepair}
+          onUninstall={startUninstall}
+        />
       )}
 
       {(loading || refreshing) && reports.length === 0 ? (

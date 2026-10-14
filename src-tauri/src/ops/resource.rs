@@ -99,11 +99,21 @@ pub fn scan(dir: &str) -> ResourceScan {
         }
     };
     visit(root);
-    // 一级子目录（如 resources/mysql/、resources/jdk/）
+    // 子目录扫描到两级（如 resources/数据库/mysql/mysql-8.0.42.zip），覆盖按
+    // 「类别/软件」分层的目录组织；再深就不可控且收益趋零
     if let Ok(entries) = std::fs::read_dir(root) {
         for e in entries.flatten() {
-            if e.path().is_dir() {
-                visit(&e.path());
+            let d = e.path();
+            if !d.is_dir() {
+                continue;
+            }
+            visit(&d);
+            if let Ok(sub) = std::fs::read_dir(&d) {
+                for s in sub.flatten() {
+                    if s.path().is_dir() {
+                        visit(&s.path());
+                    }
+                }
             }
         }
     }
@@ -305,6 +315,19 @@ mod tests {
 
         let missing = scan("Z:/definitely-not-exist-dfy-ops");
         assert!(!missing.exists && missing.files.is_empty());
+
+        // 两级子目录也能扫到（resources/数据库/mysql/xx.zip）
+        let nested = base.join("数据库").join("mysql");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("mysql-8.0.36-winx64.zip"), b"x").unwrap();
+        let nested_scan = scan(base.to_str().unwrap());
+        let targets: Vec<&str> = nested_scan
+            .files
+            .iter()
+            .filter_map(|f| f.target.as_deref())
+            .collect();
+        assert!(targets.contains(&"mysql"), "两级子目录包必须识别");
+
         let _ = std::fs::remove_dir_all(&base);
     }
 }

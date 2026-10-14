@@ -18,6 +18,8 @@ import type {
   ResourceScan,
   ServiceEnvReport,
   ServiceStatus,
+  GenericUninstallStart,
+  UninstallTargetStatus,
 } from "./types";
 
 // 运维后端（内嵌 Axum）监听本地 18721。
@@ -117,6 +119,14 @@ export const api = {
     request<RepairExecResult>("/api/env/repair/exec", {
       method: "POST",
       body: JSON.stringify({ command }),
+    }),
+  // 卸载 / 维护（当前覆盖 MySQL/Redis）
+  uninstallStatus: () =>
+    request<{ targets: UninstallTargetStatus[] }>("/api/env/repair/uninstall/status"),
+  startUninstall: (target: string, removeData: boolean) =>
+    request<GenericUninstallStart>("/api/env/repair/uninstall", {
+      method: "POST",
+      body: JSON.stringify({ target, removeData }),
     }),
   startAll: () =>
     request<ActionResult[]>("/api/services/start-all", { method: "POST" }),

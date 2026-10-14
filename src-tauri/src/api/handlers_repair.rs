@@ -142,6 +142,96 @@ pub async fn start_generic_repair(
     }
 }
 
+// ===== 卸载 / 维护 =====
+
+/// 平台内卸载当前覆盖 zip 管线目标（mysql/redis）——服务名、安装目录、数据位置
+/// 全部由平台掌控，卸载可干净执行；其余目标建议 AI 方案或控制面板手动卸载。
+pub const UNINSTALLABLE: [&str; 2] = ["mysql", "redis"];
+
+fn registry_install_dir(state: &AppState, target: &str) -> String {
+    state
+        .registry
+        .iter()
+        .find(|d| d.id == target)
+        .map(|d| d.install_dir.clone())
+        .unwrap_or_else(|| format!("C:\\services\\{target}"))
+}
+
+/// 探测一个 zip 管线目标的安装痕迹（服务存在 + 目录存在）。
+async fn probe_target(state: &AppState, target: &str) -> (bool, bool) {
+    let Some((svc, _)) = crate::ops::env_repair::service_spec(target) else {
+        return (false, false);
+    };
+    let install_dir = registry_install_dir(state, target);
+    blocking(move || {
+        (
+            crate::ops::env_repair::service_exists(svc),
+            std::path::Path::new(&install_dir).is_dir(),
+        )
+    })
+    .await
+}
+
+/// GET /api/env/repair/uninstall/status —— 可卸载组件的安装痕迹探测，
+/// 修复中心「已安装组件管理」与 AI 方案上下文共用（每次实时探，sc query 很快）。
+pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let mut targets = Vec::new();
+    for t in UNINSTALLABLE {
+        let (service_installed, dir_exists) = probe_target(&state, t).await;
+        targets.push(serde_json::json!({
+            "target": t,
+            "label": resource::target_label(t),
+            "installDir": registry_install_dir(&state, t),
+            "serviceInstalled": service_installed,
+            "dirExists": dir_exists,
+            "canUninstall": service_installed || dir_exists,
+        }));
+    }
+    Json(serde_json::json!({ "targets": targets }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UninstallInput {
+    pub target: String,
+    /// 同时删除安装目录（含数据库数据——不可恢复，前端弹窗默认不勾）
+    #[serde(rename = "removeData", default)]
+    pub remove_data: bool,
+}
+
+/// POST /api/env/repair/uninstall —— 卸载（mysql/redis）：一次 UAC 完成
+/// 停服务 + 注销服务（removeData 时连安装目录一起删）。任务状态复用
+/// /api/env/repair/status（与安装任务同一全局单例，前端轮询逻辑不变）。
+pub async fn uninstall(
+    State(state): State<Arc<AppState>>,
+    Json(input): Json<UninstallInput>,
+) -> Json<serde_json::Value> {
+    let Some(target) = resource::repair_target(&input.target) else {
+        return Json(serde_json::json!({"ok": false, "error": "未知的目标组件"}));
+    };
+    if !UNINSTALLABLE.contains(&target) {
+        return Json(serde_json::json!({"ok": false, "error": "该组件暂不支持平台内卸载（当前覆盖 MySQL/Redis），请使用 AI 方案或控制面板手动卸载"}));
+    }
+    let install_dir = registry_install_dir(&state, target);
+    match crate::ops::env_repair::start_uninstall(
+        target,
+        input.remove_data,
+        install_dir,
+        state.env_cache.clone(),
+        state.repair.clone(),
+    ) {
+        Ok(()) => Json(serde_json::json!({
+            "ok": true,
+            "action": "uninstall",
+            "message": format!(
+                "开始卸载 {}（{}数据目录）→ 管理员确认 → 复核，进度见下方任务状态",
+                resource::target_label(target),
+                if input.remove_data { "含" } else { "保留" }
+            )
+        })),
+        Err(e) => Json(serde_json::json!({"ok": false, "error": e})),
+    }
+}
+
 // ===== AI 结构化修复方案 =====
 
 #[derive(Debug, Deserialize)]
@@ -195,6 +285,7 @@ pub struct RepairPlan {
 fn build_plan_prompt(
     items: &[PlanCheckItem],
     files: &[resource::ResourceFile],
+    installed: &[(String, bool)],
     previous_plan: Option<&str>,
     follow_up: Option<&str>,
 ) -> String {
@@ -207,6 +298,17 @@ fn build_plan_prompt(
             "- id={} 名称={} 分类={} 状态={} 期望=[{}] 实际=[{}] 平台建议=[{}]\n",
             it.id, it.name, it.category, it.status, it.expected, it.actual, it.fix_hint
         ));
+    }
+    if installed.is_empty() {
+        p.push_str("\n[已安装组件] 探测失败（跳过）\n");
+    } else {
+        p.push_str("\n[已安装组件（Windows 服务级探测）]\n");
+        for (label, on) in installed {
+            p.push_str(&format!(
+                "- {label}：{}\n",
+                if *on { "已安装（有 Windows 服务）" } else { "未安装" }
+            ));
+        }
     }
     if let Some(prev) = previous_plan {
         p.push_str("\n[上一轮方案]\n");
@@ -340,9 +442,16 @@ pub async fn repair_plan(
 
     let dir = state.app_settings.lock().unwrap().resource_dir.clone();
     let files = blocking(move || resource::scan(&dir).files).await;
+    // 已安装状态：让 AI 区分「全新安装」与「修复/重装」，方案更贴近实情
+    let mut installed = Vec::new();
+    for t in UNINSTALLABLE {
+        let (on, _) = probe_target(&state, t).await;
+        installed.push((resource::target_label(t).to_string(), on));
+    }
     let prompt = build_plan_prompt(
         &input.check_items,
         &files,
+        &installed,
         input.previous_plan.as_deref(),
         input.follow_up.as_deref(),
     );
@@ -502,7 +611,8 @@ mod tests {
         assert!(plan.summary.contains("只有概述"));
     }
 
-    /// prompt 必须携带问题项、资源清单与白名单约定；多轮追问时带上一轮方案。
+    /// prompt 必须携带问题项、资源清单与白名单约定；多轮追问时带上一轮方案；
+    /// 已安装状态也会并入（让 AI 区分全新安装与修复）。
     #[test]
     fn plan_prompt_contains_context() {
         let items = vec![PlanCheckItem {
@@ -520,13 +630,18 @@ mod tests {
             size_bytes: 300 * 1024 * 1024,
             target: Some("mysql".into()),
         }];
-        let p = build_plan_prompt(&items, &files, None, None);
+        let installed = vec![
+            ("MySQL".to_string(), false),
+            ("Redis".to_string(), true),
+        ];
+        let p = build_plan_prompt(&items, &files, &installed, None, None);
         assert!(p.contains("dep-mysql") && p.contains("3306 可达"));
         assert!(p.contains("mysql-installer-community-8.0.42.0.msi"));
         assert!(p.contains("msiexec"));
-        let p_empty = build_plan_prompt(&items, &[], None, None);
+        assert!(p.contains("MySQL：未安装") && p.contains("Redis：已安装"));
+        let p_empty = build_plan_prompt(&items, &[], &installed, None, None);
         assert!(p_empty.contains("未配置或没有识别出的安装包"));
-        let p_follow = build_plan_prompt(&items, &files, Some("上一轮：装 MySQL"), Some("端口还是不通"));
+        let p_follow = build_plan_prompt(&items, &files, &installed, Some("上一轮：装 MySQL"), Some("端口还是不通"));
         assert!(p_follow.contains("上一轮：装 MySQL") && p_follow.contains("端口还是不通"));
     }
 }
