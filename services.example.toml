@@ -11,8 +11,12 @@
 #   processNames（可选，按运行器特征写，如 "java -jar xx.jar" 里的 jar 名、"ng serve"）：
 #     命中进程后用 lsof/netstat 反查其【实际监听端口】，检测与展示均以实际端口为准；
 #     Shell / IDE / agent 宿主进程会被自动剔除，避免误命中。
-#     Windows 注意：镜像名匹配（含/不含 .exe）落空时自动按命令行子串匹配——
-#     Erlang 系应用（VerneMQ 的 beam.smp.exe 与 RabbitMQ 共用镜像名）必须靠命令行区分。
+#     Windows 注意：镜像名匹配（含/不含 .exe）落空时自动按命令行子串匹配（已排除
+#     查询自身 PID）——Erlang 系应用（VerneMQ 的 beam.smp.exe 与 RabbitMQ 共用镜像名）
+#     必须靠命令行区分；无端口桌面客户端则只信镜像名，禁用命令行兜底。
+#   productNames（可选）：「已安装」检测的产品显示名 token——Windows 读卸载注册表
+#     （与控制面板「程序和功能」同源，按 DisplayName/DisplayIcon 匹配），与部署路径无关。
+#     仅对需要区分「装没装」的程序声明（如 Tauri 桌面客户端）；未声明则不判安装维度。
 #   ports：仅用于本平台拉起服务后的就绪等待（编排目标），以及未配置 processNames 时的探测兜底。
 #
 # thirdParty（默认 false）：第三方系统级中间件（VerneMQ/MinIO/MySQL/Redis 等）置 true——
@@ -82,17 +86,18 @@ description = "边缘计算后端；8084/8085 为自身监听端口，依赖 Ver
 
 [[services]]
 id = "biosphere-spatial"
-name = "Biosphere 空间系统 (Tauri)"
+name = "空间数据驱动程序"
 kind = "tauri_app"
 installDir = "C:/services/biosphere-spatialdata-system"
 buildCmd = "pnpm tauri build"
 runCmd = "C:/services/biosphere-spatialdata-system/target/release/biosphere-spatialdata-system.exe"
 ports = []
 processNames = ["biosphere-spatialdata-system"]
+productNames = ["空间数据驱动"]
 logPaths = []
 dependsOn = []
 isDaemon = false
-description = "空间数据系统桌面客户端；无端口，按进程名检测（非常驻，不参与批量启动）。"
+description = "空间数据驱动程序桌面客户端；无端口，镜像名判「跑没跑」、卸载注册表判「装没装」（非常驻，不参与批量启动）。"
 
 # ===== 第三方依赖：平台只检测不托管 =====
 

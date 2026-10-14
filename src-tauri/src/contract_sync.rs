@@ -54,6 +54,7 @@ fn service_status_contract() {
         depends_on: vec!["y".into()],
         is_daemon: true,
         third_party: false,
+        installed: true,
         description: String::new(),
         install_dir: String::new(),
         build_cmd: None,
@@ -65,8 +66,8 @@ fn service_status_contract() {
         &serde_json::to_value(&s).unwrap(),
         &[
             "id", "name", "kind", "running", "runState", "healthy", "ports", "dependsOn",
-            "isDaemon", "thirdParty", "description", "installDir", "buildCmd", "runCmd",
-            "healthUrl", "logPaths",
+            "isDaemon", "thirdParty", "installed", "description", "installDir", "buildCmd",
+            "runCmd", "healthUrl", "logPaths",
         ],
     );
     // RunState 枚举值

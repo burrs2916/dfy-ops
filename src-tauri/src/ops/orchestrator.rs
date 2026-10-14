@@ -255,6 +255,7 @@ mod tests {
             run_cmd: "true".into(),
             ports: vec![],
             process_names: vec![],
+            product_names: vec![],
             health_url: None,
             log_paths: vec![],
             depends_on: vec![],

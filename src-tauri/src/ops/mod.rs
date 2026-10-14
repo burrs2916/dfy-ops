@@ -1,3 +1,4 @@
+pub mod appdetect;
 pub mod registry;
 pub mod process;
 pub mod health;

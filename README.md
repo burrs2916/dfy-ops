@@ -10,7 +10,7 @@
 | DFY 管理前端 | Vue3 (nginx) | 80 | 反代 `/api` → 后端 |
 | Gateway Console | Angular 19 | 8081 | 静态托管 |
 | Edge Conductor | Rust Axum | 8084/8085/MQTT 18830 | upstream → 后端 48085 |
-| Biosphere 空间系统 | Tauri 桌面 | — | 桌面客户端，非常驻 |
+| 空间数据驱动程序 | Tauri 桌面 | — | 桌面客户端，非常驻；镜像名判「跑没跑」、卸载注册表判「装没装」 |
 
 ## 技术栈
 

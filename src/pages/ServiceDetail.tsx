@@ -249,7 +249,12 @@ export default function ServiceDetail() {
         <Typography variant="h5" sx={{ fontWeight: 700 }}>
           {svc.name}
         </Typography>
-        <StatusBadge running={svc.running} healthy={svc.healthy} runState={svc.runState} />
+        <StatusBadge
+          running={svc.running}
+          healthy={svc.healthy}
+          runState={svc.runState}
+          installed={svc.installed}
+        />
         {!svc.isDaemon && <Chip size="small" label="桌面客户端" color="info" />}
       </Stack>
 

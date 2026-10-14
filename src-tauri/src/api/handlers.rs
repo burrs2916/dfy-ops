@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::api::server::AppState;
 use crate::ops::ai;
+use crate::ops::appdetect;
 use crate::ops::diagnosis;
 use crate::ops::environment;
 use crate::ops::health;
@@ -76,6 +77,11 @@ pub struct ServiceStatus {
     /// 第三方依赖（VerneMQ/MinIO 等）：平台只检测不托管，前端据此隐藏启停按钮并分组展示。
     #[serde(rename = "thirdParty")]
     pub third_party: bool,
+    /// 「已安装」（Windows 卸载注册表判定）。三态语义：false = 确认未安装；
+    /// true = 已安装或「不适用」（未声明 productNames 的服务一律 true，
+    /// 维持既有「已停止/运行中」显示，不误报未安装）。
+    #[serde(rename = "installed")]
+    pub installed: bool,
     pub description: String,
     /// 服务的预期安装目录（Windows 路径，仅作展示与排障参考，平台不会自动创建/部署）。
     #[serde(rename = "installDir")]
@@ -95,11 +101,13 @@ pub struct ServiceStatus {
 }
 
 fn to_status(def: &ServiceDef, managed: bool) -> ServiceStatus {
-    let (run_state, ports, healthy) = if managed {
+    // 受管 = 平台从安装目录拉起过，安装维度不适用；外部检测才判「装没装」
+    let (run_state, ports, healthy, installed) = if managed {
         (
             RunState::Managed,
             def.ports.clone(),
             managed_healthy(def),
+            true,
         )
     } else {
         detect_external(def)
@@ -115,6 +123,7 @@ fn to_status(def: &ServiceDef, managed: bool) -> ServiceStatus {
         depends_on: def.depends_on.clone(),
         is_daemon: def.is_daemon,
         third_party: def.third_party,
+        installed,
         description: def.description.clone(),
         install_dir: def.install_dir.clone(),
         build_cmd: def.build_cmd.clone(),
@@ -145,17 +154,43 @@ fn managed_healthy(def: &ServiceDef) -> bool {
 /// 反查到什么就上报什么（前端展示与 healthy 判定均以实际端口为准）。
 /// 仅当未配置进程名或未命中时，才回退到按配置端口探测（兼容 nginx 多实例这类
 /// 不适合按进程名区分的部署形态）。
-fn detect_external(def: &ServiceDef) -> (RunState, Vec<u16>, bool) {
+///
+/// 「装没装」独立判定（appdetect，Windows 读卸载注册表，与部署路径无关）：
+/// - 声明了 `productNames` → 注册表实查，未装如实上报 installed=false；
+/// - 未声明 → true（不适用，维持既有显示逻辑）。
+///
+/// 返回（状态，端口，健康，已安装）。
+fn detect_external(def: &ServiceDef) -> (RunState, Vec<u16>, bool, bool) {
+    // 「装没装」与「跑没跑」是两个独立事实：注册表安装记录毫秒级可得，
+    // 且不受进程检测的任何启发式影响——没装就是没装，别让兜底探测把它洗成「正常」。
+    let installed = if def.product_names.is_empty() {
+        true
+    } else {
+        let exe_names: Vec<String> = def
+            .process_names
+            .iter()
+            .map(|n| n.trim_end_matches(".exe").to_string())
+            .collect();
+        appdetect::is_installed(&def.product_names, &exe_names)
+    };
+    // 无端口预期（桌面客户端）：只信镜像名，禁用命令行兜底——查询自身与
+    // IDE 等的命令行可能含目标名，会把「没装没跑」误判成「检测到在运行」。
     let pids: Vec<u32> = def
         .process_names
         .iter()
-        .flat_map(|n| process::process_pids(n))
+        .flat_map(|n| {
+            if def.ports.is_empty() {
+                process::process_pids_image_only(n)
+            } else {
+                process::process_pids(n)
+            }
+        })
         .collect();
     if !pids.is_empty() {
         let discovered = process::listening_ports(&pids);
         if !discovered.is_empty() {
             // 进程在且端口在监听：以实际监听端口为准
-            return (RunState::Detected, discovered, true);
+            return (RunState::Detected, discovered, true, installed);
         }
         // 进程在但没有监听端口：无端口预期（桌面客户端）视为健康；
         // 有端口预期则回退按配置端口确认（lsof 不可用时的兜底）。
@@ -166,7 +201,7 @@ fn detect_external(def: &ServiceDef) -> (RunState, Vec<u16>, bool) {
                 .iter()
                 .all(|p| health::check_tcp("127.0.0.1", *p, PROBE_TIMEOUT_MS))
         };
-        return (RunState::Detected, def.ports.clone(), healthy);
+        return (RunState::Detected, def.ports.clone(), healthy, installed);
     }
     // 兜底：未配置进程名或未命中 → 按配置端口探测
     let port_up = def
@@ -187,7 +222,7 @@ fn detect_external(def: &ServiceDef) -> (RunState, Vec<u16>, bool) {
     } else {
         RunState::Down
     };
-    (state, def.ports.clone(), healthy)
+    (state, def.ports.clone(), healthy, installed)
 }
 
 fn find_def<'a>(state: &'a AppState, id: &str) -> Option<&'a ServiceDef> {

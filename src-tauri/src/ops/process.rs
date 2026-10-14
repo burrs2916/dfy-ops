@@ -197,6 +197,20 @@ impl ProcManager {
 /// 注意：pattern 应使用运行器特征（如 `ng serve`、`dfy-server.jar`、`edgecd-daemon`），
 /// 不要用项目路径——IDE 语言服务进程的命令行里常带全部项目路径，会误命中。
 pub fn process_pids(name: &str) -> Vec<u32> {
+    process_pids_inner(name, true)
+}
+
+/// 仅按进程镜像名匹配（跳过命令行兜底）。
+///
+/// 无端口的桌面客户端（TauriApp）必须走这里：主程序 exe 镜像名命中即可信。
+/// 命令行兜底是全进程子串匹配——查询自身的命令行里就带着目标名，且 Windows
+/// 部署机上任何命令行含该名字的进程（如打开过项目目录的 IDE）都会误命中，
+/// 导致「没安装/没运行」被误报成「检测到在运行」（2026-10-14 Windows 实测踩坑）。
+pub fn process_pids_image_only(name: &str) -> Vec<u32> {
+    process_pids_inner(name, false)
+}
+
+fn process_pids_inner(name: &str, allow_cli_fallback: bool) -> Vec<u32> {
     if name.trim().is_empty() {
         return vec![];
     }
@@ -227,13 +241,15 @@ pub fn process_pids(name: &str) -> Vec<u32> {
         if pids.is_empty() && !name.ends_with(".exe") {
             pids = image_match(&format!("{name}.exe"));
         }
-        if pids.is_empty() {
+        if allow_cli_fallback && pids.is_empty() {
             pids = windows_commandline_pids(name);
         }
         pids
     }
     #[cfg(not(target_os = "windows"))]
     {
+        // Unix 只有 pgrep -f 一条路，镜像名/命令行之分不存在
+        let _ = allow_cli_fallback;
         let pids: Vec<u32> = Command::new("pgrep")
             .args(["-f", name])
             .stderr(Stdio::null())
@@ -254,14 +270,19 @@ pub fn process_pids(name: &str) -> Vec<u32> {
 /// 用途：VerneMQ 这类 Erlang 应用，进程镜像名（beam.smp.exe）与 RabbitMQ 等共用，
 /// 镜像名匹配会误命中；其命令行里含应用标识（如 `...\vernemq\...`），按命令行匹配才准。
 /// 注意：查询本身约 1-2s，仅在镜像名匹配落空时作为兜底调用，不进高频轮询路径。
+///
+/// 必须排除自身 PID：powershell 进程自己的命令行含 `-Command "...token..."`
+/// 原文，不排除就会匹配到自己，返回一个注定已退出的「幽灵 PID」，
+/// 把「未运行」误判成「检测到在运行」（2026-10-14 Windows 实测踩坑）。
 #[cfg(target_os = "windows")]
 fn windows_commandline_pids(token: &str) -> Vec<u32> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     // token 来自 services.toml（本机受信配置），无注入面；like 通配符转义 % 即可
     let pattern = format!("*{}*", token.replace('%', ""));
+    let self_pid = std::process::id();
     let ps = format!(
-        "Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '{pattern}' }} | Select-Object -ExpandProperty ProcessId"
+        "Get-CimInstance Win32_Process | Where-Object {{ $_.ProcessId -ne {self_pid} -and $_.CommandLine -like '{pattern}' }} | Select-Object -ExpandProperty ProcessId"
     );
     Command::new("powershell")
         .args(["-NoProfile", "-Command", &ps])

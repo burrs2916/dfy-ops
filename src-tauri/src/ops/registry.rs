@@ -79,6 +79,11 @@ pub struct ServiceDef {
     /// 用于无端口服务（Tauri 桌面客户端等）的检测兜底，Unix 走 `pgrep -f`、Windows 走 `tasklist`。
     #[serde(rename = "processNames", default)]
     pub process_names: Vec<String>,
+    /// 「已安装」检测的产品名 token（Windows 读卸载注册表，按 DisplayName /
+    /// DisplayIcon 匹配，与部署路径无关）。仅对需要判断「装没装」的程序声明
+    /// （如 Tauri 桌面客户端）；为空表示不适用——视为已安装，不改变既有显示逻辑。
+    #[serde(rename = "productNames", default)]
+    pub product_names: Vec<String>,
     #[serde(rename = "healthUrl")]
     pub health_url: Option<String>,
     #[serde(rename = "logPaths")]
@@ -118,6 +123,7 @@ fn builtin() -> Vec<ServiceDef> {
             run_cmd: "{java} -jar dfy-server/target/dfy-server.jar".into(),
             ports: vec![48085],
             process_names: vec![],
+            product_names: vec![],
             health_url: None,
             log_paths: vec!["C:/services/dfy-boot-base/logs/app.log".into()],
             depends_on: vec!["mysql".into(), "redis".into()],
@@ -142,6 +148,7 @@ fn builtin() -> Vec<ServiceDef> {
             run_cmd: "nginx -p C:/services/dfy-ui-admin-vue3-master -c nginx.conf".into(),
             ports: vec![80],
             process_names: vec![],
+            product_names: vec![],
             health_url: None,
             log_paths: vec!["C:/services/nginx/logs/access.log".into()],
             depends_on: vec!["dfy-backend".into()],
@@ -161,6 +168,7 @@ fn builtin() -> Vec<ServiceDef> {
             run_cmd: "nginx -p C:/services/gateway-console -c nginx.conf".into(),
             ports: vec![8081],
             process_names: vec![],
+            product_names: vec![],
             health_url: None,
             log_paths: vec![],
             depends_on: vec![],
@@ -181,6 +189,7 @@ fn builtin() -> Vec<ServiceDef> {
                 "C:/services/edge-conductor/target/release/edgecd-daemon --config C:/services/edge-conductor/config.toml".into(),
             ports: vec![8084, 8085],
             process_names: vec!["edgecd-daemon".into()],
+            product_names: vec![],
             health_url: None,
             log_paths: vec!["C:/services/edge-conductor/logs".into()],
             depends_on: vec!["dfy-backend".into(), "vernemq".into(), "minio".into()],
@@ -196,7 +205,7 @@ fn builtin() -> Vec<ServiceDef> {
         },
         ServiceDef {
             id: "biosphere-spatial".into(),
-            name: "Biosphere 空间系统 (Tauri)".into(),
+            name: "空间数据驱动程序".into(),
             kind: ServiceKind::TauriApp,
             java_major: None,
             java_home: None,
@@ -206,13 +215,16 @@ fn builtin() -> Vec<ServiceDef> {
                 "C:/services/biosphere-spatialdata-system/target/release/biosphere-spatialdata-system.exe".into(),
             ports: vec![],
             process_names: vec!["biosphere-spatialdata-system".into()],
+            // 「已安装」检测：按产品显示名（控制面板「程序和功能」同源）匹配，
+            // 与部署路径无关；镜像名只判「跑没跑」，注册表才判「装没装」。
+            product_names: vec!["空间数据驱动".into()],
             health_url: None,
             log_paths: vec![],
             depends_on: vec![],
             is_daemon: false,
             third_party: false,
             requires: vec![],
-            description: "空间数据系统桌面客户端；无端口，按进程名检测（非常驻，不参与批量启动）。".into(),
+            description: "空间数据驱动程序桌面客户端；无端口，按镜像名判「跑没跑」、卸载注册表判「装没装」（非常驻，不参与批量启动）。".into(),
         },
         ServiceDef {
             id: "vernemq".into(),
@@ -228,6 +240,7 @@ fn builtin() -> Vec<ServiceDef> {
             // 与 RabbitMQ 等共用镜像名，不能按镜像名匹配；按命令行含 "vernemq" 匹配。
             // 本机（macOS）由 OrbStack 容器提供，宿主机无此进程 → 降级走 18830 端口探测。
             process_names: vec!["vernemq".into()],
+            product_names: vec![],
             health_url: None,
             log_paths: vec![],
             depends_on: vec![],
@@ -247,6 +260,7 @@ fn builtin() -> Vec<ServiceDef> {
             run_cmd: String::new(),
             ports: vec![9000],
             process_names: vec!["minio".into(), "minio.exe".into()],
+            product_names: vec![],
             health_url: None,
             log_paths: vec![],
             depends_on: vec![],
@@ -266,6 +280,7 @@ fn builtin() -> Vec<ServiceDef> {
             run_cmd: String::new(),
             ports: vec![3306],
             process_names: vec!["mysqld".into(), "mysqld.exe".into()],
+            product_names: vec![],
             health_url: None,
             log_paths: vec![],
             depends_on: vec![],
@@ -285,6 +300,7 @@ fn builtin() -> Vec<ServiceDef> {
             run_cmd: String::new(),
             ports: vec![6379],
             process_names: vec!["redis-server".into(), "redis-server.exe".into()],
+            product_names: vec![],
             health_url: None,
             log_paths: vec![],
             depends_on: vec![],
@@ -389,6 +405,21 @@ mod tests {
         )
         .expect("解析 services TOML");
         assert_eq!(cfg.services[0].process_names, vec!["x-app".to_string()]);
+    }
+
+    /// 回归：桌面客户端必须声明 productNames（「已安装」检测依据，Windows 读卸载
+    /// 注册表）；显示名按用户要求不带技术栈后缀（「空间数据驱动程序」）。
+    /// 2026-10-14 Windows 实测：未安装却报「正常」——根因是检测模型缺「装没装」
+    /// 维度且命令行兜底自匹配，此测试锁定声明面。
+    #[test]
+    fn biosphere_declares_product_names_and_display_name() {
+        let d = builtin()
+            .into_iter()
+            .find(|d| d.id == "biosphere-spatial")
+            .expect("biosphere-spatial 必须存在");
+        assert_eq!(d.name, "空间数据驱动程序");
+        assert_eq!(d.product_names, vec!["空间数据驱动".to_string()]);
+        assert!(d.ports.is_empty() && !d.process_names.is_empty());
     }
 
     /// 回归：内置注册表必须包含第三方依赖 vernemq/minio（thirdParty=true），
