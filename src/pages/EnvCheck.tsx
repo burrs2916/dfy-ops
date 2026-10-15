@@ -29,7 +29,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { Check, ContentCopy, DeleteOutline, Pause, PlayArrow, Refresh, SmartToy } from "@mui/icons-material";
+import { Check, ContentCopy, DeleteOutline, ExpandMore, Pause, PlayArrow, Refresh, SmartToy } from "@mui/icons-material";
 import { api } from "../api";
 import { useAppSettingsStore, useOpsStore } from "../store";
 import type {
@@ -548,6 +548,172 @@ function RepairCenter({
     [settings, apply],
   );
 
+  // 远程部署分区默认折叠（声明过远程的软件不在主视线里）
+  const [remoteOpen, setRemoteOpen] = useState(false);
+
+  /** 软件卡片：状态机（执行中 > 已安装 > 残留 > 有包 > 无包）。
+   *  探测（probing）不阻塞渲染——已装状态未知时按待安装显示，结果回来自动归位，
+   *  避免进入页面 6 张卡集体转圈的"慢"体感。 */
+  const renderCard = (t: string) => {
+    const st = installedOf(t);
+    const pkg = bestPkg(t);
+    const runningThis = repairRunning && activeTarget === t;
+    const conventionHint = `${resourceDir || "<资源目录>"}\\${CONVENTION_DIR[t]}\\`;
+
+    let statusLine: React.ReactNode;
+    let actions: React.ReactNode = null;
+    if (runningThis) {
+      statusLine = (
+        <Stack direction="row" spacing={1} alignItems="center">
+          <CircularProgress size={16} />
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            正在执行操作，进度见上方提示…
+          </Typography>
+        </Stack>
+      );
+    } else if (st?.serviceInstalled) {
+      statusLine = (
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+          <Chip size="small" color="success" label="已安装" />
+          <Typography variant="caption" sx={{ fontFamily: "monospace", color: "text.secondary", wordBreak: "break-all" }}>
+            {st.installDir || "由 Windows Installer 管理"}
+          </Typography>
+        </Stack>
+      );
+      actions = (
+        <>
+          <Button size="small" variant="outlined" disabled={repairDisabled} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+            重装
+          </Button>
+          <Button
+            size="small"
+            variant="outlined"
+            color="error"
+            startIcon={<DeleteOutline />}
+            disabled={!st.canUninstall || repairDisabled}
+            onClick={() => {
+              setRemoveData(false);
+              setConfirmText("");
+              setUninstallTarget(st);
+            }}
+            sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+          >
+            卸载
+          </Button>
+        </>
+      );
+    } else if (st?.dirExists) {
+      statusLine = (
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+          <Chip size="small" color="warning" label="残留目录" />
+          <Typography variant="caption" sx={{ fontFamily: "monospace", color: "text.secondary", wordBreak: "break-all" }}>
+            {st.installDir}（未注册服务，可清理后重装）
+          </Typography>
+        </Stack>
+      );
+      actions = (
+        <Button
+          size="small"
+          variant="outlined"
+          color="error"
+          startIcon={<DeleteOutline />}
+          disabled={!st.canUninstall || repairDisabled}
+          onClick={() => {
+            setRemoveData(false);
+            setConfirmText("");
+            setUninstallTarget(st);
+          }}
+          sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+        >
+          清理
+        </Button>
+      );
+    } else if (pkg) {
+      statusLine = (
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+          <Chip size="small" variant="outlined" label="未安装" />
+          <Typography variant="body2" color="text.secondary" sx={{ wordBreak: "break-all" }}>
+            已识别安装包 <b>{pkg.fileName}</b>（{fmtSize(pkg.sizeBytes)}{pkg.inConventionDir ? "，约定目录" : ""}）
+          </Typography>
+        </Stack>
+      );
+      actions = (
+        <Button size="small" variant="contained" disabled={repairDisabled} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+          一键安装
+        </Button>
+      );
+    } else {
+      statusLine = (
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+          <Chip size="small" variant="outlined" label="未安装" />
+          <Typography variant="body2" color="text.secondary" sx={{ wordBreak: "break-word" }}>
+            {t === "java"
+              ? "未识别到安装包：可在资源目录 JDK\\ 放入 zip（免安装），或点「一键安装」在线下载（需外网）"
+              : `未识别到安装包：把安装包放入 ${conventionHint} 子目录后这里会自动出现`}
+          </Typography>
+        </Stack>
+      );
+      actions = t === "java" ? (
+        <Button size="small" variant="contained" disabled={repairDisabled} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+          一键安装（在线）
+        </Button>
+      ) : null;
+    }
+
+    return (
+      <Paper
+        key={t}
+        variant="outlined"
+        sx={{
+          px: 2,
+          py: 1.5,
+          ...(runningThis ? { borderColor: "primary.main", bgcolor: "action.hover" } : {}),
+        }}
+      >
+        <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: "wrap" }}>
+          <Box sx={{ width: 168, flexShrink: 0 }}>
+            <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.3 }}>
+              {TARGET_LABEL[t] ?? t}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              {TARGET_DESC[t] ?? ""}
+            </Typography>
+          </Box>
+          <Box sx={{ flex: 1, minWidth: 260 }}>{statusLine}</Box>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ flexShrink: 0 }}>
+            {actions}
+          </Stack>
+        </Stack>
+      </Paper>
+    );
+  };
+
+  /** 远程部署卡片：灰色说明行 + 改回本地的入口。 */
+  const renderRemoteCard = (t: string) => (
+    <Paper key={t} variant="outlined" sx={{ px: 2, py: 1.25, bgcolor: "action.hover" }}>
+      <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: "wrap" }}>
+        <Box sx={{ width: 168, flexShrink: 0 }}>
+          <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.3, color: "text.secondary" }}>
+            {TARGET_LABEL[t] ?? t}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            {TARGET_DESC[t] ?? ""}
+          </Typography>
+        </Box>
+        <Box sx={{ flex: 1, minWidth: 260 }}>
+          <Typography variant="body2" color="text.secondary">
+            本机无需安装（按部署规划远程部署）
+          </Typography>
+        </Box>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ flexShrink: 0 }}>
+          <Button size="small" variant="text" disabled={repairRunning} onClick={() => void toggleRemote(t, false)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+            改回本地安装
+          </Button>
+        </Stack>
+      </Stack>
+    </Paper>
+  );
+
   return (
     <Stack spacing={2}>
       <Tabs value={subTab} onChange={(_, v: "install" | "issues") => setSubTab(v)}>
@@ -562,7 +728,7 @@ function RepairCenter({
         />
       </Tabs>
 
-      {/* ===== 安装与维护：每个软件一张卡片，状态一眼可见，装/卸一步直达 ===== */}
+      {/* ===== 安装与维护：待安装 / 已安装 / 远程部署 三分区，探测后台完成不阻塞 ===== */}
       {subTab === "install" && (
         <>
           {!resourceDir ? (
@@ -574,168 +740,100 @@ function RepairCenter({
             <Alert severity="error">资源目录（{resourceDir}）不存在或不可访问，请到「设置 → 资源目录」重新选择。</Alert>
           ) : null}
 
-          <Stack spacing={1.25}>
-            {SOFTWARE_ORDER.map((t) => {
-              const st = installedOf(t);
-              const pkg = bestPkg(t);
-              const isRemote = remoteSet.has(t);
-              const runningThis = repairRunning && activeTarget === t;
-              const conventionHint = `${resourceDir || "<资源目录>"}\\${CONVENTION_DIR[t]}\\`;
+          {(() => {
+            const toInstall = SOFTWARE_ORDER.filter(
+              (t) => !remoteSet.has(t) && !installedOf(t)?.serviceInstalled,
+            );
+            const installedList = SOFTWARE_ORDER.filter(
+              (t) => !remoteSet.has(t) && installedOf(t)?.serviceInstalled,
+            );
+            const remoteList = SOFTWARE_ORDER.filter((t) => remoteSet.has(t));
 
-              // 状态行 + 操作按钮（状态机：远程 > 执行中 > 已安装 > 残留 > 有包 > 无包）
-              let statusLine: React.ReactNode;
-              let actions: React.ReactNode = null;
-              if (isRemote) {
-                statusLine = (
+            return (
+              <>
+                {/* 待安装：一键安装的主战场 */}
+                <Stack spacing={1}>
                   <Stack direction="row" spacing={1} alignItems="center">
-                    <Chip size="small" label="远程部署" variant="outlined" />
+                    <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                      待安装
+                    </Typography>
+                    {probing && (
+                      <>
+                        <CircularProgress size={12} />
+                        <Typography variant="caption" color="text.secondary">
+                          正在检测安装状态…
+                        </Typography>
+                      </>
+                    )}
+                  </Stack>
+                  {toInstall.length === 0 ? (
                     <Typography variant="body2" color="text.secondary">
-                      本机无需安装（按部署规划远程部署）
+                      没有待安装的软件
                     </Typography>
-                  </Stack>
-                );
-                actions = (
-                  <Button size="small" variant="text" disabled={repairRunning} onClick={() => void toggleRemote(t, false)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
-                    改回本地安装
-                  </Button>
-                );
-              } else if (runningThis) {
-                statusLine = (
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <CircularProgress size={16} />
-                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                      正在执行操作，进度见上方提示…
-                    </Typography>
-                  </Stack>
-                );
-              } else if (st?.serviceInstalled) {
-                statusLine = (
-                  <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
-                    <Chip size="small" color="success" label="已安装" />
-                    <Typography variant="caption" sx={{ fontFamily: "monospace", color: "text.secondary", wordBreak: "break-all" }}>
-                      {st.installDir || "由 Windows Installer 管理"}
-                    </Typography>
-                  </Stack>
-                );
-                actions = (
-                  <>
-                    <Button size="small" variant="outlined" disabled={repairDisabled} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
-                      重装
-                    </Button>
-                    <Button
-                      size="small"
-                      variant="outlined"
-                      color="error"
-                      startIcon={<DeleteOutline />}
-                      disabled={!st.canUninstall || repairDisabled}
-                      onClick={() => {
-                        setRemoveData(false);
-                        setConfirmText("");
-                        setUninstallTarget(st);
-                      }}
-                      sx={{ textTransform: "none", whiteSpace: "nowrap" }}
-                    >
-                      卸载
-                    </Button>
-                  </>
-                );
-              } else if (st?.dirExists) {
-                statusLine = (
-                  <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
-                    <Chip size="small" color="warning" label="残留目录" />
-                    <Typography variant="caption" sx={{ fontFamily: "monospace", color: "text.secondary", wordBreak: "break-all" }}>
-                      {st.installDir}（未注册服务，可清理后重装）
-                    </Typography>
-                  </Stack>
-                );
-                actions = (
-                  <Button
-                    size="small"
-                    variant="outlined"
-                    color="error"
-                    startIcon={<DeleteOutline />}
-                    disabled={!st.canUninstall || repairDisabled}
-                    onClick={() => {
-                      setRemoveData(false);
-                      setConfirmText("");
-                      setUninstallTarget(st);
-                    }}
-                    sx={{ textTransform: "none", whiteSpace: "nowrap" }}
-                  >
-                    清理
-                  </Button>
-                );
-              } else if (pkg) {
-                statusLine = (
-                  <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
-                    <Chip size="small" variant="outlined" label="未安装" />
-                    <Typography variant="body2" color="text.secondary" sx={{ wordBreak: "break-all" }}>
-                      已识别安装包 <b>{pkg.fileName}</b>（{fmtSize(pkg.sizeBytes)}{pkg.inConventionDir ? "，约定目录" : ""}）
-                    </Typography>
-                  </Stack>
-                );
-                actions = (
-                  <Button size="small" variant="contained" disabled={repairDisabled} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
-                    一键安装
-                  </Button>
-                );
-              } else {
-                statusLine = (
-                  <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
-                    <Chip size="small" variant="outlined" label="未安装" />
-                    <Typography variant="body2" color="text.secondary" sx={{ wordBreak: "break-word" }}>
-                      {t === "java"
-                        ? "未识别到安装包：可在资源目录 JDK\\ 放入 zip（免安装），或点「一键安装」在线下载（需外网）"
-                        : `未识别到安装包：把安装包放入 ${conventionHint} 子目录后这里会自动出现`}
-                    </Typography>
-                  </Stack>
-                );
-                actions = t === "java" ? (
-                  <Button size="small" variant="contained" disabled={repairDisabled} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
-                    一键安装（在线）
-                  </Button>
-                ) : null;
-              }
+                  ) : (
+                    toInstall.map((t) => renderCard(t))
+                  )}
+                </Stack>
 
-              return (
-                <Paper
-                  key={t}
-                  variant="outlined"
-                  sx={{
-                    px: 2,
-                    py: 1.5,
-                    ...(runningThis ? { borderColor: "primary.main", bgcolor: "action.hover" } : {}),
-                  }}
-                >
-                  <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: "wrap" }}>
-                    <Box sx={{ width: 168, flexShrink: 0 }}>
-                      <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.3 }}>
-                        {TARGET_LABEL[t] ?? t}
+                {/* 已安装：重装 / 卸载的维护区 */}
+                <Stack spacing={1}>
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
+                      已安装
+                    </Typography>
+                    {probing && (
+                      <>
+                        <CircularProgress size={12} />
+                        <Typography variant="caption" color="text.secondary">
+                          正在检测…
+                        </Typography>
+                      </>
+                    )}
+                  </Stack>
+                  {installedList.length === 0 ? (
+                    <Typography variant="body2" color="text.secondary">
+                      暂无（安装完成后软件会出现在这里）
+                    </Typography>
+                  ) : (
+                    installedList.map((t) => renderCard(t))
+                  )}
+                </Stack>
+
+                {/* 远程部署：默认折叠，不占主视线 */}
+                {remoteList.length > 0 && (
+                  <Box>
+                    <Stack
+                      direction="row"
+                      spacing={1}
+                      alignItems="center"
+                      onClick={() => setRemoteOpen((v) => !v)}
+                      sx={{ cursor: "pointer", userSelect: "none", py: 0.5 }}
+                    >
+                      <ExpandMore
+                        sx={{
+                          fontSize: 20,
+                          transition: "transform 0.2s",
+                          transform: remoteOpen ? "rotate(0deg)" : "rotate(-90deg)",
+                          color: "text.secondary",
+                        }}
+                      />
+                      <Typography variant="subtitle1" sx={{ fontWeight: 700, color: "text.secondary" }}>
+                        远程部署（{remoteList.length}）
                       </Typography>
                       <Typography variant="caption" color="text.secondary">
-                        {TARGET_DESC[t] ?? ""}
+                        {remoteList.map((t) => TARGET_LABEL[t] ?? t).join("、")} · 本机无需安装
                       </Typography>
-                    </Box>
-                    <Box sx={{ flex: 1, minWidth: 260 }}>
-                      {probing && !isRemote ? (
-                        <Stack direction="row" spacing={1} alignItems="center">
-                          <CircularProgress size={14} />
-                          <Typography variant="body2" color="text.secondary">
-                            正在检测本机安装状态…
-                          </Typography>
-                        </Stack>
-                      ) : (
-                        statusLine
-                      )}
-                    </Box>
-                    <Stack direction="row" spacing={1} alignItems="center" sx={{ flexShrink: 0 }}>
-                      {actions}
                     </Stack>
-                  </Stack>
-                </Paper>
-              );
-            })}
-          </Stack>
+                    {remoteOpen && (
+                      <Stack spacing={1} sx={{ mt: 1 }}>
+                        {remoteList.map((t) => renderRemoteCard(t))}
+                      </Stack>
+                    )}
+                  </Box>
+                )}
+              </>
+            );
+          })()}
 
           {scan?.misplaced && scan.misplaced.length > 0 && (
             <Alert severity="warning" icon={false}>
