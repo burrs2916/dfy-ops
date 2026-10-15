@@ -55,6 +55,8 @@ fn probe_home_version(home: &str) -> Option<(u32, u32, u32)> {
 
 /// 解析 `/usr/libexec/java_home -V` 输出（stderr），提取每行末尾的 Home 路径。
 /// 行样例：`    17.0.15 (arm64) "Homebrew" - "OpenJDK 17.0.15" /opt/homebrew/.../Home`
+/// 仅 macOS 产线使用；非 macOS 平台编译排除，测试跨平台保留。
+#[cfg(any(target_os = "macos", test))]
 fn parse_java_home_v(text: &str) -> Vec<String> {
     text.lines()
         .filter_map(|l| {

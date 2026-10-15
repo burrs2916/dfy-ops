@@ -264,44 +264,54 @@ fn push_path_java_check(items: &mut Vec<CheckItem>, expected_major: u32, cache: 
             .iter()
             .filter(|j| j.major() >= expected_major)
             .max_by_key(|j| j.version);
-        let (actual, hint) = match (java.as_deref(), compatible) {
-            (_, Some(j)) => (
-                format!(
-                    "PATH 中 java 不可用或版本过低（{}）；本机已有达标 JDK：{}（{}）",
-                    java.as_deref().map(str::trim).unwrap_or("未检测到"),
+        let it = match (java.as_deref(), compatible) {
+            // 平台托管语义：免安装版 JDK + 用户级 JAVA_HOME 时 PATH 上没有 java
+            // 是常态，因此本机已有实探达标的 JDK（注册表/常见目录/JAVA_HOME，
+            // installed_jdks 内部逐个实跑验证过版本）即视为就绪，不再强求 PATH。
+            (_, Some(j)) => item(
+                "java",
+                "Java 运行时",
+                "运行时",
+                &format!("JDK {expected_major}+"),
+                &format!(
+                    "本机 JDK：{}（{}，满足 JDK {expected_major}+）",
                     j.home,
                     j.version_label()
                 ),
-                format!(
-                    "无需安装：将 {} 的 bin 目录加入 PATH（或设为 JAVA_HOME）后重试",
-                    j.home
-                ),
+                CheckStatus::Pass,
             ),
-            (Some(out), None) => (
-                format!(
-                    "{}（版本过低）；本机未安装其他 JDK {expected_major}+ 运行时",
-                    out.trim()
-                ),
-                format!(
+            (Some(out), None) => {
+                let mut it = item(
+                    "java",
+                    "Java 运行时",
+                    "运行时",
+                    &format!("JDK {expected_major}+"),
+                    &format!(
+                        "{}（版本过低）；本机未安装其他 JDK {expected_major}+ 运行时",
+                        out.trim()
+                    ),
+                    CheckStatus::Fail,
+                );
+                it.fix_hint = format!(
                     "可通过「一键修复」自动安装 Eclipse Temurin {expected_major} JRE（MSI 静默安装并配置 JAVA_HOME/PATH，需管理员确认）"
-                ),
-            ),
-            (None, None) => (
-                format!("未检测到 java；本机未安装 JDK {expected_major}+ 运行时"),
-                format!(
+                );
+                it
+            }
+            (None, None) => {
+                let mut it = item(
+                    "java",
+                    "Java 运行时",
+                    "运行时",
+                    &format!("JDK {expected_major}+"),
+                    "未检测到 java；本机未安装 JDK {expected_major}+ 运行时",
+                    CheckStatus::Fail,
+                );
+                it.fix_hint = format!(
                     "可通过「一键修复」自动安装 Eclipse Temurin {expected_major} JRE（MSI 静默安装并配置 JAVA_HOME/PATH，需管理员确认）"
-                ),
-            ),
+                );
+                it
+            }
         };
-        let mut it = item(
-            "java",
-            "Java 运行时",
-            "运行时",
-            &format!("JDK {expected_major}+"),
-            &actual,
-            CheckStatus::Fail,
-        );
-        it.fix_hint = hint;
         it
     };
     items.push(it);

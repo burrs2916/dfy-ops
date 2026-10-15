@@ -87,8 +87,8 @@ fn match_target(name_lower: &str) -> Option<&'static str> {
     }
 }
 
-/// 按文件名识别归属软件：安装包扩展名 + 名字模式。
-pub fn classify(file_name: &str) -> Option<&'static str> {
+/// 按文件名识别归属软件：安装包扩展名 + 名字模式（scan 的单元测试锚点）。
+fn classify(file_name: &str) -> Option<&'static str> {
     let n = file_name.to_lowercase();
     is_pkg_ext(&n).then_some(()).and_then(|()| match_target(&n))
 }
