@@ -29,7 +29,23 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { Check, ContentCopy, DeleteOutline, ExpandMore, Pause, PlayArrow, Refresh, SmartToy } from "@mui/icons-material";
+import {
+  Bolt,
+  Check,
+  Cloud,
+  Coffee,
+  ContentCopy,
+  DeleteOutline,
+  Inventory2,
+  Pause,
+  PlayArrow,
+  QueryStats,
+  Refresh,
+  SettingsInputAntenna,
+  SmartToy,
+  Storage,
+  Widgets,
+} from "@mui/icons-material";
 import { api } from "../api";
 import { useAppSettingsStore, useOpsStore } from "../store";
 import type {
@@ -116,6 +132,32 @@ const CONVENTION_DIR: Record<string, string> = {
   minio: "MinIO",
   greptime: "GreptimeDB",
 };
+/** 软件图标：卡片视觉锚点（圆润底色块 + 白色图形，专业感） */
+const TARGET_ICON: Record<string, React.ReactNode> = {
+  mysql: <Storage />,
+  java: <Coffee />,
+  redis: <Bolt />,
+  vernemq: <SettingsInputAntenna />,
+  minio: <Cloud />,
+  greptime: <QueryStats />,
+};
+
+/** 空态占位：图标 + 标题 + 引导文案（精致感的关键细节）。 */
+function EmptyBlock({ icon, title, hint }: { icon: React.ReactNode; title: string; hint?: string }) {
+  return (
+    <Stack alignItems="center" sx={{ py: 5, color: "text.disabled" }}>
+      {icon}
+      <Typography variant="body2" sx={{ mt: 1.5, fontWeight: 600, color: "text.secondary" }}>
+        {title}
+      </Typography>
+      {hint && (
+        <Typography variant="caption" sx={{ mt: 0.5, maxWidth: 460, textAlign: "center" }}>
+          {hint}
+        </Typography>
+      )}
+    </Stack>
+  );
+}
 
 /** 包体积 → 人读文案（KB/MB/GB，1 位小数）。 */
 function fmtSize(bytes: number): string {
@@ -548,8 +590,8 @@ function RepairCenter({
     [settings, apply],
   );
 
-  // 远程部署分区默认折叠（声明过远程的软件不在主视线里）
-  const [remoteOpen, setRemoteOpen] = useState(false);
+  // 安装与维护的子页签（待安装/已安装/远程部署）
+  const [instTab, setInstTab] = useState<"toInstall" | "installed" | "remote">("toInstall");
 
   /** 软件卡片：状态机（执行中 > 已安装 > 残留 > 有包 > 无包）。
    *  探测（probing）不阻塞渲染——已装状态未知时按待安装显示，结果回来自动归位，
@@ -671,8 +713,24 @@ function RepairCenter({
         }}
       >
         <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: "wrap" }}>
-          <Box sx={{ width: 168, flexShrink: 0 }}>
-            <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.3 }}>
+          <Box
+            sx={{
+              width: 42,
+              height: 42,
+              borderRadius: 2,
+              display: "grid",
+              placeItems: "center",
+              flexShrink: 0,
+              color: "#fff",
+              bgcolor: runningThis ? "primary.main" : st?.serviceInstalled ? "success.main" : "primary.main",
+              boxShadow: "0 2px 8px rgba(13,148,136,0.25)",
+              "& svg": { fontSize: 22 },
+            }}
+          >
+            {TARGET_ICON[t] ?? <Widgets />}
+          </Box>
+          <Box sx={{ width: 150, flexShrink: 0 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, lineHeight: 1.4, fontSize: "0.95rem" }}>
               {TARGET_LABEL[t] ?? t}
             </Typography>
             <Typography variant="caption" color="text.secondary">
@@ -692,8 +750,23 @@ function RepairCenter({
   const renderRemoteCard = (t: string) => (
     <Paper key={t} variant="outlined" sx={{ px: 2, py: 1.25, bgcolor: "action.hover" }}>
       <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: "wrap" }}>
-        <Box sx={{ width: 168, flexShrink: 0 }}>
-          <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.3, color: "text.secondary" }}>
+        <Box
+          sx={{
+            width: 42,
+            height: 42,
+            borderRadius: 2,
+            display: "grid",
+            placeItems: "center",
+            flexShrink: 0,
+            color: "text.secondary",
+            bgcolor: "grey.300",
+            "& svg": { fontSize: 22 },
+          }}
+        >
+          {TARGET_ICON[t] ?? <Widgets />}
+        </Box>
+        <Box sx={{ width: 150, flexShrink: 0 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, lineHeight: 1.4, fontSize: "0.95rem", color: "text.secondary" }}>
             {TARGET_LABEL[t] ?? t}
           </Typography>
           <Typography variant="caption" color="text.secondary">
@@ -728,17 +801,17 @@ function RepairCenter({
         />
       </Tabs>
 
-      {/* ===== 安装与维护：待安装 / 已安装 / 远程部署 三分区，探测后台完成不阻塞 ===== */}
+      {/* ===== 安装与维护：页头 + 三个并列子 Tab（待安装/已安装/远程部署） ===== */}
       {subTab === "install" && (
         <>
-          {!resourceDir ? (
-            <Alert severity="warning">
-              先配置「本地资源目录」（设置 → 资源目录，可用「浏览…」选择）：把安装包放进
-              <b>以软件名命名的子目录</b>（如 <b>MySQL\</b>、<b>JDK\</b>），这里就会识别并出现「一键安装」按钮。
-            </Alert>
-          ) : scan && !scan.exists ? (
-            <Alert severity="error">资源目录（{resourceDir}）不存在或不可访问，请到「设置 → 资源目录」重新选择。</Alert>
-          ) : null}
+          <Box sx={{ mb: -0.5 }}>
+            <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: 0.2 }}>
+              环境修复
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              识别资源目录中的离线安装包，一键安装 / 卸载 MySQL、JDK 等环境依赖
+            </Typography>
+          </Box>
 
           {(() => {
             const toInstall = SOFTWARE_ORDER.filter(
@@ -748,102 +821,119 @@ function RepairCenter({
               (t) => !remoteSet.has(t) && installedOf(t)?.serviceInstalled,
             );
             const remoteList = SOFTWARE_ORDER.filter((t) => remoteSet.has(t));
+            const TabLabel = ({ text, count }: { text: string; count: number }) => (
+              <Stack direction="row" spacing={0.75} alignItems="center">
+                <span>{text}</span>
+                {count > 0 && (
+                  <Box
+                    sx={{
+                      minWidth: 18,
+                      height: 18,
+                      px: 0.5,
+                      borderRadius: 9,
+                      display: "grid",
+                      placeItems: "center",
+                      fontSize: 11,
+                      fontWeight: 700,
+                      bgcolor: "primary.main",
+                      color: "#fff",
+                    }}
+                  >
+                    {count}
+                  </Box>
+                )}
+              </Stack>
+            );
 
             return (
               <>
-                {/* 待安装：一键安装的主战场 */}
-                <Stack spacing={1}>
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
-                      待安装
-                    </Typography>
+                <Tabs
+                  value={instTab}
+                  onChange={(_, v: "toInstall" | "installed" | "remote") => setInstTab(v)}
+                  sx={{ "& .MuiTab-root": { textTransform: "none", minHeight: 44 } }}
+                >
+                  <Tab value="toInstall" label={<TabLabel text="待安装" count={toInstall.length} />} />
+                  <Tab value="installed" label={<TabLabel text="已安装" count={installedList.length} />} />
+                  <Tab value="remote" label={<TabLabel text="远程部署" count={remoteList.length} />} />
+                </Tabs>
+
+                {instTab === "toInstall" && (
+                  <Stack spacing={1.25}>
+                    {!resourceDir ? (
+                      <Alert severity="warning">
+                        先配置「本地资源目录」（设置 → 资源目录，可用「浏览…」选择）：把安装包放进
+                        <b>以软件名命名的子目录</b>（如 <b>MySQL\</b>、<b>JDK\</b>），这里就会识别并出现「一键安装」按钮。
+                      </Alert>
+                    ) : scan && !scan.exists ? (
+                      <Alert severity="error">资源目录（{resourceDir}）不存在或不可访问，请到「设置 → 资源目录」重新选择。</Alert>
+                    ) : null}
                     {probing && (
-                      <>
+                      <Stack direction="row" spacing={1} alignItems="center">
                         <CircularProgress size={12} />
                         <Typography variant="caption" color="text.secondary">
-                          正在检测安装状态…
+                          正在检测本机安装状态…
                         </Typography>
-                      </>
+                      </Stack>
+                    )}
+                    {toInstall.length === 0 ? (
+                      <EmptyBlock
+                        icon={<Check sx={{ fontSize: 36, color: "success.main" }} />}
+                        title={probing ? "正在检测安装状态…" : "没有待安装的软件"}
+                        hint={probing ? undefined : "已安装的软件在「已安装」页；缺安装包的软件放入资源目录后会出现在这里"}
+                      />
+                    ) : (
+                      toInstall.map((t) => renderCard(t))
+                    )}
+                    {scan?.misplaced && scan.misplaced.length > 0 && (
+                      <Alert severity="warning" icon={false}>
+                        {scan.misplaced.map((m) => (
+                          <Typography key={m.path} variant="body2" component="div">
+                            「{m.fileName}」放在了 {m.foundIn}/ 目录，但它属于 {m.fileTarget.toUpperCase()} ——建议移到对应的约定子目录（按软件名命名）
+                          </Typography>
+                        ))}
+                      </Alert>
                     )}
                   </Stack>
-                  {toInstall.length === 0 ? (
-                    <Typography variant="body2" color="text.secondary">
-                      没有待安装的软件
-                    </Typography>
-                  ) : (
-                    toInstall.map((t) => renderCard(t))
-                  )}
-                </Stack>
+                )}
 
-                {/* 已安装：重装 / 卸载的维护区 */}
-                <Stack spacing={1}>
-                  <Stack direction="row" spacing={1} alignItems="center">
-                    <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
-                      已安装
-                    </Typography>
+                {instTab === "installed" && (
+                  <Stack spacing={1.25}>
                     {probing && (
-                      <>
+                      <Stack direction="row" spacing={1} alignItems="center">
                         <CircularProgress size={12} />
                         <Typography variant="caption" color="text.secondary">
                           正在检测…
                         </Typography>
-                      </>
-                    )}
-                  </Stack>
-                  {installedList.length === 0 ? (
-                    <Typography variant="body2" color="text.secondary">
-                      暂无（安装完成后软件会出现在这里）
-                    </Typography>
-                  ) : (
-                    installedList.map((t) => renderCard(t))
-                  )}
-                </Stack>
-
-                {/* 远程部署：默认折叠，不占主视线 */}
-                {remoteList.length > 0 && (
-                  <Box>
-                    <Stack
-                      direction="row"
-                      spacing={1}
-                      alignItems="center"
-                      onClick={() => setRemoteOpen((v) => !v)}
-                      sx={{ cursor: "pointer", userSelect: "none", py: 0.5 }}
-                    >
-                      <ExpandMore
-                        sx={{
-                          fontSize: 20,
-                          transition: "transform 0.2s",
-                          transform: remoteOpen ? "rotate(0deg)" : "rotate(-90deg)",
-                          color: "text.secondary",
-                        }}
-                      />
-                      <Typography variant="subtitle1" sx={{ fontWeight: 700, color: "text.secondary" }}>
-                        远程部署（{remoteList.length}）
-                      </Typography>
-                      <Typography variant="caption" color="text.secondary">
-                        {remoteList.map((t) => TARGET_LABEL[t] ?? t).join("、")} · 本机无需安装
-                      </Typography>
-                    </Stack>
-                    {remoteOpen && (
-                      <Stack spacing={1} sx={{ mt: 1 }}>
-                        {remoteList.map((t) => renderRemoteCard(t))}
                       </Stack>
                     )}
-                  </Box>
+                    {installedList.length === 0 ? (
+                      <EmptyBlock
+                        icon={<Inventory2 sx={{ fontSize: 36 }} />}
+                        title={probing ? "正在检测…" : "暂无已安装的软件"}
+                        hint="在「待安装」页一键安装后，软件会出现在这里（可重装 / 卸载）"
+                      />
+                    ) : (
+                      installedList.map((t) => renderCard(t))
+                    )}
+                  </Stack>
+                )}
+
+                {instTab === "remote" && (
+                  <Stack spacing={1.25}>
+                    {remoteList.length === 0 ? (
+                      <EmptyBlock
+                        icon={<Cloud sx={{ fontSize: 36 }} />}
+                        title="没有声明远程部署的软件"
+                        hint="Redis、VerneMQ 等走远程部署的软件可在这里标记（本机不安装）"
+                      />
+                    ) : (
+                      remoteList.map((t) => renderRemoteCard(t))
+                    )}
+                  </Stack>
                 )}
               </>
             );
           })()}
-
-          {scan?.misplaced && scan.misplaced.length > 0 && (
-            <Alert severity="warning" icon={false}>
-              {scan.misplaced.map((m) => (
-                <Typography key={m.path} variant="body2" component="div">
-                  「{m.fileName}」放在了 {m.foundIn}/ 目录，但它属于 {m.fileTarget.toUpperCase()} ——建议移到对应的约定子目录（按软件名命名）
-                </Typography>
-              ))}
-            </Alert>
-          )}
         </>
       )}
 
