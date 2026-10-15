@@ -81,6 +81,15 @@ pub fn installed_jdks() -> Vec<JavaInstall> {
     if std::path::Path::new(JDK_MANAGED_HOME).join("bin").exists() {
         homes.insert(JDK_MANAGED_HOME.to_string());
     }
+    // JAVA_HOME 兜底：zip 解压安装的 JDK 往往无注册表条目、不在常见目录、
+    // 也不进 PATH（如 CI runner 的 hostedtoolcache），只设了 JAVA_HOME——
+    // 环境变量是最后一道可靠的归属线索
+    if let Ok(h) = std::env::var("JAVA_HOME") {
+        let h = h.trim().trim_matches('"').to_string();
+        if !h.is_empty() && std::path::Path::new(&h).join("bin").exists() {
+            homes.insert(h);
+        }
+    }
     // 注册表约定键：Oracle/Adoptium/Microsoft 安装器都会写 JavaHome（或 Path）指向 home 目录
     for sub in [
         r"SOFTWARE\JavaSoft\Java Runtime Environment",
