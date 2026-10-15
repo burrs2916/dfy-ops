@@ -986,6 +986,8 @@ pub fn mysql_msi_entries() -> Vec<(String, String)> {
 /// 卸载任务（维护）：mysql/redis = 停止并注销 Windows 服务，可选删除安装目录
 /// （含数据——必须由用户在弹窗里显式勾选，数据库数据删除后不可恢复）；
 /// java = 枚举注册表 MSI 条目后 msiexec /x 静默卸载（remove_data 不适用）。
+/// mysql 勾选删数据时，删除前先自动备份全部数据库为单个 SQL 文件
+/// （表结构+数据+例程，落 backup_dir；备份失败中止删除，数据分毫不动）。
 /// install_dir 与安装管线同源（服务注册表 installDir），保证装、卸口径一致。
 /// 成败以执行后的重探为准（服务不存在时 net stop/sc delete 的报错与退出码不作数）。
 #[cfg(target_os = "windows")]
@@ -993,6 +995,7 @@ pub fn start_uninstall(
     target: &'static str,
     remove_data: bool,
     install_dir: String,
+    backup_dir: String,
     env_cache: EnvCache,
     state: Arc<RepairState>,
 ) -> Result<(), String> {
@@ -1015,7 +1018,7 @@ pub fn start_uninstall(
         job.logs.clear();
     }
     tokio::spawn(async move {
-        run_uninstall(state, target, remove_data, install_dir, env_cache).await;
+        run_uninstall(state, target, remove_data, install_dir, backup_dir, env_cache).await;
     });
     Ok(())
 }
@@ -1026,6 +1029,7 @@ pub fn start_uninstall(
     target: &'static str,
     _remove_data: bool,
     _install_dir: String,
+    _backup_dir: String,
     _env_cache: EnvCache,
     _state: Arc<RepairState>,
 ) -> Result<(), String> {
@@ -1041,6 +1045,7 @@ async fn run_uninstall(
     target: &'static str,
     remove_data: bool,
     install_dir: String,
+    backup_dir: String,
     env_cache: EnvCache,
 ) {
     if target == "java" {
@@ -1050,6 +1055,37 @@ async fn run_uninstall(
     let label = crate::ops::resource::target_label(target);
     let (svc, _port) = service_spec(target).unwrap();
     state.log(format!("开始卸载 {label}（服务 {svc}，目录 {install_dir}）"));
+
+    // ===== 数据安全闸门：mysql 勾选删数据时，先备份全部数据库为 SQL 文件 =====
+    // 备份失败 = 数据可能无法恢复 → 直接中止删除（数据分毫不动），绝无侥幸
+    if target == "mysql" && remove_data {
+        state.patch(|j| j.stage = "backup".into());
+        state.log("即将删除数据目录——正在先把全部数据库（表结构 + 数据 + 例程）备份为 SQL 文件…");
+        let b = tokio::task::spawn_blocking(move || backup_mysql_before_delete(&install_dir, &backup_dir)).await;
+        match b {
+            Ok(Ok(path)) => {
+                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                state.log(format!(
+                    "备份完成：{path}（{} KB）。删除后可用 mysql < 该文件恢复全部数据",
+                    size / 1024
+                ));
+            }
+            Ok(Err(e)) => {
+                finish(
+                    state,
+                    env_cache,
+                    false,
+                    format!("数据备份失败，已中止删除（数据未受影响）：{e}"),
+                )
+                .await;
+                return;
+            }
+            Err(e) => {
+                finish(state, env_cache, false, format!("备份任务异常，已中止删除：{e}")).await;
+                return;
+            }
+        }
+    }
 
     // MySQL「完全清理」：机器上可能有外部 MSI 安装（MySQL Installer 装的 Server），
     // 一并枚举后静默卸载，不留注册表产品残留
@@ -1218,6 +1254,116 @@ fn mysql_data_initialized(home: &str) -> bool {
     std::path::Path::new(home).join("data").join("mysql").is_dir()
 }
 
+/// UNIX 秒 → UTC "YYYYmmdd-HHMMSS"（civil_from_days 算法，不引时间库）。
+fn timestamp_utc(secs: u64) -> String {
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let (h, m, s) = (rem / 3600, rem % 3600 / 60, rem % 60);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let mo = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if mo <= 2 { y + 1 } else { y };
+    format!("{y:04}{mo:02}{d:02}-{h:02}{m:02}{s:02}")
+}
+
+/// 候选 mysqldump 路径（按优先级）：平台安装目录 → MySQL Installer 常见安装位
+/// → PATH（平台无关的纯字符串生成，供测试与查找共用）。
+fn mysqldump_candidates(install_dir: &str) -> Vec<String> {
+    let mut out = vec![format!("{install_dir}\\bin\\mysqldump.exe")];
+    for v in ["8.4", "8.0", "5.7"] {
+        out.push(format!(r"C:\Program Files\MySQL\MySQL Server {v}\bin\mysqldump.exe"));
+    }
+    out.push("mysqldump.exe".into());
+    out
+}
+
+/// 删除前的数据保险：mysqldump 全库导出（表结构 + 数据 + 例程 + 触发器）为单个
+/// SQL 文件，落 backup_dir。服务未运行时先经 UAC 启动。任何一步失败都返回 Err
+/// （调用方据此中止删除——宁可卸载不成，不可数据白丢）。
+#[cfg(target_os = "windows")]
+fn backup_mysql_before_delete(install_dir: &str, backup_dir: &str) -> Result<String, String> {
+    // 1. 定位 mysqldump
+    let dump_exe = mysqldump_candidates(install_dir)
+        .into_iter()
+        .find(|p| {
+            if p.contains('\\') {
+                std::path::Path::new(p).is_file()
+            } else {
+                // PATH 兜底：能用 --version 跑通即视为可用
+                std::process::Command::new(p)
+                    .arg("--version")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+            }
+        })
+        .ok_or_else(|| {
+            "未找到 mysqldump.exe（安装目录与常见 MySQL Server 路径均无）。请手动备份数据目录后再执行删除"
+                .to_string()
+        })?;
+
+    // 2. 确保服务在运行（mysqldump 需要连接实例；未运行则 UAC 启动后等就绪）
+    if !crate::ops::health::check_tcp("127.0.0.1", 3306, 800) {
+        let (svc, _) = service_spec("mysql").unwrap();
+        if !service_exists(&svc) {
+            return Err(format!("MySQL 服务 {svc} 不存在且端口未监听，无实例可备份"));
+        }
+        runas_wait("cmd.exe", &format!("/c net start {svc}"))
+            .map_err(|e| format!("服务未运行且启动失败（UAC 取消？）：{e}"))?;
+        let mut up = false;
+        for _ in 0..15 {
+            if crate::ops::health::check_tcp("127.0.0.1", 3306, 800) {
+                up = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+        if !up {
+            return Err("服务已尝试启动但 3306 未监听，无法连接备份".to_string());
+        }
+    }
+
+    // 3. 全库导出：--single-transaction 保证一致性快照不锁库；--result-file 直写
+    //    文件避免 shell 重定向的编码问题（UTF-8 原样落盘）
+    std::fs::create_dir_all(backup_dir).map_err(|e| format!("创建备份目录 {backup_dir} 失败：{e}"))?;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let out_file = std::path::Path::new(backup_dir).join(format!("mysql-{}.sql", timestamp_utc(secs)));
+    let out = std::process::Command::new(&dump_exe)
+        .args([
+            "-uroot",
+            "--all-databases",
+            "--single-transaction",
+            "--routines",
+            "--triggers",
+            "--events",
+            format!("--result-file={}", out_file.display()).as_str(),
+        ])
+        .output()
+        .map_err(|e| format!("无法运行 mysqldump：{e}"))?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr).trim();
+        let _ = std::fs::remove_file(&out_file);
+        return Err(format!(
+            "mysqldump 导出失败：{err}（MSI 版若设过 root 密码，请手动备份后重试）"
+        ));
+    }
+    let size = std::fs::metadata(&out_file).map(|m| m.len()).unwrap_or(0);
+    if size == 0 {
+        let _ = std::fs::remove_file(&out_file);
+        return Err("备份文件为空，视为备份失败".to_string());
+    }
+    Ok(out_file.to_string_lossy().to_string())
+}
+
 /// 收尾：更新任务终态 + 清空环境检查缓存（下一次 /api/env 全量实测）。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 async fn finish(state: Arc<RepairState>, env_cache: EnvCache, ok: bool, error: String) {
@@ -1314,5 +1460,21 @@ mod tests {
         assert!(!mysql_data_initialized(partial.to_str().unwrap()));
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = std::fs::remove_dir_all(&partial);
+    }
+
+    /// 备份链路：mysqldump 候选顺序（平台目录 → MSI 常见位 → PATH）与
+    /// 时间戳格式（备份文件名可读、按时间排序）。
+    #[test]
+    fn mysql_backup_helpers() {
+        let cands = mysqldump_candidates(r"C:\services\mysql");
+        assert_eq!(cands[0], r"C:\services\mysql\bin\mysqldump.exe");
+        assert!(cands.iter().any(|p| p.contains("MySQL Server 8.0")));
+        assert_eq!(cands.last().unwrap(), "mysqldump.exe", "PATH 兜底必须最后");
+
+        assert_eq!(timestamp_utc(0), "19700101-000000");
+        assert_eq!(timestamp_utc(1_700_000_000), "20231114-221320");
+        // 轮转边界：一天末尾 +1 秒滚到次日
+        assert_eq!(timestamp_utc(86399), "19700101-235959");
+        assert_eq!(timestamp_utc(86400), "19700102-000000");
     }
 }

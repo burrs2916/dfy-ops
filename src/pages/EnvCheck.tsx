@@ -362,6 +362,10 @@ function RepairCenter({
   // 卸载确认弹窗：target 待卸载组件；removeData 默认不勾（数据库数据不可恢复）
   const [uninstallTarget, setUninstallTarget] = useState<UninstallTargetStatus | null>(null);
   const [removeData, setRemoveData] = useState(false);
+  // MySQL 删数据强确认：勾选后必须手动输入 DELETE 才能点确认（防误删，业界惯例）
+  const [confirmText, setConfirmText] = useState("");
+  const mysqlDeleteConfirmOk =
+    !(uninstallTarget?.target === "mysql" && removeData) || confirmText.trim() === "DELETE";
   const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" }>({
     open: false,
     msg: "",
@@ -586,6 +590,7 @@ function RepairCenter({
                         disabled={!t.canUninstall || repairDisabled}
                         onClick={() => {
                           setRemoveData(false);
+                          setConfirmText("");
                           setUninstallTarget(t);
                         }}
                         sx={{ textTransform: "none", px: 1 }}
@@ -828,7 +833,10 @@ function RepairCenter({
                 control={
                   <Checkbox
                     checked={removeData}
-                    onChange={(e) => setRemoveData(e.target.checked)}
+                    onChange={(e) => {
+                      setRemoveData(e.target.checked);
+                      if (!e.target.checked) setConfirmText("");
+                    }}
                     sx={{ pt: 0.25 }}
                   />
                 }
@@ -839,6 +847,29 @@ function RepairCenter({
                   </Typography>
                 }
               />
+              {uninstallTarget?.target === "mysql" && removeData && (
+                <>
+                  <Alert severity="info" sx={{ mt: 1 }}>
+                    删除前将自动把<b>全部数据库（表结构 + 数据 + 例程）</b>备份为单个 SQL 文件，
+                    保存到平台工作目录 <b>backups\</b> 下；<b>备份失败会中止删除</b>，数据分毫不动。
+                  </Alert>
+                  <TextField
+                    size="small"
+                    fullWidth
+                    sx={{ mt: 1.5 }}
+                    label='输入 DELETE 以确认删除数据'
+                    placeholder="DELETE"
+                    value={confirmText}
+                    onChange={(e) => setConfirmText(e.target.value)}
+                    error={confirmText.trim().length > 0 && confirmText.trim() !== "DELETE"}
+                    helperText={
+                      confirmText.trim().length > 0 && confirmText.trim() !== "DELETE"
+                        ? "输入不匹配：请输入大写 DELETE"
+                        : "这一步确认后，删除才真正开始执行"
+                    }
+                  />
+                </>
+              )}
             </>
           )}
         </DialogContent>
@@ -846,7 +877,7 @@ function RepairCenter({
           <Button size="small" onClick={() => setUninstallTarget(null)}>
             取消
           </Button>
-          <Button size="small" variant="contained" color="error" onClick={doUninstall}>
+          <Button size="small" variant="contained" color="error" onClick={doUninstall} disabled={!mysqlDeleteConfirmOk}>
             确认卸载
           </Button>
         </DialogActions>
