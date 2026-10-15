@@ -109,7 +109,8 @@ const DEFAULT_APP_SETTINGS: AppSettings = {
   statusRefreshSecs: 0,
   envRefreshSecs: 0,
   resourceDir: "",
-  remoteDeployed: [],
+  // 默认远程部署：VerneMQ（部署架构约定，不本地装）
+  remoteDeployed: ["vernemq"],
 };
 
 /** 应用设置全局状态：App 挂载时加载一次，设置页保存后经 apply 热更新（轮询间隔立即生效）。 */

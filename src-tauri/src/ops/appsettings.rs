@@ -26,7 +26,8 @@ impl Default for AppSettings {
             status_refresh_secs: 0,
             env_refresh_secs: 0,
             resource_dir: String::new(),
-            remote_deployed: Vec::new(),
+            // 默认远程部署：VerneMQ（部署架构约定，不本地装）；Redis 由用户在界面声明
+            remote_deployed: vec!["vernemq".into()],
         }
     }
 }
