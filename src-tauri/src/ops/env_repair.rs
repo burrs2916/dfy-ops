@@ -715,7 +715,8 @@ fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
                 .output()
                 .map_err(|e| format!("无法执行 setx：{e}"))?;
             if !out.status.success() {
-                let err = String::from_utf8_lossy(&out.stderr).trim();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                let err = stderr.trim();
                 return Err(format!("写入用户级 JAVA_HOME 失败：{err}"));
             }
             Ok(format!("已写入用户级 JAVA_HOME={home}（免安装版：无 MSI 产品、无注册表残留；平台内调用直接使用绝对路径）"))
