@@ -804,11 +804,11 @@ function RepairCenter({
           {uninstallTarget?.target === "java" ? (
             <>
               <Typography variant="body2">
-                将枚举本机以 <b>MSI 方式安装</b>的全部 Java/JDK 条目（Temurin/OpenJDK 等），一次管理员确认后<b>静默逐条卸载</b>。
-                卸载完成后已开终端里的 JAVA_HOME/PATH 是旧值，重开终端或重新登录后生效。
+                将执行<b>完全清理</b>（一次管理员确认）：枚举本机以 <b>MSI 方式安装</b>的全部 Java/JDK 条目（Temurin/OpenJDK 等）静默卸载；
+                删除平台免安装目录 <b>C:\services\jdk</b>；清除用户级 <b>JAVA_HOME</b> 环境变量。卸载后系统零残留。
               </Typography>
               <Typography variant="body2" sx={{ mt: 1, color: "text.secondary" }}>
-                zip 解压版 Java 没有卸载条目，不走此管线——请直接删除其目录并清理 JAVA_HOME/PATH。
+                卸载完成后已开终端里的 JAVA_HOME/PATH 是旧值，重开终端或重新登录后生效。
               </Typography>
             </>
           ) : (

@@ -58,10 +58,11 @@ pub struct GenericRepairInput {
 }
 
 /// POST /api/env/repair/generic —— 通用修复决策链：
-/// 1. 资源目录有该目标的 ZIP 免安装版（mysql/redis）→ 解压 → 配置 → 注册服务（可靠离线管线，
-///    MySQL 官方 msi 是 Installer 束，静默执行装不上 Server，故 zip 优先）；
+/// 1. 资源目录有该目标的 ZIP 免安装版（mysql/redis/java）→ 解压 → 配置 →（注册服务）；
+///    java 免安装版 = 写用户级 JAVA_HOME + 平台绝对路径指向，无 MSI/注册表/UAC；
+///    MySQL 官方 msi 是 Installer 束，静默执行装不上 Server，故 zip 优先；
 /// 2. 有 MSI（java/vernemq/memurai 等）→ msiexec 静默安装；
-/// 3. 无包且 target=java → 在线下载 Adoptium Temurin（现有链路）；
+/// 3. 无包且 target=java → 在线下载 Adoptium 免安装版 zip（同 1 的解压管线）；
 /// 4. 无包且其他目标 → 提示配置资源目录或使用 AI 方案。
 /// 任务状态复用 /api/env/repair/status（与 java 修复同一全局单例，前端轮询逻辑不变）。
 pub async fn start_generic_repair(
@@ -83,30 +84,27 @@ pub async fn start_generic_repair(
         blocking(move || (resource::find_zip(&dir, target), resource::find_msi(&dir, target))).await
     };
 
-    let started = if (target == "mysql" || target == "redis") && zip.is_some() {
-        // 免安装版管线：解压到服务注册表声明的 installDir（如 C:/services/mysql）
-        let z = zip.clone().unwrap();
-        let install_dir = state
-            .registry
-            .iter()
-            .find(|d| d.id == target)
-            .map(|d| d.install_dir.clone())
-            .unwrap_or_else(|| format!("C:\\services\\{target}"));
+    // mysql/redis/java 支持免安装版管线；java 的安装目录固定平台托管位置
+    let zip_capable = matches!(target, "mysql" | "redis" | "java");
+    let started = if zip_capable && zip.is_some() {
+        let install_dir = if target == "java" {
+            crate::ops::env_repair::JDK_MANAGED_HOME.to_string()
+        } else {
+            state
+                .registry
+                .iter()
+                .find(|d| d.id == target)
+                .map(|d| d.install_dir.clone())
+                .unwrap_or_else(|| format!("C:\\services\\{target}"))
+        };
         crate::ops::env_repair::start_zip_install(
             target,
-            z.path,
+            zip.clone().unwrap().path,
             install_dir,
             state.env_cache.clone(),
             state.repair.clone(),
         )
-    } else if let Some(f) = msi.clone().or_else(|| {
-        // 非 mysql/redis 目标没有 msi 管线时不吃 zip（java zip 不是安装器）
-        if target != "mysql" && target != "redis" {
-            zip.clone()
-        } else {
-            None
-        }
-    }) {
+    } else if let Some(f) = msi.clone() {
         crate::ops::env_repair::start_resource_install(
             target,
             f.path,
@@ -114,28 +112,34 @@ pub async fn start_generic_repair(
             state.repair.clone(),
         )
     } else if target == "java" && zip.is_none() && msi.is_none() {
-        // 无本地包的 java 在线兜底（expected 按注册表最低声明 8；
-        // find_compatible 验证只升不降，装更高版本同样通过）
-        crate::ops::env_repair::start_jdk_install(8, state.env_cache.clone(), state.repair.clone())
+        // 无本地包的 java 在线兜底（免安装版 zip；expected 按注册表最低声明 8）
+        crate::ops::env_repair::start_jdk_install(
+            crate::ops::env_repair::JDK_DEFAULT_MAJOR,
+            state.env_cache.clone(),
+            state.repair.clone(),
+        )
     } else {
         Err(format!(
-            "本地资源目录中没有 {label} 的可安装包。请将 MSI 安装包（或 MySQL/Redis 的 ZIP 免安装版）放入「设置 → 本地资源目录」后重试，或使用 AI 方案"
+            "本地资源目录中没有 {label} 的可安装包。请将 MSI 安装包（或 MySQL/Redis/Java 的 ZIP 免安装版）放入「设置 → 本地资源目录」后重试，或使用 AI 方案"
         ))
     };
 
-    let source = if target == "mysql" || target == "redis" {
-        zip.as_ref().map(|_| "zip")
+    let source = if zip.is_some() && zip_capable {
+        Some("zip")
+    } else if msi.is_some() {
+        Some("msi")
     } else {
-        msi.as_ref().map(|_| "msi")
+        None
     };
     match started {
         Ok(()) => Json(serde_json::json!({
             "ok": true,
             "action": "install",
             "message": match source {
+                Some("zip") if target == "java" => format!("开始离线安装 {label}（免安装版：解压 → 写 JAVA_HOME → 版本验证，无需管理员权限），进度见下方任务状态"),
                 Some("zip") => format!("开始离线安装 {label}（免安装版：解压 → 初始化 → 注册服务），全程只需一次管理员确认，进度见下方任务状态"),
                 Some("msi") => format!("开始离线安装 {label}（{}）→ 管理员确认 → 验证，进度见下方任务状态", msi.as_ref().map(|f| f.file_name.as_str()).unwrap_or_default()),
-                _ => format!("资源目录无 {label} 安装包，开始在线安装（下载 → 管理员确认 → 验证）"),
+                _ => format!("资源目录无 {label} 安装包，开始在线安装免安装版（下载 → 解压 → 验证）"),
             }
         })),
         Err(e) => Json(serde_json::json!({"ok": false, "error": e})),
@@ -157,23 +161,33 @@ fn registry_install_dir(state: &AppState, target: &str) -> String {
         .unwrap_or_else(|| format!("C:\\services\\{target}"))
 }
 
-/// 探测一个目标的安装痕迹（服务存在 + 目录存在；java = 有无 MSI 卸载条目）。
+/// 探测一个目标的安装痕迹（服务存在 + 目录存在；java = MSI 条目或平台免安装
+/// 目录；mysql 的服务检测叠加 MSI 产品条目——外部 MySQL Installer 装的也算已装）。
 async fn probe_target(state: &AppState, target: &str) -> (bool, bool) {
     if target == "java" {
-        let installed = blocking(|| !crate::ops::env_repair::java_msi_entries().is_empty()).await;
+        let installed = blocking(|| {
+            !crate::ops::env_repair::java_msi_entries().is_empty()
+                || std::path::Path::new(crate::ops::env_repair::JDK_MANAGED_HOME)
+                    .join("bin")
+                    .is_dir()
+        })
+        .await;
         return (installed, false);
     }
     let Some((svc, _)) = crate::ops::env_repair::service_spec(target) else {
         return (false, false);
     };
     let install_dir = registry_install_dir(state, target);
-    blocking(move || {
+    let msi = target == "mysql";
+    let (svc_exists, dir_exists, msi_installed) = blocking(move || {
         (
             crate::ops::env_repair::service_exists(svc),
             std::path::Path::new(&install_dir).is_dir(),
+            msi && !crate::ops::env_repair::mysql_msi_entries().is_empty(),
         )
     })
-    .await
+    .await;
+    (svc_exists || msi_installed, dir_exists)
 }
 
 /// GET /api/env/repair/uninstall/status —— 可卸载组件的安装痕迹探测，

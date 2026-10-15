@@ -77,6 +77,10 @@ pub fn installed_jdks() -> Vec<JavaInstall> {
     use winreg::RegKey;
 
     let mut homes: BTreeSet<String> = BTreeSet::new();
+    // 平台免安装目录优先：我们的 zip 管线装的 JDK（无注册表产品，检测必须走目录）
+    if std::path::Path::new(JDK_MANAGED_HOME).join("bin").exists() {
+        homes.insert(JDK_MANAGED_HOME.to_string());
+    }
     // 注册表约定键：Oracle/Adoptium/Microsoft 安装器都会写 JavaHome（或 Path）指向 home 目录
     for sub in [
         r"SOFTWARE\JavaSoft\Java Runtime Environment",
@@ -196,9 +200,31 @@ impl RepairState {
 /// 环境检查全量缓存类型（修复完成后清空，让下一次 /api/env 重新实测而非用 60s 旧缓存）。
 pub type EnvCache = Arc<Mutex<Option<(std::time::Instant, Vec<crate::ops::environment::ServiceEnvReport>)>>>;
 
+/// 平台管理的 JDK 免安装目录（zip 解压即用，无 MSI 产品、无注册表残留；
+/// 与 mysql/redis 的 C:\services 同风格）。检测优先级最高：有 bin\java.exe 即达标。
+pub const JDK_MANAGED_HOME: &str = "C:\\services\\jdk";
+
+/// 免安装版 JDK 的默认最低大版本（一键修复对 java 的预期，与注册表最低声明一致）。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-const ADOPTIUM_INSTALLER_URL: &str =
-    "https://api.adoptium.net/v3/installer/latest/{major}/ga/windows/x64/jre/hotspot/normal/eclipse";
+pub const JDK_DEFAULT_MAJOR: u32 = 8;
+
+/// java 免安装版验证：主目录可探出版本且达到最低大版本要求。
+#[cfg(target_os = "windows")]
+fn verify_java_home(home: &str, min_major: u32) -> Result<(u32, u32, u32), String> {
+    let (maj, min, pat) = probe_home_version(home).ok_or_else(|| {
+        format!("解压完成但 {home}\\bin\\java.exe 无法运行或无法识别版本，请确认安装包完整")
+    })?;
+    if maj < min_major {
+        return Err(format!("JDK 版本 {maj}.{min}.{pat} 低于要求的 {min_major}+，请更换安装包"));
+    }
+    Ok((maj, min, pat))
+}
+
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+/// Adoptium 官方二进制 zip（免安装版）——解压即用，不写 MSI 产品/注册表；
+/// 平台以「写用户级 JAVA_HOME + 平台内绝对路径调用」接管指向，卸载零残留。
+const ADOPTIUM_ZIP_URL: &str =
+    "https://api.adoptium.net/v3/binary/latest/{major}/ga/windows/x64/jre/hotspot/normal/eclipse";
 
 /// 启动 JDK 自动安装（仅 Windows 目标机）。
 /// 返回 Err 表示无法启动（已有任务在跑 / 平台不支持）。
@@ -285,17 +311,18 @@ pub fn start_jdk_install(
     Err("自动安装仅支持 Windows 目标机；当前平台请手动安装 Java 运行时".into())
 }
 
-/// Windows 安装流水线：下载 MSI → UAC 提权静默安装 → 复探验证。
+/// Windows 安装流水线（在线兜底）：下载 Adoptium 免安装版 zip → 解压到平台目录
+/// → 写用户级 JAVA_HOME → 版本验证。全程无 UAC、无 MSI、无注册表产品残留。
 #[cfg(target_os = "windows")]
 async fn run_install(state: Arc<RepairState>, expected_major: u32, env_cache: EnvCache) {
     state.log(format!(
-        "开始修复：目标 JDK {expected_major}+（Eclipse Temurin JRE，Adoptium 官方源）"
+        "开始修复：目标 JDK {expected_major}+（Eclipse Temurin 免安装版，Adoptium 官方源）"
     ));
 
-    // ===== 1. 下载 MSI =====
+    // ===== 1. 下载 zip =====
     state.patch(|j| j.stage = "download".into());
-    let url = ADOPTIUM_INSTALLER_URL.replace("{major}", &expected_major.to_string());
-    let msi = std::env::temp_dir().join(format!("dfy-ops-temurin{expected_major}-jre.msi"));
+    let url = ADOPTIUM_ZIP_URL.replace("{major}", &expected_major.to_string());
+    let zip = std::env::temp_dir().join(format!("dfy-ops-temurin{expected_major}-jre.zip"));
     let dl = async {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(900))
@@ -312,86 +339,68 @@ async fn run_install(state: Arc<RepairState>, expected_major: u32, env_cache: En
             .bytes()
             .await
             .map_err(|e| format!("下载中断：{e}"))?;
-        std::fs::write(&msi, &bytes).map_err(|e| format!("写入临时文件失败：{e}"))?;
+        std::fs::write(&zip, &bytes).map_err(|e| format!("写入临时文件失败：{e}"))?;
         Ok(bytes.len() as u64)
     };
     match dl.await {
-        Ok(size) => state.log(format!("安装包下载完成：{}（{} MB）", msi.display(), size / 1024 / 1024)),
+        Ok(size) => state.log(format!("安装包下载完成：{}（{} MB）", zip.display(), size / 1024 / 1024)),
         Err(e) => {
             finish(state, env_cache, false, e).await;
             return;
         }
     }
 
-    // ===== 2. UAC 提权静默安装（用户在 UAC 弹窗确认 = 授权动作） =====
-    state.patch(|j| {
-        j.stage = "install".into();
-        j.logs.push(
-            "正在启动 MSI 静默安装（FeatureJavaHome + FeatureEnvironment 会自动配置 JAVA_HOME 与 PATH）…".into(),
-        );
-        j.logs.push("请在弹出的 UAC 管理员确认框中点击「是」…".into());
-    });
-    let state_cl = state.clone();
-    let install = tokio::task::spawn_blocking(move || {
-        let ps = format!(
-            "Start-Process msiexec -ArgumentList '/i \"{}\" /quiet ADDLOCAL=FeatureMain,FeatureEnvironment,FeatureJarFileRunWith,FeatureJavaHome' -Verb RunAs -Wait",
-            msi.display()
-        );
-        std::process::Command::new("powershell")
-            .args(["-NoProfile", "-Command", &ps])
-            .output()
+    // ===== 2. 解压 + 配置（免安装管线，与资源目录 zip 同链路） =====
+    state.patch(|j| j.stage = "extract".into());
+    state.log(format!("正在解压到 {JDK_MANAGED_HOME}…"));
+    let located = tokio::task::spawn_blocking(move || {
+        extract_zip(zip.to_str().unwrap_or_default(), JDK_MANAGED_HOME)
+            .and_then(|()| locate_home(std::path::Path::new(JDK_MANAGED_HOME), r"bin\java.exe"))
     })
     .await;
-    match install {
-        Ok(Ok(out)) if out.status.success() => {
-            // 注意：此处形参是 impl Into<String>，Windows rustc 对字面量 .into() 会报
-            // E0283 推断歧义（CI 实测），直接传 &str 即可，不要加 .into()。
-            state.log("MSI 安装完成");
-        }
-        Ok(Ok(out)) => {
-            let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            finish(
-                state,
-                env_cache,
-                false,
-                format!("安装执行失败（可能用户在 UAC 中点了取消）：{stderr}"),
-            )
-            .await;
-            return;
+    let home = match located {
+        Ok(Ok(h)) => {
+            state.log(format!("解压完成，JDK 主目录：{h}"));
+            h
         }
         Ok(Err(e)) => {
-            finish(state, env_cache, false, format!("无法启动安装器：{e}")).await;
+            finish(state, env_cache, false, e).await;
             return;
         }
         Err(e) => {
-            finish(state, env_cache, false, format!("安装任务异常：{e}")).await;
+            finish(state, env_cache, false, format!("解压任务异常：{e}")).await;
+            return;
+        }
+    };
+
+    state.patch(|j| j.stage = "configure".into());
+    let cfg = tokio::task::spawn_blocking(move || configure_zip_target("java", &home)).await;
+    match cfg {
+        Ok(Ok(msg)) => state.log(msg),
+        Ok(Err(e)) => {
+            finish(state, env_cache, false, e).await;
+            return;
+        }
+        Err(e) => {
+            finish(state, env_cache, false, format!("配置任务异常：{e}")).await;
             return;
         }
     }
 
-    // ===== 3. 复探验证（新装 PATH 对本进程不可见，必须走注册表/目录扫描 + 绝对路径探测） =====
+    // ===== 3. 版本验证（绝对路径直接探测） =====
     state.patch(|j| j.stage = "verify".into());
-    let found = tokio::task::spawn_blocking(move || find_compatible(expected_major))
-        .await
-        .ok()
-        .flatten();
-    match found {
-        Some(j) => {
-            state.log(format!(
-                "验证通过：检测到 JDK {}（{}）已安装并配置环境变量",
-                j.version_label(),
-                j.home
-            ));
+    let v = tokio::task::spawn_blocking(move || verify_java_home(&home, expected_major)).await;
+    match v {
+        Ok(Ok((maj, min, pat))) => {
+            state.log(format!("验证通过：JDK {maj}.{min}.{pat} 可用，JAVA_HOME 已指向平台免安装目录"));
+            state.log("提示：已开终端里的 JAVA_HOME 是旧值，重开终端后生效");
             finish(state, env_cache, true, String::new()).await;
         }
-        None => {
-            finish(
-                state,
-                env_cache,
-                false,
-                "安装流程已执行但未检测到达标 JDK，请查看安装日志或手动安装".into(),
-            )
-            .await;
+        Ok(Err(e)) => {
+            finish(state, env_cache, false, e).await;
+        }
+        Err(e) => {
+            finish(state, env_cache, false, format!("验证任务异常：{e}")).await;
         }
     }
 }
@@ -530,10 +539,12 @@ fn build_redis_conf() -> String {
     "port 6379\nbind 0.0.0.0\n".to_string()
 }
 
-/// 通用修复任务：ZIP 免安装版离线安装（mysql/redis 的可靠离线路径——
-/// MySQL 官方 msi 多为 Installer 束，静默执行装不上 Server，zip 才能完全离线装好）。
-/// 流水线：解压定位 → 写配置+初始化数据 → 注册并启动 Windows 服务（一次 UAC）→ 端口验证。
-/// install_dir 取服务注册表该服务的 installDir（如 C:/services/mysql）。
+/// 通用修复任务：ZIP 免安装版离线安装（mysql/redis/java）——
+/// mysql/redis = 解压 → 配置 → 注册服务（一次 UAC，
+/// MySQL 官方 msi 多为 Installer 束静默装不上 Server，zip 才能完全离线装好）；
+/// java = 解压 → 写用户级 JAVA_HOME → 版本验证（无服务、无 UAC）。
+/// 流水线：解压定位 → 配置 → （服务注册）→ 验证。
+/// install_dir 取服务注册表该服务的 installDir（如 C:/services/mysql），java 固定 JDK_MANAGED_HOME。
 #[cfg(target_os = "windows")]
 pub fn start_zip_install(
     target: &'static str,
@@ -542,7 +553,7 @@ pub fn start_zip_install(
     env_cache: EnvCache,
     state: Arc<RepairState>,
 ) -> Result<(), String> {
-    if service_spec(target).is_none() {
+    if service_spec(target).is_none() && target != "java" {
         return Err(format!(
             "{} 没有免安装版（zip）安装管线，请使用 MSI 安装包或 AI 方案",
             crate::ops::resource::target_label(target)
@@ -694,6 +705,20 @@ fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
                 Ok("使用安装包自带的 redis.windows.conf".into())
             }
         }
+        "java" => {
+            // 平台直接指向：写用户级 JAVA_HOME（setx 自动广播生效通知）。PATH 不动——
+            // 平台内 java 调用全走绝对路径（{java} 占位符 / installed_jdks 探测），
+            // 卸载时删除该变量即可完全清理，系统零残留
+            let out = std::process::Command::new("setx")
+                .args(["JAVA_HOME", home])
+                .output()
+                .map_err(|e| format!("无法执行 setx：{e}"))?;
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr).trim();
+                return Err(format!("写入用户级 JAVA_HOME 失败：{err}"));
+            }
+            Ok(format!("已写入用户级 JAVA_HOME={home}（免安装版：无 MSI 产品、无注册表残留；平台内调用直接使用绝对路径）"))
+        }
         _ => Err("该目标没有配置步骤".into()),
     }
 }
@@ -728,13 +753,22 @@ async fn run_zip_install(
     env_cache: EnvCache,
 ) {
     let label = crate::ops::resource::target_label(target);
-    let (svc, port) = service_spec(target).unwrap();
+    let spec = service_spec(target);
     state.log(format!("开始安装 {label}（免安装版）：{zip_path} → {install_dir}"));
 
     // ===== 解压 + 定位主目录 =====
     state.patch(|j| j.stage = "extract".into());
     state.log("正在解压安装包（大包需 1-2 分钟）…");
-    let marker = if target == "mysql" { r"bin\mysqld.exe" } else { "redis-server.exe" };
+    let marker = match target {
+        "mysql" => r"bin\mysqld.exe",
+        "redis" => "redis-server.exe",
+        // JDK/JRE zip 的标志二进制（zip 可能带顶层目录 jdk8uXXX-jre/）
+        "java" => r"bin\java.exe",
+        _ => {
+            finish(state, env_cache, false, format!("{label} 没有免安装版（zip）安装管线")).await;
+            return;
+        }
+    };
     let located = {
         let zp = zip_path.clone();
         let dd = install_dir.clone();
@@ -777,34 +811,53 @@ async fn run_zip_install(
         }
     }
 
-    // ===== 注册 + 启动服务（一次 UAC） =====
-    state.patch(|j| j.stage = "install".into());
-    state.log(format!("正在注册并启动 Windows 服务 {svc}… 请在 UAC 弹窗中点击「是」…"));
-    let reg = {
-        let home = home.clone();
-        let t = target;
-        tokio::task::spawn_blocking(move || register_and_start(t, &home)).await
-    };
-    match reg {
-        Ok(Ok(())) => state.log(format!("服务 {svc} 已注册并启动")),
-        Ok(Err(e)) => {
-            finish(
-                state,
-                env_cache,
-                false,
-                format!("服务注册/启动失败：{e}（可到 Windows 服务管理器查看 {svc} 状态）"),
-            )
-            .await;
-            return;
-        }
-        Err(e) => {
-            finish(state, env_cache, false, format!("服务注册任务异常：{e}")).await;
-            return;
+    // ===== 注册 + 启动服务（一次 UAC）——java 免安装版无服务概念，跳过 =====
+    if let Some((svc, _)) = spec {
+        state.patch(|j| j.stage = "install".into());
+        state.log(format!("正在注册并启动 Windows 服务 {svc}… 请在 UAC 弹窗中点击「是」…"));
+        let reg = {
+            let home = home.clone();
+            let t = target;
+            tokio::task::spawn_blocking(move || register_and_start(t, &home)).await
+        };
+        match reg {
+            Ok(Ok(())) => state.log(format!("服务 {svc} 已注册并启动")),
+            Ok(Err(e)) => {
+                finish(
+                    state,
+                    env_cache,
+                    false,
+                    format!("服务注册/启动失败：{e}（可到 Windows 服务管理器查看 {svc} 状态）"),
+                )
+                .await;
+                return;
+            }
+            Err(e) => {
+                finish(state, env_cache, false, format!("服务注册任务异常：{e}")).await;
+                return;
+            }
         }
     }
 
-    // ===== 端口验证 =====
+    // ===== 验证：mysql/redis 轮询端口监听；java 直接验证主目录版本 =====
     state.patch(|j| j.stage = "verify".into());
+    let Some((svc, port)) = spec else {
+        let v = tokio::task::spawn_blocking(move || verify_java_home(&home, JDK_DEFAULT_MAJOR)).await;
+        match v {
+            Ok(Ok((maj, min, pat))) => {
+                state.log(format!("验证通过：JDK {maj}.{min}.{pat} 可用，JAVA_HOME 已指向 {home}"));
+                state.log("提示：已开终端里的 JAVA_HOME 是旧值，重开终端后生效");
+                finish(state, env_cache, true, String::new()).await;
+            }
+            Ok(Err(e)) => {
+                finish(state, env_cache, false, e).await;
+            }
+            Err(e) => {
+                finish(state, env_cache, false, format!("验证任务异常：{e}")).await;
+            }
+        }
+        return;
+    };
     state.log(format!("等待 {label} 在端口 {port} 监听…（首次启动较慢）"));
     let mut ok = false;
     for _ in 0..45 {
@@ -858,6 +911,11 @@ fn java_product_name(display: &str) -> bool {
         || (d.contains("java") && (d.contains("se ") || d.contains("update") || d.contains("development")))
 }
 
+/// DisplayName 是否为 MySQL MSI 产品（MySQL Installer 装的 Server/Connector 等）。
+fn mysql_product_name(display: &str) -> bool {
+    display.to_lowercase().contains("mysql")
+}
+
 /// 从 MSI 形态的 UninstallString 提取产品码 {GUID}；非 msiexec 条目返回 None。
 fn extract_msi_guid(uninstall_string: &str) -> Option<String> {
     let s = uninstall_string.trim();
@@ -869,11 +927,10 @@ fn extract_msi_guid(uninstall_string: &str) -> Option<String> {
     (end > start).then(|| s[start..=end].to_string())
 }
 
-/// 注册表卸载条目里的 Java MSI 产品（DisplayName + 产品码）。
-/// 覆盖 Temurin/Adoptium/Oracle/Microsoft OpenJDK 等 MSI 安装的 JRE/JDK；
-/// zip 解压版没有卸载条目，自然不在列表（那类卸载 = 直接删目录）。
+/// 按名称过滤枚举注册表卸载条目里的 MSI 产品（DisplayName + 产品码 {GUID}）。
+/// java/mysql 的「完全清理」共用：对机器上已有的外部 MSI 安装也能静默卸载干净。
 #[cfg(target_os = "windows")]
-pub fn java_msi_entries() -> Vec<(String, String)> {
+fn msi_uninstall_entries(pred: fn(&str) -> bool) -> Vec<(String, String)> {
     use winreg::enums::HKEY_LOCAL_MACHINE;
     use winreg::RegKey;
     let mut out: Vec<(String, String)> = Vec::new();
@@ -887,7 +944,7 @@ pub fn java_msi_entries() -> Vec<(String, String)> {
         for name in root.enum_keys().flatten() {
             let Ok(k) = root.open_subkey(&name) else { continue };
             let dn = k.get_value::<String, _>("DisplayName").unwrap_or_default();
-            if dn.is_empty() || !java_product_name(&dn) {
+            if dn.is_empty() || !pred(&dn) {
                 continue;
             }
             let us = k.get_value::<String, _>("UninstallString").unwrap_or_default();
@@ -901,9 +958,28 @@ pub fn java_msi_entries() -> Vec<(String, String)> {
     out
 }
 
+/// 注册表卸载条目里的 Java MSI 产品（Temurin/Adoptium/Oracle/Microsoft OpenJDK 等）；
+/// zip 免安装版没有卸载条目，自然不在列表（那类卸载 = 删平台目录 + 清 JAVA_HOME）。
+#[cfg(target_os = "windows")]
+pub fn java_msi_entries() -> Vec<(String, String)> {
+    msi_uninstall_entries(java_product_name)
+}
+
+/// 注册表卸载条目里的 MySQL MSI 产品（完全清理用：平台卸载时一并静默卸载）。
+#[cfg(target_os = "windows")]
+pub fn mysql_msi_entries() -> Vec<(String, String)> {
+    msi_uninstall_entries(mysql_product_name)
+}
+
 /// 非 Windows：无 MSI 注册表，恒为空（卸载入口在 start_uninstall 已按平台挡住）。
 #[cfg(not(target_os = "windows"))]
 pub fn java_msi_entries() -> Vec<(String, String)> {
+    Vec::new()
+}
+
+/// 非 Windows：恒为空。
+#[cfg(not(target_os = "windows"))]
+pub fn mysql_msi_entries() -> Vec<(String, String)> {
     Vec::new()
 }
 
@@ -975,18 +1051,32 @@ async fn run_uninstall(
     let (svc, _port) = service_spec(target).unwrap();
     state.log(format!("开始卸载 {label}（服务 {svc}，目录 {install_dir}）"));
 
-    // 前置探测：无服务且无目录 = 没装过，不用折腾 UAC
+    // MySQL「完全清理」：机器上可能有外部 MSI 安装（MySQL Installer 装的 Server），
+    // 一并枚举后静默卸载，不留注册表产品残留
+    let msi_entries = if target == "mysql" {
+        tokio::task::spawn_blocking(mysql_msi_entries).await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    if !msi_entries.is_empty() {
+        state.log(format!(
+            "检测到 {} 个 MySQL MSI 产品条目，将一并静默卸载…",
+            msi_entries.len()
+        ));
+    }
+
+    // 前置探测：无服务、无目录、无 MSI 条目 = 没装过，不用折腾 UAC
     let svc_installed = {
         let s = svc;
         tokio::task::spawn_blocking(move || service_exists(s)).await.unwrap_or(false)
     };
     let dir_exists = std::path::Path::new(&install_dir).is_dir();
-    if !svc_installed && !dir_exists {
+    if !svc_installed && !dir_exists && msi_entries.is_empty() {
         finish(
             state,
             env_cache,
             false,
-            format!("未检测到 {label} 的安装痕迹（无 Windows 服务 {svc}，目录 {install_dir} 也不存在）"),
+            format!("未检测到 {label} 的安装痕迹（无 Windows 服务 {svc}，目录 {install_dir} 也不存在，无 MSI 产品条目）"),
         )
         .await;
         return;
@@ -996,13 +1086,20 @@ async fn run_uninstall(
     }
 
     state.patch(|j| j.stage = "uninstall".into());
-    // 一次 UAC：停服务 + 注销服务 (+ 删目录)。服务不存在时前两条报错无碍，
-    // 退出码也不作数——成败以执行后的重探为准
-    let script = if remove_data {
-        format!("net stop {svc} & sc delete {svc} & rmdir /s /q \"{install_dir}\"")
-    } else {
-        format!("net stop {svc} & sc delete {svc}")
-    };
+    // 一次 UAC：MSI 卸载 + 停服务 + 注销服务 (+ 删目录)。各段在对应对象不存在时
+    // 报错无碍，退出码也不作数——成败以执行后的重探为准
+    let mut parts: Vec<String> = msi_entries
+        .iter()
+        .map(|(_, g)| format!("msiexec /x {g} /quiet /norestart"))
+        .collect();
+    parts.push(format!("net stop {svc}"));
+    parts.push(format!("sc delete {svc}"));
+    if remove_data {
+        parts.push(format!("rmdir /s /q \"{install_dir}\""));
+        // MSI 版的数据/配置目录（MySQL Installer 默认落在 ProgramData）
+        parts.push(r#"rmdir /s /q "C:\ProgramData\MySQL""#.to_string());
+    }
+    let script = parts.join(" & ");
     let run = tokio::task::spawn_blocking(move || runas_wait("cmd.exe", &format!("/c {script}"))).await;
     match run {
         Ok(Ok(())) => {}
@@ -1020,7 +1117,12 @@ async fn run_uninstall(
         tokio::task::spawn_blocking(move || service_exists(s)).await.unwrap_or(true)
     };
     let dir_gone = !std::path::Path::new(&install_dir).exists();
-    if svc_gone && (!remove_data || dir_gone) {
+    let msi_gone = if target == "mysql" {
+        tokio::task::spawn_blocking(|| mysql_msi_entries().is_empty()).await.unwrap_or(true)
+    } else {
+        true
+    };
+    if svc_gone && msi_gone && (!remove_data || dir_gone) {
         state.log("卸载完成");
         if !remove_data {
             state.log(format!("已保留程序与数据目录 {install_dir}（重装可复用数据）"));
@@ -1033,8 +1135,9 @@ async fn run_uninstall(
             env_cache,
             false,
             format!(
-                "卸载未完成：服务 {svc} {}，目录 {}（可能 UAC 被取消）——请重试或到 Windows 服务管理器手动处理",
+                "卸载未完成：服务 {svc} {}，MSI 条目 {}，目录 {}（可能 UAC 被取消）——请重试或到 Windows 服务管理器手动处理",
                 if svc_gone { "已注销" } else { "仍存在" },
+                if msi_gone { "已清除" } else { "仍有残留" },
                 if dir_gone { "已删除" } else { "仍保留" }
             ),
         )
@@ -1042,40 +1145,44 @@ async fn run_uninstall(
     }
 }
 
-/// Java 卸载：枚举注册表 MSI 条目 → 一次 UAC 内 msiexec /x 静默逐条卸载 →
-/// 复核条目清空。zip 解压版 Java 无卸载条目，走不了这条管线（提示直接删目录）。
+/// Java 卸载（完全清理）：MSI 条目静默卸载 + 平台免安装目录删除 + 用户级
+/// JAVA_HOME 清除，一次 UAC 内完成，复核三项全清。
 #[cfg(target_os = "windows")]
 async fn run_java_uninstall(state: Arc<RepairState>, env_cache: EnvCache) {
     state.log("正在枚举本机 MSI 方式安装的 Java/JDK 条目…");
     let entries = tokio::task::spawn_blocking(java_msi_entries).await.unwrap_or_default();
-    if entries.is_empty() {
+    let managed = std::path::Path::new(JDK_MANAGED_HOME).join("bin").is_dir();
+    if entries.is_empty() && !managed {
         finish(
             state,
             env_cache,
             false,
-            "未检测到 MSI 方式安装的 Java/JDK（zip 解压版没有卸载条目，请直接删除其目录并清理 JAVA_HOME/PATH）".into(),
+            format!("未检测到 Java 安装痕迹（无 MSI 卸载条目，平台免安装目录 {JDK_MANAGED_HOME} 也不存在）"),
         )
         .await;
         return;
     }
     state.patch(|j| j.stage = "uninstall".into());
     for (dn, _) in &entries {
-        state.log(format!("待卸载：{dn}"));
+        state.log(format!("待卸载（MSI）：{dn}"));
     }
-    state.log(format!(
-        "共 {} 个条目，将以静默方式逐条卸载… 请在 UAC 弹窗中点击「是」…",
-        entries.len()
-    ));
-    // 一次 UAC 内串行卸载所有条目（cmd & 顺序执行；退出码不作数，以复核为准）
-    let script = entries
+    if managed {
+        state.log(format!("待删除（免安装）：平台 JDK 目录 {JDK_MANAGED_HOME}"));
+    }
+    state.log("将清除用户级 JAVA_HOME… 请在 UAC 弹窗中点击「是」…");
+    // 一次 UAC 内完成全部清理：MSI 静默逐条卸载 + 删平台目录 + 删用户级 JAVA_HOME
+    // （reg delete 在变量不存在时报错，无碍；成败以复核为准）
+    let mut parts: Vec<String> = entries
         .iter()
         .map(|(_, g)| format!("msiexec /x {g} /quiet /norestart"))
-        .collect::<Vec<_>>()
-        .join(" & ");
+        .collect();
+    parts.push(format!("rmdir /s /q \"{JDK_MANAGED_HOME}\""));
+    parts.push("reg delete HKCU\\Environment /v JAVA_HOME /f".to_string());
+    let script = parts.join(" & ");
     let run = tokio::task::spawn_blocking(move || runas_wait("cmd.exe", &format!("/c {script}"))).await;
     match run {
         Ok(Ok(())) => {}
-        Ok(Err(e)) => state.log(format!("卸载命令返回：{e}（将以实际状态复核）")),
+        Ok(Err(e)) => state.log(format!("清理命令返回：{e}（将以实际状态复核）")),
         Err(e) => {
             finish(state, env_cache, false, format!("卸载任务异常：{e}")).await;
             return;
@@ -1085,8 +1192,9 @@ async fn run_java_uninstall(state: Arc<RepairState>, env_cache: EnvCache) {
     // ===== 复核 =====
     state.patch(|j| j.stage = "verify".into());
     let after = tokio::task::spawn_blocking(java_msi_entries).await.unwrap_or_default();
-    if after.is_empty() {
-        state.log("卸载完成");
+    let dir_gone = !std::path::Path::new(JDK_MANAGED_HOME).join("bin").exists();
+    if after.is_empty() && dir_gone {
+        state.log("卸载完成：MSI 条目已清空，平台免安装目录已删除，用户级 JAVA_HOME 已清除");
         state.log("提示：已开终端里的 JAVA_HOME/PATH 是旧值，重开终端或重新登录后生效");
         finish(state, env_cache, true, String::new()).await;
     } else {
@@ -1095,8 +1203,9 @@ async fn run_java_uninstall(state: Arc<RepairState>, env_cache: EnvCache) {
             env_cache,
             false,
             format!(
-                "卸载未完成：仍有 {} 个 Java 条目（可能 UAC 被取消或 MSI 卸载被拒）——可到「设置 → 应用」手动处理",
-                after.len()
+                "卸载未完成：MSI 条目 {}，平台目录 {}（可能 UAC 被取消或 MSI 卸载被拒）——可到「设置 → 应用」手动处理",
+                if after.is_empty() { "已清空" } else { "仍有残留" },
+                if dir_gone { "已删除" } else { "仍保留" }
             ),
         )
         .await;
