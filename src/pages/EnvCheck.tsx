@@ -96,8 +96,26 @@ const TARGET_LABEL: Record<string, string> = {
   greptime: "GreptimeDB",
 };
 
-/** 与后端 resource::TARGETS 一致：资源目录可识别/可修复的目标软件。 */
-const RESOURCE_TARGETS = ["java", "mysql", "redis", "vernemq", "minio", "greptime"];
+/** 安装与维护卡片的展示顺序：用户重点的数据库/运行时在前 */
+const SOFTWARE_ORDER = ["mysql", "java", "redis", "vernemq", "minio", "greptime"];
+/** 一句话说清每个软件是干嘛的（卡片副标题，消灭抽象概念） */
+const TARGET_DESC: Record<string, string> = {
+  mysql: "数据库",
+  java: "Java 运行时",
+  redis: "缓存数据库",
+  vernemq: "MQTT 消息队列",
+  minio: "对象存储",
+  greptime: "时序数据库",
+};
+/** 约定子目录名（与后端 convention_target 对齐）：无包时引导用户放到哪 */
+const CONVENTION_DIR: Record<string, string> = {
+  java: "JDK",
+  mysql: "MySQL",
+  redis: "Redis",
+  vernemq: "VerneMQ",
+  minio: "MinIO",
+  greptime: "GreptimeDB",
+};
 
 /** 包体积 → 人读文案（KB/MB/GB，1 位小数）。 */
 function fmtSize(bytes: number): string {
@@ -339,6 +357,7 @@ function RepairCenter({
   pending,
   repairDisabled,
   repairRunning,
+  activeTarget,
   onRepair,
   onUninstall,
 }: {
@@ -346,6 +365,8 @@ function RepairCenter({
   repairDisabled: boolean;
   /** 修复/卸载任务是否在跑：结束后自动刷新安装痕迹与资源目录 */
   repairRunning: boolean;
+  /** 正在执行任务的软件（卡片据此高亮"正在安装"）；null = 空闲 */
+  activeTarget: string | null;
   onRepair: (target: string) => void;
   onUninstall: (target: string, removeData: boolean) => void;
 }) {
@@ -376,6 +397,8 @@ function RepairCenter({
   const [planCopied, setPlanCopied] = useState(false);
   // 安装痕迹首次探测中（Windows 上 sc/注册表扫描需 1-2 秒，先如实显示加载态）
   const [probing, setProbing] = useState(true);
+  // 子导航：「安装与维护」= 装软件主流程；「环境问题与 AI 方案」= 检测问题跟进
+  const [subTab, setSubTab] = useState<"install" | "issues">("install");
 
   // 进入修复中心 / 目录配置变化 / 任务结束时：扫资源目录 + 探测安装痕迹
   useEffect(() => {
@@ -488,138 +511,248 @@ function RepairCenter({
   }, [uninstallTarget, removeData, onUninstall]);
 
   const identified = scan?.files.filter((f) => f.target) ?? [];
-  // 就绪度清单：6 个目标软件逐项「找到（哪个包）/ 未找到」；约定布局是
-  // 根目录下按 <软件名>/ 子目录放包（目录名也参与识别），缺失只提示不阻断
-  const missing = RESOURCE_TARGETS.filter((t) => !identified.some((f) => f.target === t));
+  // 每个目标的最佳包（与后端 find_zip/find_msi 取包口径一致：约定目录内优先，再比大小）
+  const bestPkg = useCallback(
+    (t: string) => {
+      const hits = identified.filter((f) => f.target === t);
+      if (hits.length === 0) return null;
+      return hits.reduce((a, b) =>
+        b.inConventionDir && !a.inConventionDir
+          ? b
+          : b.inConventionDir === a.inConventionDir && b.sizeBytes > a.sizeBytes
+            ? b
+            : a,
+      );
+    },
+    [identified],
+  );
+  const installedOf = useCallback((t: string) => installed.find((x) => x.target === t), [installed]);
+
+  // 远程部署声明：本机不装的软件（如 Redis/MinIO 远程部署），卡片转为说明行，
+  // 不再显示"未安装/未找到"噪音；设置热更新 + 持久化
+  const { settings, apply } = useAppSettingsStore();
+  const remoteSet = useMemo(() => new Set(settings.remoteDeployed), [settings.remoteDeployed]);
+  const toggleRemote = useCallback(
+    async (t: string, toRemote: boolean) => {
+      const next = toRemote
+        ? [...settings.remoteDeployed, t]
+        : settings.remoteDeployed.filter((x) => x !== t);
+      const nextSettings = { ...settings, remoteDeployed: next };
+      apply(nextSettings); // 乐观更新：界面立即切换
+      try {
+        await api.saveAppSettings(nextSettings);
+      } catch {
+        apply(settings); // 保存失败回滚
+      }
+    },
+    [settings, apply],
+  );
 
   return (
     <Stack spacing={2}>
-      {/* 资源目录就绪度清单：修复来源的第一环 */}
-      {!resourceDir ? (
-        <Alert severity="warning">
-          未配置本地资源目录——一键修复仅支持 Java 在线下载（需外网），MySQL / Redis / VerneMQ 等请先到
-          「设置 → 资源目录」配置离线安装包，或使用 AI 方案。
-        </Alert>
-      ) : scan?.exists ? (
-        <Alert severity={missing.length === 0 ? "success" : "warning"}>
-          <Stack>
-            <Typography variant="body2">
-              资源目录（{resourceDir}）就绪度——已识别 <b>{identified.length}</b> 个安装包：
-            </Typography>
-            <Box sx={{ display: "flex", flexWrap: "wrap", gap: 0.75, mt: 0.75 }}>
-              {RESOURCE_TARGETS.map((t) => {
-                const hits = identified.filter((f) => f.target === t);
-                if (hits.length === 0) {
-                  return (
-                    <Chip key={t} size="small" variant="outlined" label={`${TARGET_LABEL[t]} 未找到`} />
-                  );
-                }
-                // 同一目标多个包时展示最大者（与后端 find_msi/find_zip 取包口径一致）
-                const best = hits.reduce((a, b) => (b.sizeBytes > a.sizeBytes ? b : a));
-                return (
-                  <Chip
-                    key={t}
-                    size="small"
-                    color="success"
-                    variant="outlined"
-                    label={`${TARGET_LABEL[t]} ✓ ${best.fileName}（${fmtSize(best.sizeBytes)}）`}
-                  />
-                );
-              })}
-            </Box>
-            {missing.length > 0 && (
-              <Typography variant="caption" color="text.secondary" sx={{ mt: 0.75 }}>
-                还缺 {missing.map((t) => TARGET_LABEL[t]).join("、")} 的包：把 msi/exe/zip 放入该目录（推荐按
-                mysql\、redis\ 等软件名子目录组织；MySQL 与 Redis 优先 ZIP 免安装版——离线解压、初始化、注册服务一条龙）。
-              </Typography>
-            )}
-          </Stack>
-        </Alert>
-      ) : scan ? (
-        <Alert severity="error">
-          资源目录（{resourceDir}）不存在或不可访问，请检查「设置 → 资源目录」里的路径。
-        </Alert>
-      ) : null}
+      <Tabs value={subTab} onChange={(_, v: "install" | "issues") => setSubTab(v)}>
+        <Tab value="install" label="安装与维护" />
+        <Tab
+          value="issues"
+          label={
+            <Badge color="error" badgeContent={pending.length > 0 ? pending.length : undefined}>
+              环境问题与 AI 方案
+            </Badge>
+          }
+        />
+      </Tabs>
 
-      {/* 已安装组件管理：安装痕迹探测 + 卸载入口（MySQL/Redis/Java） */}
-      <Paper variant="outlined" sx={{ overflow: "hidden" }}>
-        <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ px: 2, pt: 1.5, pb: 1 }}>
-          <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
-            已安装组件
-          </Typography>
-          <Typography variant="caption" color="text.secondary">
-            平台内安装/卸载维护（MySQL/Redis 服务级探测，Java 走 MSI 条目）
-          </Typography>
-        </Stack>
-        <Divider />
-        <TableContainer>
-          <Table size="small" sx={{ tableLayout: "fixed" }}>
-            <TableHead>
-              <TableRow sx={{ bgcolor: "rgba(0,0,0,0.03)" }}>
-                <TableCell sx={{ width: 140 }}>组件</TableCell>
-                <TableCell sx={{ width: 170 }}>安装状态</TableCell>
-                <TableCell>安装目录</TableCell>
-                <TableCell sx={{ width: 92 }}>操作</TableCell>
-              </TableRow>
-            </TableHead>
-            <TableBody>
-              {installed.length === 0 ? (
-                <TableRow>
-                  <TableCell colSpan={4} align="center">
-                    <Stack direction="row" spacing={1} alignItems="center" justifyContent="center">
-                      {probing && <CircularProgress size={14} />}
+      {/* ===== 安装与维护：每个软件一张卡片，状态一眼可见，装/卸一步直达 ===== */}
+      {subTab === "install" && (
+        <>
+          {!resourceDir ? (
+            <Alert severity="warning">
+              先配置「本地资源目录」（设置 → 资源目录，可用「浏览…」选择）：把安装包放进
+              <b>以软件名命名的子目录</b>（如 <b>MySQL\</b>、<b>JDK\</b>），这里就会识别并出现「一键安装」按钮。
+            </Alert>
+          ) : scan && !scan.exists ? (
+            <Alert severity="error">资源目录（{resourceDir}）不存在或不可访问，请到「设置 → 资源目录」重新选择。</Alert>
+          ) : null}
+
+          <Stack spacing={1.25}>
+            {SOFTWARE_ORDER.map((t) => {
+              const st = installedOf(t);
+              const pkg = bestPkg(t);
+              const isRemote = remoteSet.has(t);
+              const runningThis = repairRunning && activeTarget === t;
+              const conventionHint = `${resourceDir || "<资源目录>"}\\${CONVENTION_DIR[t]}\\`;
+
+              // 状态行 + 操作按钮（状态机：远程 > 执行中 > 已安装 > 残留 > 有包 > 无包）
+              let statusLine: React.ReactNode;
+              let actions: React.ReactNode = null;
+              if (isRemote) {
+                statusLine = (
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <Chip size="small" label="远程部署" variant="outlined" />
+                    <Typography variant="body2" color="text.secondary">
+                      本机无需安装（按部署规划远程部署）
+                    </Typography>
+                  </Stack>
+                );
+                actions = (
+                  <Button size="small" variant="text" disabled={repairRunning} onClick={() => void toggleRemote(t, false)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+                    改回本地安装
+                  </Button>
+                );
+              } else if (runningThis) {
+                statusLine = (
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <CircularProgress size={16} />
+                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                      正在执行操作，进度见上方提示…
+                    </Typography>
+                  </Stack>
+                );
+              } else if (st?.serviceInstalled) {
+                statusLine = (
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+                    <Chip size="small" color="success" label="已安装" />
+                    <Typography variant="caption" sx={{ fontFamily: "monospace", color: "text.secondary", wordBreak: "break-all" }}>
+                      {st.installDir || "由 Windows Installer 管理"}
+                    </Typography>
+                  </Stack>
+                );
+                actions = (
+                  <>
+                    <Button size="small" variant="outlined" disabled={repairDisabled} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+                      重装
+                    </Button>
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      color="error"
+                      startIcon={<DeleteOutline />}
+                      disabled={!st.canUninstall || repairDisabled}
+                      onClick={() => {
+                        setRemoveData(false);
+                        setConfirmText("");
+                        setUninstallTarget(st);
+                      }}
+                      sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+                    >
+                      卸载
+                    </Button>
+                  </>
+                );
+              } else if (st?.dirExists) {
+                statusLine = (
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+                    <Chip size="small" color="warning" label="残留目录" />
+                    <Typography variant="caption" sx={{ fontFamily: "monospace", color: "text.secondary", wordBreak: "break-all" }}>
+                      {st.installDir}（未注册服务，可清理后重装）
+                    </Typography>
+                  </Stack>
+                );
+                actions = (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="error"
+                    startIcon={<DeleteOutline />}
+                    disabled={!st.canUninstall || repairDisabled}
+                    onClick={() => {
+                      setRemoveData(false);
+                      setConfirmText("");
+                      setUninstallTarget(st);
+                    }}
+                    sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+                  >
+                    清理
+                  </Button>
+                );
+              } else if (pkg) {
+                statusLine = (
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+                    <Chip size="small" variant="outlined" label="未安装" />
+                    <Typography variant="body2" color="text.secondary" sx={{ wordBreak: "break-all" }}>
+                      已识别安装包 <b>{pkg.fileName}</b>（{fmtSize(pkg.sizeBytes)}{pkg.inConventionDir ? "，约定目录" : ""}）
+                    </Typography>
+                  </Stack>
+                );
+                actions = (
+                  <Button size="small" variant="contained" disabled={repairDisabled} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+                    一键安装
+                  </Button>
+                );
+              } else {
+                statusLine = (
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+                    <Chip size="small" variant="outlined" label="未安装" />
+                    <Typography variant="body2" color="text.secondary" sx={{ wordBreak: "break-word" }}>
+                      {t === "java"
+                        ? "未识别到安装包：可在资源目录 JDK\\ 放入 zip（免安装），或点「一键安装」在线下载（需外网）"
+                        : `未识别到安装包：把安装包放入 ${conventionHint} 子目录后这里会自动出现`}
+                    </Typography>
+                  </Stack>
+                );
+                actions = t === "java" ? (
+                  <Button size="small" variant="contained" disabled={repairDisabled} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+                    一键安装（在线）
+                  </Button>
+                ) : null;
+              }
+
+              return (
+                <Paper
+                  key={t}
+                  variant="outlined"
+                  sx={{
+                    px: 2,
+                    py: 1.5,
+                    ...(runningThis ? { borderColor: "primary.main", bgcolor: "action.hover" } : {}),
+                  }}
+                >
+                  <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: "wrap" }}>
+                    <Box sx={{ width: 168, flexShrink: 0 }}>
+                      <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.3 }}>
+                        {TARGET_LABEL[t] ?? t}
+                      </Typography>
                       <Typography variant="caption" color="text.secondary">
-                        {probing ? "正在探测安装痕迹…" : "探测不可用（仅 Windows 目标机支持平台内卸载）"}
+                        {TARGET_DESC[t] ?? ""}
                       </Typography>
-                    </Stack>
-                  </TableCell>
-                </TableRow>
-              ) : (
-                installed.map((t) => (
-                  <TableRow key={t.target} sx={{ "& td": { verticalAlign: "top", py: 1 } }}>
-                    <TableCell>
-                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                        {t.label}
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      {t.serviceInstalled ? (
-                        <Chip size="small" color="success" label={t.target === "java" ? "已安装（MSI）" : "已安装（服务）"} />
-                      ) : t.dirExists ? (
-                        <Chip size="small" color="warning" label="残留目录" />
+                    </Box>
+                    <Box sx={{ flex: 1, minWidth: 260 }}>
+                      {probing && !isRemote ? (
+                        <Stack direction="row" spacing={1} alignItems="center">
+                          <CircularProgress size={14} />
+                          <Typography variant="body2" color="text.secondary">
+                            正在检测本机安装状态…
+                          </Typography>
+                        </Stack>
                       ) : (
-                        <Chip size="small" variant="outlined" label="未安装" />
+                        statusLine
                       )}
-                    </TableCell>
-                    <TableCell>
-                      <Typography variant="body2" sx={{ fontFamily: "monospace", wordBreak: "break-all", color: "text.secondary" }}>
-                        {t.installDir || "由 Windows Installer 管理"}
-                      </Typography>
-                    </TableCell>
-                    <TableCell>
-                      <Button
-                        size="small"
-                        color="error"
-                        variant="outlined"
-                        startIcon={<DeleteOutline />}
-                        disabled={!t.canUninstall || repairDisabled}
-                        onClick={() => {
-                          setRemoveData(false);
-                          setConfirmText("");
-                          setUninstallTarget(t);
-                        }}
-                        sx={{ textTransform: "none", px: 1 }}
-                      >
-                        卸载
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))
-              )}
-            </TableBody>
-          </Table>
-        </TableContainer>
-      </Paper>
+                    </Box>
+                    <Stack direction="row" spacing={1} alignItems="center" sx={{ flexShrink: 0 }}>
+                      {actions}
+                    </Stack>
+                  </Stack>
+                </Paper>
+              );
+            })}
+          </Stack>
+
+          {scan?.misplaced && scan.misplaced.length > 0 && (
+            <Alert severity="warning" icon={false}>
+              {scan.misplaced.map((m) => (
+                <Typography key={m.path} variant="body2" component="div">
+                  「{m.fileName}」放在了 {m.foundIn}/ 目录，但它属于 {m.fileTarget.toUpperCase()} ——建议移到对应的约定子目录（按软件名命名）
+                </Typography>
+              ))}
+            </Alert>
+          )}
+        </>
+      )}
+
+      {/* ===== 环境问题与 AI 方案 ===== */}
+      {subTab === "issues" && (
+        <>
+          {planError && <Alert severity="error">{planError}</Alert>}
 
       {/* 问题项汇总 */}
       <Paper variant="outlined" sx={{ overflow: "hidden" }}>
@@ -709,8 +842,6 @@ function RepairCenter({
           </Table>
         </TableContainer>
       </Paper>
-
-      {planError && <Alert severity="error">{planError}</Alert>}
 
       {/* AI 方案卡片 */}
       {plan && (
@@ -804,6 +935,8 @@ function RepairCenter({
             </Button>
           </Stack>
         </Paper>
+      )}
+        </>
       )}
 
       {/* 代执行确认弹窗：白名单命令 + UAC 提权，执行前必须人工确认 */}
@@ -1291,6 +1424,7 @@ export default function EnvCheck() {
           pending={pendingEntries}
           repairDisabled={!!repairJob?.running}
           repairRunning={!!repairJob?.running}
+          activeTarget={repairJob?.target ?? null}
           onRepair={startGenericRepair}
           onUninstall={startUninstall}
         />

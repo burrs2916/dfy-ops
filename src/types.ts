@@ -159,6 +159,8 @@ export interface AppSettings {
   envRefreshSecs: number;
   /** 本地资源目录：环境修复离线安装包（MySQL/Redis/JDK/VerneMQ 等安装包）所在目录；空 = 未配置 */
   resourceDir: string;
+  /** 声明为「远程部署」的软件（如 ["redis","minio"]）：本机不安装，修复中心隐藏安装引导 */
+  remoteDeployed: string[];
 }
 
 /** ===== 环境修复中心 ===== */
