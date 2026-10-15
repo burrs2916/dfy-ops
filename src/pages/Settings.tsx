@@ -119,21 +119,37 @@ export default function Settings() {
             目录存在，但未识别到安装包（支持 MySQL / Redis / VerneMQ / JDK / MinIO / GreptimeDB 的 msi/exe/zip）
           </Typography>
         ) : (
-          <Table size="small" aria-label="资源目录扫描结果">
-            <TableBody>
-              {scan.files.map((f) => (
-                <TableRow key={f.path}>
-                  <TableCell sx={{ fontFamily: "monospace", fontSize: 12, py: 0.5 }}>{f.fileName}</TableCell>
-                  <TableCell align="right" sx={{ py: 0.5, whiteSpace: "nowrap" }}>
-                    {f.target ? `识别为 ${f.target}` : "未识别"}
-                  </TableCell>
-                  <TableCell align="right" sx={{ py: 0.5, whiteSpace: "nowrap", color: "text.secondary" }}>
-                    {mb(f.sizeBytes)}
-                  </TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
+          <>
+            {scan.misplaced.length > 0 && (
+              <Alert severity="warning" icon={false} sx={{ mb: 1.5 }}>
+                {scan.misplaced.map((m) => (
+                  <Typography key={m.path} variant="body2" component="div">
+                    「{m.fileName}」放在了 {m.foundIn}/ 目录，但它属于 {m.fileTarget.toUpperCase()} ——建议移到对应的约定子目录（按软件名命名，如 MySQL、JDK）
+                  </Typography>
+                ))}
+              </Alert>
+            )}
+            <Table size="small" aria-label="资源目录扫描结果">
+              <TableBody>
+                {scan.files.map((f) => (
+                  <TableRow key={f.path}>
+                    <TableCell sx={{ fontFamily: "monospace", fontSize: 12, py: 0.5 }}>{f.fileName}</TableCell>
+                    <TableCell align="right" sx={{ py: 0.5, whiteSpace: "nowrap" }}>
+                      {f.target ? `识别为 ${f.target}` : "未识别"}
+                      {f.inConventionDir && (
+                        <Typography component="span" variant="caption" sx={{ ml: 1, color: "success.main" }}>
+                          约定目录
+                        </Typography>
+                      )}
+                    </TableCell>
+                    <TableCell align="right" sx={{ py: 0.5, whiteSpace: "nowrap", color: "text.secondary" }}>
+                      {mb(f.sizeBytes)}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </>
         )}
       </Paper>
     );

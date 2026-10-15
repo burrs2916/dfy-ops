@@ -650,6 +650,7 @@ mod tests {
             path: "C:/res/mysql.msi".into(),
             size_bytes: 300 * 1024 * 1024,
             target: Some("mysql".into()),
+            in_convention_dir: true,
         }];
         let installed = vec![
             ("MySQL".to_string(), false),

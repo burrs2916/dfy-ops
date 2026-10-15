@@ -25,6 +25,23 @@ pub struct ResourceFile {
     pub size_bytes: u64,
     /// 识别出的目标软件；None = 未识别
     pub target: Option<String>,
+    /// 是否位于该目标的约定子目录内（`MySQL/`、`JDK/`…）——约束查找优先命中这类位置
+    pub in_convention_dir: bool,
+}
+
+/// 放错位置的包：在 A 的约定目录里放了文件名归属 B 的安装包。
+/// 归属仍按文件名（B）不丢资源，但提示用户挪到 B 的约定目录，约束查找才优先命中。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MisplacedItem {
+    pub file_name: String,
+    pub path: String,
+    /// 所在约定目录的原始名（如 "MySQL"）
+    pub found_in: String,
+    /// 目录归属目标（如 "mysql"）
+    pub dir_target: String,
+    /// 文件名归属目标（如 "java"）
+    pub file_target: String,
 }
 
 /// 扫描结果（设置页预览 + 修复决策共用）。
@@ -34,6 +51,8 @@ pub struct ResourceScan {
     pub dir: String,
     pub exists: bool,
     pub files: Vec<ResourceFile>,
+    /// 放错位置的包（约束目录语义下的整理提醒，不影响归属与查找）
+    pub misplaced: Vec<MisplacedItem>,
 }
 
 /// 安装包扩展名（决定「能不能自动装/识别」；随机同名文件如 readme.pdf 不认）。
@@ -74,96 +93,149 @@ pub fn classify(file_name: &str) -> Option<&'static str> {
     is_pkg_ext(&n).then_some(()).and_then(|()| match_target(&n))
 }
 
+/// 约定子目录：目标软件的专属查找位置（根目录下一级，目录名**全等**匹配，
+/// 大小写不敏感）。约束语义——「MySQL 的包去 MySQL 目录找，JDK 的包去 JDK
+/// 目录找」，比文件名 contains 匹配严格得多，`软件包/`、`数据库/` 这类
+/// 通用名不会被误判成某软件的约定目录。
+fn convention_target(dir_name_lower: &str) -> Option<&'static str> {
+    match dir_name_lower {
+        "jdk" | "java" | "jre" => Some("java"),
+        "mysql" => Some("mysql"),
+        "redis" => Some("redis"),
+        "vernemq" => Some("vernemq"),
+        "minio" => Some("minio"),
+        "greptime" | "greptimedb" => Some("greptime"),
+        _ => None,
+    }
+}
+
 /// 递归扫描目录（根 + 两级子目录，覆盖 `数据库/mysql/xx.zip` 的「类别/软件」分层）。
 ///
-/// 目录名参与兜底识别：文件名认不出的安装包，落在名字命中目标软件的目录里
-/// （如 `redis/db-cache.zip`）即归属该软件；最近一级目录优先，认不出则继承父目录。
-fn visit_dir(d: &std::path::Path, depth: u8, parent_target: Option<&'static str>, files: &mut Vec<ResourceFile>) {
+/// 约束查找：根下一级的约定目录（`MySQL/`、`JDK/`…全等+大小写不敏感）内的包
+/// 标记 in_convention_dir，查找优先命中；约定目录内的包若文件名指向别的软件
+/// （如 `MySQL/` 里放了 JDK 的 zip），归属仍按文件名，但记入 misplaced 提醒整理。
+/// 目录名仍参与兜底：文件名认不出的包落在命中目标的目录里即归属该软件。
+fn visit_dir(
+    d: &std::path::Path,
+    depth: u8,
+    parent_target: Option<&'static str>,
+    convention: Option<&'static str>,
+    dir_name: Option<&str>,
+    files: &mut Vec<ResourceFile>,
+    misplaced: &mut Vec<MisplacedItem>,
+) {
     if depth > 2 {
         return;
     }
     // 本目录的兜底目标：目录名命中 → 用之；否则继承父目录（`数据库/mysql/` 里
-    // 「数据库」认不出，进入「mysql」后命中，其下再嵌套目录继承 mysql）
-    let dir_target = d
-        .file_name()
-        .and_then(|s| s.to_str())
-        .map(|n| n.to_lowercase())
-        .and_then(|n| match_target(&n))
+    // 「数据库」认不出，进入「mysql」后命中，其下再嵌套目录继承 mysql）。
+    // convention 只认全等命名的约定目录（根下一级起向下传递）。
+    let name_lower = dir_name.map(|n| n.to_lowercase());
+    let dir_target = name_lower
+        .as_deref()
+        .and_then(match_target)
         .or(parent_target);
+    let convention = name_lower
+        .as_deref()
+        .and_then(convention_target)
+        .or(convention);
     let Ok(entries) = std::fs::read_dir(d) else {
         return;
     };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
-            visit_dir(&p, depth + 1, dir_target, files);
+            visit_dir(
+                &p,
+                depth + 1,
+                dir_target,
+                convention,
+                p.file_name().and_then(|s| s.to_str()),
+                files,
+                misplaced,
+            );
             continue;
         }
         let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
         let n = name.to_lowercase();
-        let target = match match_target(&n) {
+        let file_target = match match_target(&n) {
             Some(t) if is_pkg_ext(&n) => Some(t),
             _ => {
                 // 文件名认不出：仅当扩展名是安装包且所在目录名命中目标时兜底
                 if is_pkg_ext(&n) { dir_target } else { None }
             }
         };
-        let Some(target) = target else { continue };
+        let Some(target) = file_target else { continue };
+        // 约定目录内的包：文件归属 = 目录归属才算「就位」；指向别的软件 = 放错位置
+        let in_convention = convention == Some(target);
+        if let Some(ct) = convention {
+            if !in_convention && match_target(&n).is_some() {
+                misplaced.push(MisplacedItem {
+                    file_name: name.clone(),
+                    path: p.to_string_lossy().to_string(),
+                    found_in: dir_name.unwrap_or_default().to_string(),
+                    dir_target: ct.to_string(),
+                    file_target: target.to_string(),
+                });
+            }
+        }
         let size = e.metadata().map(|m| m.len()).unwrap_or(0);
         files.push(ResourceFile {
             file_name: name,
             path: p.to_string_lossy().to_string(),
             size_bytes: size,
             target: Some(target.into()),
+            in_convention_dir: in_convention,
         });
     }
 }
 
-/// 扫描资源目录（根目录 + 两级子目录 + 目录名兜底识别）。
+/// 扫描资源目录（约束约定子目录 + 根/两级子目录 + 目录名兜底识别）。
 pub fn scan(dir: &str) -> ResourceScan {
-    let mut files = Vec::new();
+    let empty = || ResourceScan {
+        dir: dir.to_string(),
+        exists: false,
+        files: Vec::new(),
+        misplaced: Vec::new(),
+    };
     if dir.is_empty() {
-        return ResourceScan {
-            dir: dir.to_string(),
-            exists: false,
-            files,
-        };
+        return empty();
     }
     let root = std::path::Path::new(dir);
     if !root.is_dir() {
-        return ResourceScan {
-            dir: dir.to_string(),
-            exists: false,
-            files,
-        };
+        return empty();
     }
-    visit_dir(root, 0, None, &mut files);
+    let mut files = Vec::new();
+    let mut misplaced = Vec::new();
+    visit_dir(root, 0, None, None, root.file_name().and_then(|s| s.to_str()), &mut files, &mut misplaced);
     files.sort_by(|a, b| a.target.cmp(&b.target).then(a.file_name.cmp(&b.file_name)));
     ResourceScan {
         dir: dir.to_string(),
         exists: true,
         files,
+        misplaced,
     }
 }
 
-/// 找资源目录里指定目标软件的 MSI 安装包（可静默安装的类型），取最大的那个
-/// （同名多版本时通常最大 = 最新完整包）。
+/// 找资源目录里指定目标软件的 MSI 安装包（可静默安装的类型）。
+/// 约定目录内的包优先（约束查找语义），同优先级取最大的（同名多版本通常最大 = 最新完整包）。
 pub fn find_msi(dir: &str, target: &str) -> Option<ResourceFile> {
-    scan(dir)
-        .files
-        .into_iter()
-        .filter(|f| f.target.as_deref() == Some(target) && f.file_name.to_lowercase().ends_with(".msi"))
-        .max_by_key(|f| f.size_bytes)
+    find_pkg(dir, target, ".msi")
 }
 
 /// 找目标软件的 ZIP 免安装版（mysql/redis 的可靠离线管线：解压 → 配置 → 注册服务）。
 /// MySQL 的官方 msi 多为 Installer 束（静默执行装不上 Server），zip 是首选离线来源。
+/// 约定目录内的包优先，同优先级取最大的。
 pub fn find_zip(dir: &str, target: &str) -> Option<ResourceFile> {
+    find_pkg(dir, target, ".zip")
+}
+
+fn find_pkg(dir: &str, target: &str, ext: &str) -> Option<ResourceFile> {
     scan(dir)
         .files
         .into_iter()
-        .filter(|f| f.target.as_deref() == Some(target) && f.file_name.to_lowercase().ends_with(".zip"))
-        .max_by_key(|f| f.size_bytes)
+        .filter(|f| f.target.as_deref() == Some(target) && f.file_name.to_lowercase().ends_with(ext))
+        .max_by_key(|f| (f.in_convention_dir, f.size_bytes))
 }
 
 /// 命令白名单：AI 方案与预置命令的代执行边界。首 token 必须在列，
@@ -299,6 +371,73 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// 约束目录语义（用户真实布局回归锚点）：
+    /// 根目录 = dfy_resources，约定子目录 MySQL/ JDK/（大写、大小写不敏感），
+    /// 包名 = mysql-8.0.46-winx64.zip / OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip。
+    /// 约定目录内标记 in_convention_dir；find_zip 约定目录内优先于更大的根散包。
+    #[test]
+    fn scan_honors_convention_dirs_like_user_layout() {
+        let base = std::env::temp_dir().join(format!("dfy-res-conv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mysql_dir = base.join("MySQL");
+        let jdk_dir = base.join("JDK");
+        std::fs::create_dir_all(&mysql_dir).unwrap();
+        std::fs::create_dir_all(&jdk_dir).unwrap();
+        let mysql_zip = mysql_dir.join("mysql-8.0.46-winx64.zip");
+        let jdk_zip = jdk_dir.join("OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip");
+        std::fs::write(&mysql_zip, b"x").unwrap();
+        std::fs::write(&jdk_zip, b"x").unwrap();
+        // 约定目录之外的更大同名包：find_zip 应优先约定目录内的（约束查找）
+        std::fs::write(base.join("mysql-9.9.0-winx64.zip"), b"xxxxxxx").unwrap();
+
+        let scan = scan(base.to_str().unwrap());
+        let f = |n: &str| scan.files.iter().find(|f| f.file_name == n).unwrap();
+        assert_eq!(f("mysql-8.0.46-winx64.zip").target.as_deref(), Some("mysql"));
+        assert!(f("mysql-8.0.46-winx64.zip").in_convention_dir, "约定目录内应标记");
+        assert_eq!(
+            f("OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip").target.as_deref(),
+            Some("java")
+        );
+        assert!(f("OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip").in_convention_dir);
+        assert!(!f("mysql-9.9.0-winx64.zip").in_convention_dir, "根散包不在约定目录");
+
+        let zip = find_zip(base.to_str().unwrap(), "mysql").unwrap();
+        assert_eq!(zip.file_name, "mysql-8.0.46-winx64.zip", "约定目录内优先，即使根散包更大");
+        let jdk = find_zip(base.to_str().unwrap(), "java").unwrap();
+        assert!(jdk.file_name.starts_with("OpenJDK17U"), "java 的 zip 应命中 JDK/ 约定目录内的包");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// 放错位置：`MySQL/` 里放 JDK 的包 → 归属仍按文件名（java），但记入 misplaced；
+    /// 通用名目录（`软件包/`）不算约定目录，不触发 misplaced。
+    #[test]
+    fn scan_reports_misplaced_packages_in_convention_dirs() {
+        let base = std::env::temp_dir().join(format!("dfy-res-mis-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let mysql_dir = base.join("MySQL");
+        let misc = base.join("软件包");
+        std::fs::create_dir_all(&mysql_dir).unwrap();
+        std::fs::create_dir_all(&misc).unwrap();
+        std::fs::write(mysql_dir.join("OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip"), b"x").unwrap();
+        std::fs::write(misc.join("mysql-8.0.42-winx64.zip"), b"x").unwrap();
+
+        let scan = scan(base.to_str().unwrap());
+        let jdk = scan.files.iter().find(|f| f.file_name.starts_with("OpenJDK17U")).unwrap();
+        assert_eq!(jdk.target.as_deref(), Some("java"), "归属按文件名，不丢资源");
+        assert!(!jdk.in_convention_dir);
+        assert_eq!(scan.misplaced.len(), 1, "MySQL 约定目录里的 JDK 包应提示整理: {scan:?}");
+        assert_eq!(scan.misplaced[0].dir_target, "mysql");
+        assert_eq!(scan.misplaced[0].file_target, "java");
+        assert_eq!(scan.misplaced[0].found_in, "MySQL");
+        // `软件包/` 不是约定目录：包正常识别（目录名兜底不命中，但文件名命中 mysql）
+        let m = scan.files.iter().find(|f| f.file_name == "mysql-8.0.42-winx64.zip").unwrap();
+        assert_eq!(m.target.as_deref(), Some("mysql"));
+        assert!(scan.misplaced.iter().all(|x| x.found_in != "软件包"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// 命令白名单：允许的程序通过；元字符拼接一律拒绝（防提权命令注入）；
     /// 首 token 支持 "msiexec.exe" 与带引号写法。
     #[test]
@@ -366,11 +505,12 @@ mod tests {
         assert!(targets.contains(&"minio"));
         assert!(!result.files.iter().any(|f| f.file_name == "readme.txt"), "非安装包不列出");
 
-        // find_msi / find_zip：同目标多个包取最大
+        // find_msi / find_zip：约定目录内的包优先（约束查找），同优先级才比大小
         std::fs::write(base.join("mysql-installer-community-9.0.0.msi"), b"xxxxxx").unwrap();
         std::fs::write(base.join("mysql-8.0.42-winx64.zip"), b"xxxxx").unwrap();
         let msi = find_msi(base.to_str().unwrap(), "mysql").unwrap();
-        assert!(msi.file_name.contains("9.0.0"), "应取更大的包: {msi:?}");
+        assert!(msi.file_name.contains("8.0.42"), "mysql/ 约定目录内的包优先于更大的根散包: {msi:?}");
+        assert!(msi.in_convention_dir);
         let zip = find_zip(base.to_str().unwrap(), "mysql").unwrap();
         assert_eq!(zip.file_name, "mysql-8.0.42-winx64.zip");
         assert!(find_zip(base.to_str().unwrap(), "vernemq").is_none(), "无 zip 的目标返回 None");

@@ -170,12 +170,24 @@ export interface ResourceFile {
   sizeBytes: number;
   /** 识别出的目标软件；null = 未识别（仍展示，AI 方案环节会参考完整清单） */
   target: string | null;
+  /** 是否位于该目标的约定子目录内（MySQL/、JDK/…）——约束查找优先命中这类位置 */
+  inConventionDir: boolean;
+}
+
+/** 放错位置的包：在 A 的约定目录里放了文件名归属 B 的安装包（归属仍按文件名） */
+export interface MisplacedItem {
+  fileName: string;
+  path: string;
+  foundIn: string;
+  dirTarget: string;
+  fileTarget: string;
 }
 
 export interface ResourceScan {
   dir: string;
   exists: boolean;
   files: ResourceFile[];
+  misplaced: MisplacedItem[];
 }
 
 /** POST /api/env/repair/generic 启动结果 */
