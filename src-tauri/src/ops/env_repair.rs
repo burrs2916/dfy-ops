@@ -374,7 +374,8 @@ async fn run_install(state: Arc<RepairState>, expected_major: u32, env_cache: En
     };
 
     state.patch(|j| j.stage = "configure".into());
-    let cfg = tokio::task::spawn_blocking(move || configure_zip_target("java", &home)).await;
+    let home_for_cfg = home.clone();
+    let cfg = tokio::task::spawn_blocking(move || configure_zip_target("java", &home_for_cfg)).await;
     match cfg {
         Ok(Ok(msg)) => state.log(msg),
         Ok(Err(e)) => {
@@ -686,7 +687,7 @@ fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
             let mysqld = format!("{home}\\bin\\mysqld.exe");
             let out = std::process::Command::new(&mysqld)
                 // --defaults-file 必须是首个选项（mysqld 的解析要求）
-                .args([format!("--defaults-file={ini}"), "--initialize-insecure", "--console"])
+                .args([format!("--defaults-file={ini}").as_str(), "--initialize-insecure", "--console"])
                 .output()
                 .map_err(|e| format!("无法运行 mysqld.exe：{e}"))?;
             if !out.status.success() {
@@ -842,7 +843,8 @@ async fn run_zip_install(
     // ===== 验证：mysql/redis 轮询端口监听；java 直接验证主目录版本 =====
     state.patch(|j| j.stage = "verify".into());
     let Some((svc, port)) = spec else {
-        let v = tokio::task::spawn_blocking(move || verify_java_home(&home, JDK_DEFAULT_MAJOR)).await;
+        let home_for_verify = home.clone();
+        let v = tokio::task::spawn_blocking(move || verify_java_home(&home_for_verify, JDK_DEFAULT_MAJOR)).await;
         match v {
             Ok(Ok((maj, min, pat))) => {
                 state.log(format!("验证通过：JDK {maj}.{min}.{pat} 可用，JAVA_HOME 已指向 {home}"));
@@ -1061,7 +1063,12 @@ async fn run_uninstall(
     if target == "mysql" && remove_data {
         state.patch(|j| j.stage = "backup".into());
         state.log("即将删除数据目录——正在先把全部数据库（表结构 + 数据 + 例程）备份为 SQL 文件…");
-        let b = tokio::task::spawn_blocking(move || backup_mysql_before_delete(&install_dir, &backup_dir)).await;
+        let install_dir_for_backup = install_dir.clone();
+        let backup_dir_for_backup = backup_dir.clone();
+        let b = tokio::task::spawn_blocking(move || {
+            backup_mysql_before_delete(&install_dir_for_backup, &backup_dir_for_backup)
+        })
+        .await;
         match b {
             Ok(Ok(path)) => {
                 let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -1350,7 +1357,8 @@ fn backup_mysql_before_delete(install_dir: &str, backup_dir: &str) -> Result<Str
         .output()
         .map_err(|e| format!("无法运行 mysqldump：{e}"))?;
     if !out.status.success() {
-        let err = String::from_utf8_lossy(&out.stderr).trim();
+        let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+        let err = stderr.trim();
         let _ = std::fs::remove_file(&out_file);
         return Err(format!(
             "mysqldump 导出失败：{err}（MSI 版若设过 root 密码，请手动备份后重试）"
