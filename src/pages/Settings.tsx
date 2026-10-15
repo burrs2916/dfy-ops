@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Alert, Button, Divider, MenuItem, Paper, Select, Snackbar, Stack, Table, TableBody, TableCell, TableRow, TextField, Typography } from "@mui/material";
 import { Tune, Storage, Info, FolderOpen } from "@mui/icons-material";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import { useAppSettingsStore } from "../store";
 import { SettingsLayout } from "../components/SettingsLayout";
@@ -64,6 +65,27 @@ export default function Settings() {
     setScanning(true);
     try {
       setScan(await api.resources(dir));
+    } catch {
+      setScan(null);
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  // 原生目录选择：选中即填入并自动扫描预览（免去手动输入路径与再点一次扫描）
+  const pickDir = async () => {
+    let picked: string | null = null;
+    try {
+      const r = await open({ directory: true, multiple: false, title: "选择本地资源目录" });
+      picked = typeof r === "string" ? r : null;
+    } catch {
+      return; // 用户取消或对话框异常：保持现状
+    }
+    if (!picked) return;
+    setDraft((d) => ({ ...d, resourceDir: picked as string }));
+    setScanning(true);
+    try {
+      setScan(await api.resources(picked));
     } catch {
       setScan(null);
     } finally {
@@ -188,14 +210,19 @@ export default function Settings() {
             content: (
               <>
                 <Paper variant="outlined" sx={{ overflow: "hidden" }}>
-                  <SettingRow label="资源目录路径" description="支持根目录与一级子目录，按文件名自动识别归属软件">
-                    <TextField
-                      size="small"
-                      placeholder="例如 D:\\dfy-resources"
-                      value={draft.resourceDir}
-                      onChange={(e) => setDraft((d) => ({ ...d, resourceDir: e.target.value }))}
-                      sx={{ width: 280 }}
-                    />
+                  <SettingRow label="资源目录路径" description="支持根目录与子目录分层（最多两级），按文件名自动识别归属软件">
+                    <Stack direction="row" spacing={1} alignItems="center">
+                      <TextField
+                        size="small"
+                        placeholder="例如 D:\dfy-resources"
+                        value={draft.resourceDir}
+                        onChange={(e) => setDraft((d) => ({ ...d, resourceDir: e.target.value }))}
+                        sx={{ width: 280 }}
+                      />
+                      <Button variant="outlined" onClick={pickDir}>
+                        浏览…
+                      </Button>
+                    </Stack>
                   </SettingRow>
                 </Paper>
                 <Stack direction="row" spacing={1} sx={{ mt: 1.5 }}>

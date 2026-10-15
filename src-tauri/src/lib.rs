@@ -56,6 +56,8 @@ pub fn run() {
         .init();
 
     tauri::Builder::default()
+        // 原生目录/文件选择对话框（设置 → 资源目录「浏览」）
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             #[cfg(all(target_os = "macos", debug_assertions))]
             set_dock_icon_dev();
