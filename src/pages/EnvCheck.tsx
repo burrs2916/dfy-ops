@@ -140,6 +140,7 @@ const REPAIR_STAGE_LABEL: Record<string, string> = {
   install: "静默安装中（请在 UAC 弹窗确认管理员权限）…",
   extract: "解压安装包…",
   configure: "写配置并初始化…",
+  backup: "备份 MySQL 数据（全库导出为 SQL 文件）…",
   uninstall: "卸载中（停止并注销服务）…",
   verify: "验证结果…",
   done: "已完成",
@@ -371,6 +372,10 @@ function RepairCenter({
     msg: "",
     severity: "success",
   });
+  // AI 方案「复制全部」的瞬时反馈
+  const [planCopied, setPlanCopied] = useState(false);
+  // 安装痕迹首次探测中（Windows 上 sc/注册表扫描需 1-2 秒，先如实显示加载态）
+  const [probing, setProbing] = useState(true);
 
   // 进入修复中心 / 目录配置变化 / 任务结束时：扫资源目录 + 探测安装痕迹
   useEffect(() => {
@@ -395,13 +400,20 @@ function RepairCenter({
   useEffect(() => {
     if (repairRunning) return; // 任务进行中不探（结束时会再刷）
     let alive = true;
+    setProbing(true);
     api
       .uninstallStatus()
       .then((s) => {
-        if (alive) setInstalled(s.targets);
+        if (alive) {
+          setInstalled(s.targets);
+          setProbing(false);
+        }
       })
       .catch(() => {
-        if (alive) setInstalled([]);
+        if (alive) {
+          setInstalled([]);
+          setProbing(false);
+        }
       });
     return () => {
       alive = false;
@@ -440,9 +452,9 @@ function RepairCenter({
 
   const submitFollowUp = useCallback(() => {
     const q = followUp.trim();
-    if (!q || !plan) return;
+    if (!q || !plan || planning) return; // planning 防重：思考中不允许再次提交
     void generatePlan(planItems.length ? planItems : pending.map((e) => e.item), planAsText(plan), q);
-  }, [followUp, plan, planItems, pending, generatePlan, planAsText]);
+  }, [followUp, plan, planning, planItems, pending, generatePlan, planAsText]);
 
   const doExec = useCallback(async () => {
     if (!execCommand) return;
@@ -554,9 +566,12 @@ function RepairCenter({
               {installed.length === 0 ? (
                 <TableRow>
                   <TableCell colSpan={4} align="center">
-                    <Typography variant="caption" color="text.secondary">
-                      探测不可用（仅 Windows 目标机支持平台内卸载）
-                    </Typography>
+                    <Stack direction="row" spacing={1} alignItems="center" justifyContent="center">
+                      {probing && <CircularProgress size={14} />}
+                      <Typography variant="caption" color="text.secondary">
+                        {probing ? "正在探测安装痕迹…" : "探测不可用（仅 Windows 目标机支持平台内卸载）"}
+                      </Typography>
+                    </Stack>
                   </TableCell>
                 </TableRow>
               ) : (
@@ -704,7 +719,22 @@ function RepairCenter({
             <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
               AI 修复方案{plan.mode === "text" ? "（原始建议）" : ""}
             </Typography>
-            <Chip size="small" label={plan.mode === "ai" ? "结构化步骤" : "文本建议"} color="primary" variant="outlined" />
+            <Stack direction="row" spacing={1} alignItems="center">
+              <Chip size="small" label={plan.mode === "ai" ? "结构化步骤" : "文本建议"} color="primary" variant="outlined" />
+              {/* 全文复制：方案多步时避免逐条点复制 */}
+              <Button
+                size="small"
+                startIcon={planCopied ? <Check /> : <ContentCopy />}
+                onClick={() => {
+                  navigator.clipboard?.writeText(planAsText(plan));
+                  setPlanCopied(true);
+                  setTimeout(() => setPlanCopied(false), 1500);
+                }}
+                sx={{ textTransform: "none" }}
+              >
+                {planCopied ? "已复制" : "复制全部"}
+              </Button>
+            </Stack>
           </Stack>
           <Typography variant="body2" sx={{ px: 2, pt: 0.5, whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
             {plan.summary}
@@ -760,7 +790,7 @@ function RepairCenter({
               value={followUp}
               onChange={(e) => setFollowUp(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && followUp.trim()) submitFollowUp();
+                if (e.key === "Enter" && followUp.trim() && !planning) submitFollowUp();
               }}
             />
             <Button
@@ -978,7 +1008,8 @@ export default function EnvCheck() {
           repairPollRef.current = null;
           if (job.ok) {
             const label = job.target ? TARGET_LABEL[job.target] ?? job.target : "环境";
-            setRepairNotice(`${label} 安装完成，请点击「重新检查」确认环境状态`);
+            // 任务结束已自动 refreshEnvAll()，如实告知用户结果已刷新
+            setRepairNotice(`${label} ${job.stage === "uninstall" ? "卸载" : "安装"}完成，环境已自动重新检查`);
           } else {
             setRepairError(job.error || "修复未成功，请查看日志或按修复建议手动处理");
           }
@@ -1130,7 +1161,7 @@ export default function EnvCheck() {
         </Alert>
       )}
 
-      {/* 修复任务进行中：阶段 + 最新日志（两个 Tab 共享，随时可见） */}
+      {/* 修复任务进行中：阶段 + 最近日志（两个 Tab 共享，随时可见） */}
       {repairJob?.running && (
         <Alert
           severity="info"
@@ -1141,14 +1172,23 @@ export default function EnvCheck() {
             {repairJob.target ? `正在修复 ${TARGET_LABEL[repairJob.target] ?? repairJob.target}：` : ""}
             {REPAIR_STAGE_LABEL[repairJob.stage] ?? repairJob.stage}
           </Typography>
-          {repairJob.logs.length > 0 && (
-            <Typography
-              variant="caption"
-              sx={{ fontFamily: "monospace", display: "block", mt: 0.5, wordBreak: "break-all" }}
-            >
-              {repairJob.logs[repairJob.logs.length - 1]}
-            </Typography>
-          )}
+          {/* 最近 3 条：过程可追溯（解压 → 配置 → 注册 → 验证各阶段的关键动作） */}
+          {repairJob.logs.length > 0 &&
+            repairJob.logs.slice(-3).map((log, i, arr) => (
+              <Typography
+                key={`${repairJob.logs.length}-${i}`}
+                variant="caption"
+                sx={{
+                  fontFamily: "monospace",
+                  display: "block",
+                  mt: i === 0 && arr.length === 3 ? 0.5 : 0.25,
+                  wordBreak: "break-all",
+                  opacity: i === arr.length - 1 ? 1 : 0.65,
+                }}
+              >
+                {log}
+              </Typography>
+            ))}
         </Alert>
       )}
 
@@ -1244,7 +1284,9 @@ export default function EnvCheck() {
         </>
       )}
 
-      {tab === "repair" && (
+      {/* 修复中心：CSS 隐藏挂载（不条件卸载）——切换 Tab 不丢 AI 方案 /
+          资源扫描 / 安装痕迹等本地状态，返回时零重探 */}
+      <Box sx={{ display: tab === "repair" ? "block" : "none" }}>
         <RepairCenter
           pending={pendingEntries}
           repairDisabled={!!repairJob?.running}
@@ -1252,7 +1294,7 @@ export default function EnvCheck() {
           onRepair={startGenericRepair}
           onUninstall={startUninstall}
         />
-      )}
+      </Box>
 
       {(loading || refreshing) && reports.length === 0 ? (
         <Box sx={{ display: "flex", justifyContent: "center", mt: 8 }}>
