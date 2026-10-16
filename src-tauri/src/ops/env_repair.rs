@@ -1037,12 +1037,12 @@ fn register_and_start(target: &str, home: &str) -> Result<(), String> {
     let (svc, _port) = service_spec(target).unwrap();
     let script = match target {
         "mysql" => format!(
-            "net stop {svc} & sc delete {svc} & \"{}\" --install {svc} --defaults-file=\"{}\" & net start {svc}",
+            "net stop {svc} & taskkill /f /im mysqld.exe & ping -n 3 127.0.0.1 >nul & sc delete {svc} & \"{}\" --install {svc} --defaults-file=\"{}\" & net start {svc}",
             format!("{home}\\bin\\mysqld.exe"),
             mysql_ini_path(home)
         ),
         "redis" => format!(
-            "net stop {svc} & sc delete {svc} & \"{}\" --service-install \"{}\" --service-name {svc} & net start {svc}",
+            "net stop {svc} & taskkill /f /im redis-server.exe & ping -n 3 127.0.0.1 >nul & sc delete {svc} & \"{}\" --service-install \"{}\" --service-name {svc} & net start {svc}",
             format!("{home}\\redis-server.exe"),
             redis_conf_path(home)
         ),
@@ -1488,6 +1488,13 @@ async fn run_uninstall(
         .map(|(_, g)| format!("msiexec /x {g} /quiet /norestart"))
         .collect();
     parts.push(format!("net stop {svc}"));
+    // 进程未退出（InnoDB 落盘慢、服务 STOP_PENDING）就 sc delete 会得到
+    // 「服务已标记为删除」而失败，目录也会因文件被占用删不掉——优雅停服后
+    // 强杀残留进程，等句柄释放再注销
+    let proc_image = if target == "mysql" { "mysqld.exe" } else { "redis-server.exe" };
+    parts.push(format!("taskkill /f /im {proc_image}"));
+    // ping 当 sleep：timeout 命令在部分非交互上下文会拒绝等待
+    parts.push("ping -n 3 127.0.0.1 >nul".to_string());
     parts.push(format!("sc delete {svc}"));
     if remove_data {
         parts.push(format!("rmdir /s /q \"{install_dir}\""));
@@ -1507,9 +1514,20 @@ async fn run_uninstall(
 
     // ===== 复核 =====
     state.patch(|j| j.stage = "verify".into());
+    // sc delete 是「标记删除」，句柄全释放才真正消失——轮询几次再下结论
     let svc_gone = {
         let s = svc;
-        tokio::task::spawn_blocking(move || service_exists(s)).await.unwrap_or(true)
+        tokio::task::spawn_blocking(move || {
+            for _ in 0..5 {
+                if !service_exists(s) {
+                    return true;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            false
+        })
+        .await
+        .unwrap_or(true)
     };
     let dir_gone = !std::path::Path::new(&install_dir).exists();
     let msi_gone = if target == "mysql" {
