@@ -272,6 +272,12 @@ export const api = {
       "/api/mysql/config-file",
       { method: "POST", body: JSON.stringify({ content }) },
     ),
+  // 调整已有用户权限（先撤销现有授权再按档位重授，密码不变）
+  mysqlUserGrants: (user: string, host: string, privilege: "ro" | "rw" | "all", database: string) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/user-grants", {
+      method: "POST",
+      body: JSON.stringify({ user, host, privilege, database }),
+    }),
   startAll: () =>
     request<ActionResult[]>("/api/services/start-all", { method: "POST" }),
   stopAll: () =>

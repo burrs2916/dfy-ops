@@ -381,6 +381,16 @@ fn valid_name(s: &str) -> bool {
     !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+/// 权限档位对应的 GRANT 权限清单（新建用户与调整权限共用）。
+fn privilege_sql(level: &str) -> Option<&'static str> {
+    match level {
+        "ro" => Some("SELECT"),
+        "rw" => Some("SELECT, INSERT, UPDATE, DELETE"),
+        "all" => Some("ALL PRIVILEGES"),
+        _ => None,
+    }
+}
+
 /// POST /api/mysql/create-user —— 新建用户并按权限档授权（常用权限的表单化）。
 pub async fn create_user(
     State(state): State<Arc<AppState>>,
@@ -395,11 +405,9 @@ pub async fn create_user(
     if req.password.is_empty() {
         return Json(json!({ "ok": false, "error": "必须为用户设置密码" }));
     }
-    let priv_sql = match req.privilege.as_str() {
-        "ro" => "SELECT",
-        "rw" => "SELECT, INSERT, UPDATE, DELETE",
-        "all" => "ALL PRIVILEGES",
-        other => return Json(json!({ "ok": false, "error": format!("未知权限档：{other}") })),
+    let priv_sql = match privilege_sql(&req.privilege) {
+        Some(p) => p,
+        None => return Json(json!({ "ok": false, "error": format!("未知权限档：{}", req.privilege) })),
     };
     let on = if req.database == "*" {
         "*.*".to_string()
@@ -1114,9 +1122,109 @@ pub async fn save_config_file(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UserGrantsReq {
+    pub user: String,
+    pub host: String,
+    pub privilege: String,
+    pub database: String,
+}
+
+/// 从 SHOW GRANTS 结果行提取授权范围（ON 与 TO 之间，如 *.* / `db`.*）。
+/// 仅 USAGE 的全局行没有可撤销的权限；PROXY 授权不走 ALL 撤销语法，均跳过。
+fn grant_targets(rows: &[Vec<String>]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in rows {
+        let Some(line) = r.first() else { continue };
+        let Some(on_idx) = line.find(" ON ") else { continue };
+        let after = &line[on_idx + 4..];
+        let Some(to_idx) = after.find(" TO ") else { continue };
+        let privs = line[5..on_idx].trim();
+        let target = after[..to_idx].trim().to_string();
+        if target.is_empty() || privs.is_empty() || privs == "USAGE" || privs.contains("PROXY") {
+            continue;
+        }
+        if !out.contains(&target) {
+            out.push(target);
+        }
+    }
+    out
+}
+
+/// POST /api/mysql/user-grants —— 调整已有用户权限：按 SHOW GRANTS 的实际范围
+/// 逐一撤销，再按所选档位重新授权。密码保持不变（避免删了重建丢密码）。
+pub async fn user_grants(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UserGrantsReq>,
+) -> Json<serde_json::Value> {
+    if !valid_name(&req.user) {
+        return Json(json!({ "ok": false, "error": "用户名只能包含字母、数字、下划线、连字符" }));
+    }
+    if !req.host.chars().all(|c| c.is_ascii_alphanumeric() || "._-%".contains(c)) || req.host.is_empty() {
+        return Json(json!({ "ok": false, "error": "主机名只能包含字母、数字与 . _ - %" }));
+    }
+    let priv_sql = match privilege_sql(&req.privilege) {
+        Some(p) => p,
+        None => return Json(json!({ "ok": false, "error": format!("未知权限档：{}", req.privilege) })),
+    };
+    let on = if req.database == "*" {
+        "*.*".to_string()
+    } else if valid_name(&req.database) {
+        format!("`{}`.*", req.database)
+    } else {
+        return Json(json!({ "ok": false, "error": "库名含非法字符" }));
+    };
+    let cred = mysql_credential::load(&state.config_dir);
+    let st = state.clone();
+    let user = req.user.clone();
+    let host = req.host.clone();
+    let on_msg = on.clone();
+    let res = blocking(move || {
+        let (_, rows) = run_sql(
+            &st,
+            &cred,
+            &format!("SHOW GRANTS FOR {}@{}", sql_quote(&req.user), sql_quote(&req.host)),
+            None,
+        )?;
+        let mut stmts: Vec<String> = grant_targets(&rows)
+            .into_iter()
+            .map(|t| {
+                format!(
+                    "REVOKE ALL PRIVILEGES, GRANT OPTION ON {t} FROM {}@{}",
+                    sql_quote(&req.user),
+                    sql_quote(&req.host)
+                )
+            })
+            .collect();
+        stmts.push(format!(
+            "GRANT {priv_sql} ON {on} TO {}@{}",
+            sql_quote(&req.user),
+            sql_quote(&req.host)
+        ));
+        let sql = stmts.join("; ");
+        run_sql(&st, &cred, &sql, None).map(|_| ())
+    })
+    .await;
+    match res {
+        Ok(_) => {
+            let label = match req.privilege.as_str() {
+                "ro" => "只读",
+                "rw" => "读写",
+                _ => "全部权限",
+            };
+            state.repair.log(format!("MySQL 用户 {user}@{host} 权限已调整为 {label}"));
+            Json(json!({
+                "ok": true,
+                "message": format!("用户 {user}@{host} 权限已调整为「{label}」（范围 {on_msg}），密码保持不变"),
+            }))
+        }
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::tool_candidates;
+    use super::{grant_targets, tool_candidates};
 
     /// 候选顺序：平台目录顶层 bin → 一层嵌套 bin（zip 带顶层目录时主目录在
     /// 嵌套层，与安装管线 locate_home 同口径）→ MSI 常见位 → PATH 兜底。
@@ -1142,5 +1250,20 @@ mod tests {
         );
         assert_eq!(cands.last().unwrap(), "mysql.exe", "PATH 兜底必须最后");
         std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// SHOW GRANTS 解析：提取可撤销范围，跳过纯 USAGE 与 PROXY 行，范围去重。
+    #[test]
+    fn grant_targets_parses_scopes() {
+        let rows = vec![
+            vec!["GRANT USAGE ON *.* TO `app`@`%`".into()],
+            vec!["GRANT SELECT, INSERT ON `shop`.* TO `app`@`%`".into()],
+            vec!["GRANT ALL PRIVILEGES ON *.* TO `app`@`%` WITH GRANT OPTION".into()],
+            vec!["GRANT PROXY ON `other`@`localhost` TO `app`@`%`".into()],
+        ];
+        let targets = grant_targets(&rows);
+        assert_eq!(targets, vec!["`shop`.*", "*.*"]);
+        assert!(grant_targets(&[vec!["GRANT USAGE ON *.* TO `u`@`%`".into()]]).is_empty());
+        assert!(grant_targets(&[]).is_empty());
     }
 }
