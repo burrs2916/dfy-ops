@@ -422,7 +422,7 @@ pub async fn uninstall(
         target,
         input.remove_data,
         install_dir,
-        state.config_dir.join("backups").to_string_lossy().to_string(),
+        state.config_dir.to_string_lossy().to_string(),
         state.env_cache.clone(),
         state.repair.clone(),
     ) {

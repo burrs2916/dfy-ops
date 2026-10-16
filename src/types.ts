@@ -322,3 +322,10 @@ export interface MysqlVariableItem {
   name: string;
   value: string;
 }
+
+export interface MysqlBackupFile {
+  file: string;
+  sizeKb: number;
+  /** 修改时间（Unix 秒） */
+  modified: number;
+}

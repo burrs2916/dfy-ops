@@ -21,6 +21,7 @@ import type {
   GenericUninstallStart,
   MysqlCreateUserInput,
   MysqlDataPage,
+  MysqlBackupFile,
   MysqlOverview,
   MysqlQueryResult,
   MysqlTableInfo,
@@ -277,6 +278,27 @@ export const api = {
     request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/user-grants", {
       method: "POST",
       body: JSON.stringify({ user, host, privilege, database }),
+    }),
+  // 立即备份业务库（"*" = 全部非系统库）到工作目录 backups/
+  mysqlBackupNow: (database: string) =>
+    request<{ ok: boolean; file?: string; sizeKb?: number; databases?: number; message?: string; error?: string }>(
+      "/api/mysql/backup",
+      { method: "POST", body: JSON.stringify({ database }) },
+    ),
+  // 备份文件列表（时间倒序）
+  mysqlBackupsList: () =>
+    request<{ ok: boolean; files?: MysqlBackupFile[] }>("/api/mysql/backups"),
+  // 从备份文件恢复（前端强确认；后端仅接受备份目录内的文件名）
+  mysqlRestoreBackup: (file: string) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/restore", {
+      method: "POST",
+      body: JSON.stringify({ file }),
+    }),
+  // 当前筛选条件全量导出 CSV（后端写文件，UTF-8 BOM）
+  mysqlExportCsv: (body: { path: string; db: string; table: string; col?: string; kw?: string }) =>
+    request<{ ok: boolean; rows?: number; message?: string; error?: string }>("/api/mysql/export-csv", {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
   startAll: () =>
     request<ActionResult[]>("/api/services/start-all", { method: "POST" }),

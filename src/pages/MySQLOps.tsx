@@ -52,6 +52,8 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import SettingsIcon from "@mui/icons-material/Settings";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import TuneIcon from "@mui/icons-material/Tune";
+import BackupIcon from "@mui/icons-material/Backup";
+import RestoreIcon from "@mui/icons-material/Restore";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import DescriptionIcon from "@mui/icons-material/Description";
@@ -61,6 +63,7 @@ import AdminPanelSettingsIcon from "@mui/icons-material/AdminPanelSettings";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import type {
+  MysqlBackupFile,
   MysqlOverview,
   MysqlTableInfo,
   MysqlUserInfo,
@@ -70,6 +73,9 @@ import type {
 import MysqlTablePanel from "./MysqlTablePanel";
 
 const btnSx = { textTransform: "none" as const, whiteSpace: "nowrap" as const };
+
+/** 系统库清单：备份范围下拉排除（与后端 SYS_DATABASES 同口径） */
+const SYS_DBS = ["information_schema", "mysql", "performance_schema", "sys"];
 
 type RightTab = "data" | "schema" | "sql" | "users" | "server";
 
@@ -163,6 +169,12 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
   const [procsLoading, setProcsLoading] = useState(false);
   const [vars, setVars] = useState<MysqlVariableItem[] | null>(null);
   const [varsLoading, setVarsLoading] = useState(false);
+
+  // 备份与恢复（业务库一键备份 + 备份文件管理）
+  const [backups, setBackups] = useState<MysqlBackupFile[]>([]);
+  const [backupsLoading, setBackupsLoading] = useState(false);
+  const [backupDb, setBackupDb] = useState("*");
+  const [backupBusy, setBackupBusy] = useState(false);
 
   // my.ini 配置文件（服务器页在线编辑；保存由后端自动备份）
   const [iniPath, setIniPath] = useState<string | null>(null);
@@ -361,13 +373,67 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     }
   }, [iniContent, flash]);
 
+  const loadBackups = useCallback(async () => {
+    setBackupsLoading(true);
+    try {
+      const r = await api.mysqlBackupsList();
+      setBackups(r.files ?? []);
+    } catch {
+      setBackups([]);
+    } finally {
+      setBackupsLoading(false);
+    }
+  }, []);
+
+  const doBackup = useCallback(async () => {
+    setBackupBusy(true);
+    try {
+      const r = await api.mysqlBackupNow(backupDb);
+      if (r.ok) {
+        flash(r.message ?? "备份完成", "success");
+        void loadBackups();
+      } else {
+        flash(r.error ?? "备份失败", "error");
+      }
+    } catch (e) {
+      flash(`备份失败：${String(e)}`, "error");
+    } finally {
+      setBackupBusy(false);
+    }
+  }, [backupDb, flash, loadBackups]);
+
+  const restoreBackup = useCallback(
+    (f: MysqlBackupFile) => {
+      setConfirm({
+        title: "恢复备份",
+        content: `将使用备份文件 ${f.file}（${f.sizeKb} KB）恢复数据库。\n同名表的数据会被备份内容覆盖，此操作不可撤销。\n输入「恢复」以确认。`,
+        confirmText: "恢复",
+        action: async () => {
+          try {
+            const r = await api.mysqlRestoreBackup(f.file);
+            if (r.ok) {
+              flash(r.message ?? "恢复完成", "success");
+              void loadBackups();
+            } else {
+              flash(r.error ?? "恢复失败", "error");
+            }
+          } catch (e) {
+            flash(`恢复失败：${String(e)}`, "error");
+          }
+        },
+      });
+    },
+    [flash, loadBackups],
+  );
+
   useEffect(() => {
     if (rightTab === "server" && ov?.running) {
       void loadProcs();
       void loadVars();
       void loadIni();
+      void loadBackups();
     }
-  }, [rightTab, ov?.running, loadProcs, loadVars, loadIni]);
+  }, [rightTab, ov?.running, loadProcs, loadVars, loadIni, loadBackups]);
 
   const onImport = useCallback(async () => {
     let picked: string | null = null;
@@ -1115,6 +1181,100 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                             onSaved={(m) => flash(m, "success")}
                             onError={(e) => flash(e, "error")}
                           />
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                )}
+              </Stack>
+            )}
+
+            {rightTab === "server" && <Divider sx={{ my: 2 }} />}
+
+            {rightTab === "server" && (
+              <Stack spacing={1.5}>
+                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" rowGap={1}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 0.5 }}>
+                    <BackupIcon fontSize="small" /> 备份与恢复
+                  </Typography>
+                  <Box sx={{ flex: 1 }} />
+                  <FormControl size="small" sx={{ minWidth: 200 }}>
+                    <InputLabel>备份范围</InputLabel>
+                    <Select
+                      size="small"
+                      label="备份范围"
+                      value={backupDb}
+                      onChange={(e) => setBackupDb(e.target.value)}
+                    >
+                      <MenuItem value="*">全部业务库（跳过系统库）</MenuItem>
+                      {(ov?.databases ?? [])
+                        .filter((d) => !SYS_DBS.includes(d.toLowerCase()))
+                        .map((d) => (
+                          <MenuItem key={d} value={d}>
+                            {d}
+                          </MenuItem>
+                        ))}
+                    </Select>
+                  </FormControl>
+                  <Button
+                    size="small"
+                    variant="contained"
+                    startIcon={<BackupIcon />}
+                    disabled={backupBusy}
+                    onClick={() => void doBackup()}
+                    sx={btnSx}
+                  >
+                    {backupBusy ? "备份中…" : "立即备份"}
+                  </Button>
+                  <Button
+                    size="small"
+                    startIcon={<RefreshIcon />}
+                    onClick={() => void loadBackups()}
+                    disabled={backupsLoading}
+                    sx={btnSx}
+                  >
+                    刷新
+                  </Button>
+                </Stack>
+                <Alert severity="info" variant="outlined">
+                  备份保存到工作目录的 backups 文件夹，包含表结构、数据和存储过程；恢复会覆盖同名表数据，需输入「恢复」强确认。
+                </Alert>
+                {backupsLoading ? (
+                  <Typography variant="body2" color="text.secondary">
+                    加载中…
+                  </Typography>
+                ) : backups.length === 0 ? (
+                  <Typography variant="body2" color="text.secondary">
+                    暂无备份文件
+                  </Typography>
+                ) : (
+                  <TableContainer sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell sx={{ fontWeight: 700 }}>备份文件</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>大小</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>时间</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>操作</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {backups.map((f) => (
+                          <TableRow key={f.file} hover>
+                            <TableCell sx={{ fontFamily: "monospace" }}>{f.file}</TableCell>
+                            <TableCell>{f.sizeKb} KB</TableCell>
+                            <TableCell>{new Date(f.modified * 1000).toLocaleString()}</TableCell>
+                            <TableCell>
+                              <Button
+                                size="small"
+                                startIcon={<RestoreIcon />}
+                                onClick={() => restoreBackup(f)}
+                                sx={btnSx}
+                              >
+                                恢复
+                              </Button>
+                            </TableCell>
+                          </TableRow>
                         ))}
                       </TableBody>
                     </Table>

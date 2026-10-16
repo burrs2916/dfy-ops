@@ -5,6 +5,10 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControl,
   IconButton,
   InputLabel,
@@ -30,6 +34,8 @@ import CodeIcon from "@mui/icons-material/Code";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
 import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import ExpandLessIcon from "@mui/icons-material/ExpandLess";
+import FileDownloadIcon from "@mui/icons-material/FileDownload";
+import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import type { MysqlDataPage, MysqlQueryResult } from "../types";
 
@@ -66,6 +72,34 @@ export default function MysqlTablePanel({
   const [schemaKey, setSchemaKey] = useState<string | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [ddl, setDdl] = useState<string | null>(null);
+  // 点击行弹出的完整字段对照视图
+  const [detail, setDetail] = useState<{ columns: string[]; row: string[] } | null>(null);
+  const [exporting, setExporting] = useState(false);
+
+  // 当前筛选条件全量导出 CSV（后端循环查询写文件，带 BOM）
+  const exportCsv = async () => {
+    const path = await save({
+      defaultPath: `${table}.csv`,
+      filters: [{ name: "CSV", extensions: ["csv"] }],
+    });
+    if (!path) return;
+    setExporting(true);
+    try {
+      const r = await api.mysqlExportCsv({
+        path,
+        db,
+        table,
+        col: col || undefined,
+        kw: kw || undefined,
+      });
+      if (r.ok) onNotify(r.message ?? "导出完成", "success");
+      else onNotify(r.error ?? "导出失败", "error");
+    } catch (e) {
+      onNotify(`导出失败：${String(e)}`, "error");
+    } finally {
+      setExporting(false);
+    }
+  };
 
   const loadData = useCallback(
     async (p: number, s: { col: string; dir: "asc" | "desc" } | null, c: string, k: string) => {
@@ -347,7 +381,12 @@ export default function MysqlTablePanel({
               </TableHead>
               <TableBody>
                 {(data.rows ?? []).map((r, ri) => (
-                  <TableRow key={ri} hover>
+                  <TableRow
+                    key={ri}
+                    hover
+                    sx={{ cursor: "pointer" }}
+                    onClick={() => setDetail({ columns: data.columns ?? [], row: r })}
+                  >
                     {r.map((cell, ci) => (
                       <TableCell
                         key={ci}
@@ -360,7 +399,14 @@ export default function MysqlTablePanel({
                           textOverflow: "ellipsis",
                         }}
                       >
-                        {cell}
+                        {/* 超宽被省略的长值悬浮可看全文（NULL 短值无需提示） */}
+                        {cell !== "NULL" && cell.length > 40 ? (
+                          <Tooltip title={cell} placement="top-start" arrow>
+                            <span>{cell}</span>
+                          </Tooltip>
+                        ) : (
+                          cell
+                        )}
                       </TableCell>
                     ))}
                   </TableRow>
@@ -371,9 +417,18 @@ export default function MysqlTablePanel({
           {/* 分页脚 */}
           <Stack direction="row" spacing={1} alignItems="center">
             <Typography variant="caption" color="text.secondary">
-              共 {data.total ?? 0} 行 · 第 {data.page ?? page} / {totalPages} 页 · 每页 {PAGE_SIZE} 行
+              共 {data.total ?? 0} 行 · 第 {data.page ?? page} / {totalPages} 页 · 每页 {PAGE_SIZE} 行 · 点击行查看详情
             </Typography>
             <Box sx={{ flex: 1 }} />
+            <Button
+              size="small"
+              startIcon={<FileDownloadIcon />}
+              disabled={exporting}
+              onClick={exportCsv}
+              sx={{ textTransform: "none" }}
+            >
+              {exporting ? "导出中…" : "导出 CSV"}
+            </Button>
             <Button
               size="small"
               disabled={(data.page ?? page) <= 1 || loading}
@@ -403,6 +458,56 @@ export default function MysqlTablePanel({
       ) : (
         <Alert severity="info">{loading ? "查询中…" : "暂无数据（或筛选无结果）"}</Alert>
       )}
+
+      {/* 行详情：字段名 + 值逐行对照，长值完整换行显示 */}
+      <Dialog open={detail !== null} onClose={() => setDetail(null)} maxWidth="sm" fullWidth>
+        <DialogTitle sx={{ fontWeight: 700, fontSize: 15 }}>
+          行详情 · {db}.{table}
+        </DialogTitle>
+        <DialogContent dividers sx={{ p: 0 }}>
+          <Table size="small">
+            <TableBody>
+              {(detail?.columns ?? []).map((c, i) => (
+                <TableRow key={c}>
+                  <TableCell
+                    sx={{ width: 170, fontWeight: 700, fontFamily: "monospace", verticalAlign: "top" }}
+                  >
+                    {c}
+                  </TableCell>
+                  <TableCell
+                    sx={{
+                      fontFamily: "monospace",
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-all",
+                      color: detail?.row[i] === "NULL" ? "text.disabled" : undefined,
+                    }}
+                  >
+                    {detail?.row[i]}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            size="small"
+            startIcon={<ContentCopyIcon />}
+            onClick={() => {
+              const text = (detail?.columns ?? [])
+                .map((c, i) => `${c}\t${detail?.row[i] ?? ""}`)
+                .join("\n");
+              void navigator.clipboard?.writeText(text).catch(() => {});
+            }}
+            sx={{ textTransform: "none" }}
+          >
+            复制该行
+          </Button>
+          <Button size="small" onClick={() => setDetail(null)} sx={{ textTransform: "none" }}>
+            关闭
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Stack>
   );
 }

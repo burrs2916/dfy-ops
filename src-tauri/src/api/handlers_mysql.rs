@@ -217,6 +217,48 @@ fn run_sql_with(
     Ok((columns, rows))
 }
 
+/// 构造关键字模糊筛选的 WHERE 子句：指定列单列 LIKE，否则全列 OR LIKE
+/// （最多前 30 列，防止宽表语句爆炸）。kw 为空返回空串（无筛选）。
+fn like_where(
+    st: &AppState,
+    cred: &MysqlCredential,
+    db: &str,
+    table: &str,
+    col: Option<&str>,
+    kw: &str,
+) -> Result<String, String> {
+    if kw.is_empty() {
+        return Ok(String::new());
+    }
+    let like = sql_quote(&format!("%{kw}%"));
+    match col {
+        Some(c) => Ok(format!(" WHERE {} LIKE {like}", quote_ident(c))),
+        None => {
+            let (_, col_rows) = run_sql(
+                st,
+                cred,
+                &format!(
+                    "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
+                     WHERE TABLE_SCHEMA={} AND TABLE_NAME={} ORDER BY ORDINAL_POSITION LIMIT 30",
+                    sql_quote(db),
+                    sql_quote(table)
+                ),
+                None,
+            )?;
+            let conds: Vec<String> = col_rows
+                .iter()
+                .filter_map(|r| r.first().cloned())
+                .map(|c| format!("{} LIKE {like}", quote_ident(&c)))
+                .collect();
+            if conds.is_empty() {
+                Ok(String::new())
+            } else {
+                Ok(format!(" WHERE {}", conds.join(" OR ")))
+            }
+        }
+    }
+}
+
 /// GET /api/mysql/overview —— 连接信息 + 版本 + 库列表（服务未运行时其余字段降级）。
 pub async fn overview(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let running = blocking(|| crate::ops::env_repair::service_running("MySQL80")).await;
@@ -640,35 +682,7 @@ pub async fn data(State(state): State<Arc<AppState>>, Query(q): Query<DataQuery>
     let st = state.clone();
     let res = blocking(move || {
         let cred = mysql_credential::load(&st.config_dir);
-        // WHERE：指定列则单列 LIKE，否则全列 OR LIKE（最多前 30 列，防止宽表语句爆炸）
-        let mut where_sql = String::new();
-        if let Some(kw) = q.kw.as_deref().filter(|k| !k.is_empty()) {
-            let like = sql_quote(&format!("%{kw}%"));
-            match q.col.as_deref() {
-                Some(c) => where_sql = format!(" WHERE {} LIKE {like}", quote_ident(c)),
-                None => {
-                    let (_, col_rows) = run_sql(
-                        &st,
-                        &cred,
-                        &format!(
-                            "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
-                             WHERE TABLE_SCHEMA={} AND TABLE_NAME={} ORDER BY ORDINAL_POSITION LIMIT 30",
-                            sql_quote(&q.db),
-                            sql_quote(&q.table)
-                        ),
-                        None,
-                    )?;
-                    let conds: Vec<String> = col_rows
-                        .iter()
-                        .filter_map(|r| r.first().cloned())
-                        .map(|c| format!("{} LIKE {like}", quote_ident(&c)))
-                        .collect();
-                    if !conds.is_empty() {
-                        where_sql = format!(" WHERE {}", conds.join(" OR "));
-                    }
-                }
-            }
-        }
+        let where_sql = like_where(&st, &cred, &q.db, &q.table, q.col.as_deref(), q.kw.as_deref().unwrap_or(""))?;
         let order_sql = q
             .order
             .as_deref()
@@ -1208,6 +1222,301 @@ pub async fn user_grants(
                 "message": format!("用户 {user}@{host} 权限已调整为「{label}」（范围 {on_msg}），密码保持不变"),
             }))
         }
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+// ===== 备份与恢复（工作目录 backups/）=====
+
+/// 系统库清单：备份跳过（实例自带，无业务数据）。与卸载备份同一口径。
+const SYS_DATABASES: &[&str] = &["information_schema", "mysql", "performance_schema", "sys"];
+
+/// 备份目录：<工作目录>/backups。
+fn backups_dir(state: &AppState) -> std::path::PathBuf {
+    state.config_dir.join("backups")
+}
+
+/// 定位 mysqldump（与卸载备份同口径：平台目录顶层 bin → 嵌套 → MSI 常见位 → PATH）。
+fn dump_exe(state: &AppState) -> Result<String, String> {
+    let dir = registry_install_dir(state, "mysql");
+    crate::ops::env_repair::mysqldump_candidates(&dir)
+        .into_iter()
+        .find(|p| {
+            if p.contains('\\') {
+                std::path::Path::new(p).is_file()
+            } else {
+                // PATH 兜底：--version 能跑通即视为可用
+                std::process::Command::new(p)
+                    .arg("--version")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+            }
+        })
+        .ok_or_else(|| "未找到 mysqldump.exe，请确认 MySQL 已由平台安装".to_string())
+}
+
+/// mysqldump 连接参数（托管凭据；密码为空省略 -p，否则 CLI 挂起等输入）。
+fn dump_auth_args(cred: &MysqlCredential) -> Vec<String> {
+    let mut a = vec![
+        "-h127.0.0.1".to_string(),
+        format!("--port={}", cred.port),
+        format!("--user={}", cred.user),
+    ];
+    if !cred.password.is_empty() {
+        a.push(format!("-p{}", cred.password));
+    }
+    a
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BackupReq {
+    /// "*" = 全部业务库；否则为单个库名
+    pub database: String,
+}
+
+/// POST /api/mysql/backup —— 立即备份业务库（表结构 + 数据 + 例程）为 SQL 文件。
+pub async fn backup_now(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BackupReq>,
+) -> Json<serde_json::Value> {
+    if req.database != "*" && !valid_ident(&req.database) {
+        return Json(json!({ "ok": false, "error": "库名含非法字符" }));
+    }
+    let cred = mysql_credential::load(&state.config_dir);
+    let st = state.clone();
+    let database = req.database.clone();
+    let res = blocking(move || {
+        run_sql(&st, &cred, "SELECT 1", None)
+            .map_err(|e| format!("无法连接实例（服务未启动？）：{e}"))?;
+        let (_, rows) = run_sql(&st, &cred, "SHOW DATABASES", None)?;
+        let all: Vec<String> = rows.iter().filter_map(|r| r.first().cloned()).collect();
+        let dbs: Vec<String> = if database == "*" {
+            all.into_iter()
+                .filter(|d| !SYS_DATABASES.contains(&d.to_ascii_lowercase().as_str()))
+                .collect()
+        } else {
+            if !all.iter().any(|d| d == &database) {
+                return Err(format!("数据库 {database} 不存在"));
+            }
+            vec![database]
+        };
+        if dbs.is_empty() {
+            return Err("实例中没有可备份的业务数据库".to_string());
+        }
+        let exe = dump_exe(&st)?;
+        let dir = backups_dir(&st);
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建备份目录失败：{e}"))?;
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let out = dir.join(format!(
+            "mysql-biz-{}.sql",
+            crate::ops::env_repair::timestamp_utc(secs)
+        ));
+        let o = std::process::Command::new(&exe)
+            .args(dump_auth_args(&cred))
+            .args([
+                "--single-transaction",
+                "--routines",
+                "--triggers",
+                "--events",
+                "--databases",
+            ])
+            .args(&dbs)
+            .arg(format!("--result-file={}", out.display()))
+            .output()
+            .map_err(|e| format!("无法运行 mysqldump：{e}"))?;
+        if !o.status.success() {
+            let err = stderr_error_tail(&String::from_utf8_lossy(&o.stderr));
+            let _ = std::fs::remove_file(&out);
+            return Err(format!("mysqldump 导出失败：{err}"));
+        }
+        let size = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
+        if size == 0 {
+            let _ = std::fs::remove_file(&out);
+            return Err("备份文件为空，视为备份失败".to_string());
+        }
+        Ok::<_, String>((out.to_string_lossy().to_string(), size, dbs.len()))
+    })
+    .await;
+    match res {
+        Ok((file, size, n)) => {
+            state
+                .repair
+                .log(format!("MySQL 备份完成：{file}（{} KB，{n} 个业务库）", size / 1024));
+            Json(json!({
+                "ok": true,
+                "file": file,
+                "sizeKb": size / 1024,
+                "databases": n,
+                "message": format!("备份完成（{n} 个业务库，{} KB）", size / 1024),
+            }))
+        }
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+/// GET /api/mysql/backups —— 备份文件列表（按时间倒序）。
+pub async fn backups_list(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let dir = backups_dir(&state);
+    let mut files: Vec<serde_json::Value> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            let is_sql = p
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x.eq_ignore_ascii_case("sql"))
+                .unwrap_or(false);
+            if !is_sql {
+                continue;
+            }
+            let md = e.metadata().ok();
+            let modified = md
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            files.push(json!({
+                "file": p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                "sizeKb": md.as_ref().map(|m| m.len() / 1024).unwrap_or(0),
+                "modified": modified,
+            }));
+        }
+    }
+    files.sort_by_key(|f| -(f["modified"].as_u64().unwrap_or(0) as i64));
+    Json(json!({ "ok": true, "files": files }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RestoreReq {
+    pub file: String,
+}
+
+/// POST /api/mysql/restore —— 从备份文件恢复（前端强确认）。文件仅限备份目录
+/// 内的 .sql（拒绝路径穿越）；恢复会覆盖同名表数据。
+pub async fn restore(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RestoreReq>,
+) -> Json<serde_json::Value> {
+    if req.file.contains('/') || req.file.contains('\\') || req.file.contains("..") {
+        return Json(json!({ "ok": false, "error": "非法的备份文件名" }));
+    }
+    let dir = backups_dir(&state);
+    let path = dir.join(&req.file);
+    let dir_canon = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+    match path.canonicalize() {
+        Ok(p) if p.starts_with(&dir_canon) && p.is_file() => {}
+        _ => {
+            return Json(json!({ "ok": false, "error": "备份文件不存在或已移出备份目录" }))
+        }
+    }
+    let cred = mysql_credential::load(&state.config_dir);
+    let st = state.clone();
+    let file = req.file.clone();
+    let res = blocking(move || {
+        run_sql(&st, &cred, "SELECT 1", None)
+            .map_err(|e| format!("无法连接实例（服务未启动？）：{e}"))?;
+        let client = mysql_client(&st)?;
+        let f = std::fs::File::open(&path).map_err(|e| format!("无法读取备份文件：{e}"))?;
+        let mut cmd = std::process::Command::new(&client);
+        cmd.args([
+            "-h",
+            "127.0.0.1",
+            "-P",
+            &cred.port.to_string(),
+            "-u",
+            &cred.user,
+            "--default-character-set=utf8mb4",
+        ]);
+        if !cred.password.is_empty() {
+            cmd.arg(format!("-p{}", cred.password));
+        }
+        cmd.stdin(std::process::Stdio::from(f));
+        let out = cmd.output().map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
+        if !out.status.success() {
+            let tail = stderr_error_tail(&String::from_utf8_lossy(&out.stderr));
+            return Err(format!("恢复失败：{tail}"));
+        }
+        Ok::<_, String>(())
+    })
+    .await;
+    match res {
+        Ok(()) => {
+            state.repair.log(format!("MySQL 已从备份恢复：{file}"));
+            Json(json!({ "ok": true, "message": format!("已从 {file} 恢复完成（同名表数据已被覆盖）") }))
+        }
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExportCsvReq {
+    /// 保存路径（前端保存对话框选择）
+    pub path: String,
+    pub db: String,
+    pub table: String,
+    #[serde(default)]
+    pub col: String,
+    #[serde(default)]
+    pub kw: String,
+}
+
+/// CSV 字段转义：含逗号/引号/换行时用引号包裹并翻倍引号。
+fn csv_field(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// POST /api/mysql/export-csv —— 当前筛选条件全量导出 CSV（UTF-8 BOM，
+/// Excel 直接打开中文不乱码）。
+pub async fn export_csv(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExportCsvReq>,
+) -> Json<serde_json::Value> {
+    if !valid_ident(&req.db) || !valid_ident(&req.table) {
+        return Json(json!({ "ok": false, "error": "库/表名含非法字符" }));
+    }
+    if !req.col.is_empty() && !valid_ident(&req.col) {
+        return Json(json!({ "ok": false, "error": "筛选列名含非法字符" }));
+    }
+    match std::path::Path::new(&req.path).parent() {
+        Some(p) if p.is_dir() => {}
+        _ => return Json(json!({ "ok": false, "error": format!("保存目录不存在：{}", req.path) })),
+    }
+    let cred = mysql_credential::load(&state.config_dir);
+    let st = state.clone();
+    let res = blocking(move || {
+        let where_sql = like_where(
+            &st,
+            &cred,
+            &req.db,
+            &req.table,
+            if req.col.is_empty() { None } else { Some(&req.col) },
+            &req.kw,
+        )?;
+        let table_ref = format!("{}.{}", quote_ident(&req.db), quote_ident(&req.table));
+        let (columns, rows) =
+            run_sql(&st, &cred, &format!("SELECT * FROM {table_ref}{where_sql}"), None)?;
+        let mut buf = String::from("\u{feff}");
+        buf.push_str(&columns.iter().map(|c| csv_field(c)).collect::<Vec<_>>().join(","));
+        buf.push('\n');
+        for r in &rows {
+            buf.push_str(&r.iter().map(|v| csv_field(v)).collect::<Vec<_>>().join(","));
+            buf.push('\n');
+        }
+        std::fs::write(&req.path, buf.as_bytes()).map_err(|e| format!("写入文件失败：{e}"))?;
+        Ok::<_, String>(rows.len())
+    })
+    .await;
+    match res {
+        Ok(n) => Json(json!({ "ok": true, "rows": n, "message": format!("已导出 {n} 行") })),
         Err(e) => Json(json!({ "ok": false, "error": e })),
     }
 }

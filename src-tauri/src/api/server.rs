@@ -274,6 +274,22 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::post(handlers_mysql::save_config_file),
         )
         .route(
+            "/api/mysql/backup",
+            axum::routing::post(handlers_mysql::backup_now),
+        )
+        .route(
+            "/api/mysql/backups",
+            axum::routing::get(handlers_mysql::backups_list),
+        )
+        .route(
+            "/api/mysql/restore",
+            axum::routing::post(handlers_mysql::restore),
+        )
+        .route(
+            "/api/mysql/export-csv",
+            axum::routing::post(handlers_mysql::export_csv),
+        )
+        .route(
             "/api/settings/app",
             axum::routing::get(handlers::get_app_settings),
         )

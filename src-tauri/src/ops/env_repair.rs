@@ -1337,8 +1337,8 @@ pub fn mysql_msi_entries() -> Vec<(String, String)> {
 /// 卸载任务（维护）：mysql/redis = 停止并注销 Windows 服务，可选删除安装目录
 /// （含数据——必须由用户在弹窗里显式勾选，数据库数据删除后不可恢复）；
 /// java = 枚举注册表 MSI 条目后 msiexec /x 静默卸载（remove_data 不适用）。
-/// mysql 勾选删数据时，删除前先自动备份全部数据库为单个 SQL 文件
-/// （表结构+数据+例程，落 backup_dir；备份失败中止删除，数据分毫不动）。
+/// mysql 勾选删数据时，删除前先自动备份全部非系统数据库为单个 SQL 文件
+/// （表结构+数据+例程，落 <config_dir>/backups；备份失败中止删除，数据分毫不动）。
 /// install_dir 与安装管线同源（服务注册表 installDir），保证装、卸口径一致。
 /// 成败以执行后的重探为准（服务不存在时 net stop/sc delete 的报错与退出码不作数）。
 #[cfg(target_os = "windows")]
@@ -1346,7 +1346,7 @@ pub fn start_uninstall(
     target: &'static str,
     remove_data: bool,
     install_dir: String,
-    backup_dir: String,
+    config_dir: String,
     env_cache: EnvCache,
     state: Arc<RepairState>,
 ) -> Result<(), String> {
@@ -1369,7 +1369,7 @@ pub fn start_uninstall(
         job.logs.clear();
     }
     tokio::spawn(async move {
-        run_uninstall(state, target, remove_data, install_dir, backup_dir, env_cache).await;
+        run_uninstall(state, target, remove_data, install_dir, config_dir, env_cache).await;
     });
     Ok(())
 }
@@ -1380,7 +1380,7 @@ pub fn start_uninstall(
     target: &'static str,
     _remove_data: bool,
     _install_dir: String,
-    _backup_dir: String,
+    _config_dir: String,
     _env_cache: EnvCache,
     _state: Arc<RepairState>,
 ) -> Result<(), String> {
@@ -1396,7 +1396,7 @@ async fn run_uninstall(
     target: &'static str,
     remove_data: bool,
     install_dir: String,
-    backup_dir: String,
+    config_dir: String,
     env_cache: EnvCache,
 ) {
     if target == "java" {
@@ -1407,24 +1407,27 @@ async fn run_uninstall(
     let (svc, _port) = service_spec(target).unwrap();
     state.log(format!("开始卸载 {label}（服务 {svc}，目录 {install_dir}）"));
 
-    // ===== 数据安全闸门：mysql 勾选删数据时，先备份全部数据库为 SQL 文件 =====
+    // ===== 数据安全闸门：mysql 勾选删数据时，先备份全部非系统数据库为 SQL 文件 =====
     // 备份失败 = 数据可能无法恢复 → 直接中止删除（数据分毫不动），绝无侥幸
     if target == "mysql" && remove_data {
         state.patch(|j| j.stage = "backup".into());
-        state.log("即将删除数据目录——正在先把全部数据库（表结构 + 数据 + 例程）备份为 SQL 文件…");
+        state.log("即将删除数据目录——正在先把全部非系统数据库（表结构 + 数据 + 例程）备份为 SQL 文件（mysql/sys 等系统库跳过）…");
         let install_dir_for_backup = install_dir.clone();
-        let backup_dir_for_backup = backup_dir.clone();
+        let config_dir_for_backup = config_dir.clone();
         let b = tokio::task::spawn_blocking(move || {
-            backup_mysql_before_delete(&install_dir_for_backup, &backup_dir_for_backup)
+            backup_mysql_before_delete(&install_dir_for_backup, &config_dir_for_backup)
         })
         .await;
         match b {
-            Ok(Ok(path)) => {
+            Ok(Ok(Some(path))) => {
                 let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 state.log(format!(
-                    "备份完成：{path}（{} KB）。删除后可用 mysql < 该文件恢复全部数据",
+                    "备份完成：{path}（{} KB）。删除后可用 mysql < 该文件恢复全部业务数据",
                     size / 1024
                 ));
+            }
+            Ok(Ok(None)) => {
+                state.log("实例中没有非系统数据库，无需备份，继续删除");
             }
             Ok(Err(e)) => {
                 finish(
@@ -1627,7 +1630,8 @@ fn mysql_data_initialized(home: &str) -> bool {
 
 /// UNIX 秒 → UTC "YYYYmmdd-HHMMSS"（civil_from_days 算法，不引时间库）。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn timestamp_utc(secs: u64) -> String {
+/// Unix 秒 → "YYYYMMDD-HHMMSS"（UTC，文件名安全）。
+pub(crate) fn timestamp_utc(secs: u64) -> String {
     let days = (secs / 86400) as i64;
     let rem = secs % 86400;
     let (h, m, s) = (rem / 3600, rem % 3600 / 60, rem % 60);
@@ -1648,7 +1652,8 @@ fn timestamp_utc(secs: u64) -> String {
 /// 带顶层目录时主目录在嵌套层，与 locate_home 同口径）→ MySQL Installer 常见
 /// 安装位 → PATH（平台无关字符串生成 + 嵌套实扫，供测试与查找共用）。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn mysqldump_candidates(install_dir: &str) -> Vec<String> {
+/// mysqldump 候选：平台目录顶层 bin → 嵌套子目录 → MSI 常见位 → PATH。
+pub(crate) fn mysqldump_candidates(install_dir: &str) -> Vec<String> {
     let bin = |base: &std::path::Path| {
         base.join("bin").join("mysqldump.exe").to_string_lossy().to_string()
     };
@@ -1669,12 +1674,43 @@ fn mysqldump_candidates(install_dir: &str) -> Vec<String> {
     out
 }
 
-/// 删除前的数据保险：mysqldump 全库导出（表结构 + 数据 + 例程 + 触发器）为单个
-/// SQL 文件，落 backup_dir。服务未运行时先经 UAC 启动。任何一步失败都返回 Err
-/// （调用方据此中止删除——宁可卸载不成，不可数据白丢）。
+/// 系统数据库清单：卸载前备份跳过这些（实例自带，无业务数据）。
 #[cfg(target_os = "windows")]
-fn backup_mysql_before_delete(install_dir: &str, backup_dir: &str) -> Result<String, String> {
-    // 1. 定位 mysqldump
+const MYSQL_SYS_DBS: &[&str] = &["information_schema", "mysql", "performance_schema", "sys"];
+
+/// 由 mysqldump 候选路径推导同目录 mysql.exe 客户端路径（枚举业务库用）。
+#[cfg(target_os = "windows")]
+fn mysql_client_from_dump(p: &str) -> String {
+    if p.ends_with("mysqldump.exe") {
+        p.replace("mysqldump.exe", "mysql.exe")
+    } else if p.ends_with("mysqldump") {
+        p.replace("mysqldump", "mysql")
+    } else {
+        p.to_string()
+    }
+}
+
+/// 连接认证参数：优先平台托管凭据（config/mysql_credential.json），未托管时
+/// 兜底 root 无密码。密码为空必须省略 --password，否则 CLI 会挂起等输入。
+#[cfg(target_os = "windows")]
+fn mysql_auth_args(port: u16, user: &str, password: &str) -> Vec<String> {
+    let mut a = vec![
+        "-h127.0.0.1".to_string(),
+        format!("--port={port}"),
+        format!("--user={user}"),
+    ];
+    if !password.is_empty() {
+        a.push(format!("--password={password}"));
+    }
+    a
+}
+
+/// 卸载前备份（数据保险）：仅导出非系统数据库（表结构 + 数据 + 例程 + 触发器）
+/// 为单个 SQL 文件，落 <工作目录>/backups。服务未运行时先经 UAC 启动。任何一步
+/// 失败都返回 Err（调用方据此中止删除——宁可卸载不成，不可数据白丢）。
+#[cfg(target_os = "windows")]
+fn backup_mysql_before_delete(install_dir: &str, config_dir: &str) -> Result<Option<String>, String> {
+    // 1. 定位 mysqldump 与同目录 mysql.exe 客户端
     let dump_exe = mysqldump_candidates(install_dir)
         .into_iter()
         .find(|p| {
@@ -1693,6 +1729,18 @@ fn backup_mysql_before_delete(install_dir: &str, backup_dir: &str) -> Result<Str
             "未找到 mysqldump.exe（安装目录与常见 MySQL Server 路径均无）。请手动备份数据目录后再执行删除"
                 .to_string()
         })?;
+    let dump_client = mysqldump_candidates(install_dir)
+        .into_iter()
+        .find(|p| {
+            let c = mysql_client_from_dump(p);
+            if c.contains('\\') {
+                std::path::Path::new(&c).is_file()
+            } else {
+                std::process::Command::new(&c).arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
+            }
+        })
+        .map(|p| mysql_client_from_dump(&p))
+        .ok_or_else(|| "未找到 mysql.exe 客户端，无法枚举数据库清单".to_string())?;
 
     // 2. 确保服务在运行（mysqldump 需要连接实例；未运行则 UAC 启动后等就绪）
     if !crate::ops::health::check_tcp("127.0.0.1", 3306, 800) {
@@ -1715,40 +1763,61 @@ fn backup_mysql_before_delete(install_dir: &str, backup_dir: &str) -> Result<Str
         }
     }
 
-    // 3. 全库导出：--single-transaction 保证一致性快照不锁库；--result-file 直写
-    //    文件避免 shell 重定向的编码问题（UTF-8 原样落盘）
-    std::fs::create_dir_all(backup_dir).map_err(|e| format!("创建备份目录 {backup_dir} 失败：{e}"))?;
+    // 3. 枚举非系统数据库（SHOW DATABASES 减系统库）
+    let cred = crate::ops::mysql_credential::load(std::path::Path::new(config_dir));
+    let enum_out = std::process::Command::new(&dump_client)
+        .args(mysql_auth_args(cred.port, &cred.user, &cred.password))
+        .args(["-B", "-e", "SHOW DATABASES"])
+        .output()
+        .map_err(|e| format!("无法运行 mysql.exe 枚举数据库：{e}"))?;
+    if !enum_out.status.success() {
+        let err = String::from_utf8_lossy(&enum_out.stderr).trim().to_string();
+        return Err(format!("枚举数据库失败（检查连接凭据）：{err}"));
+    }
+    let dbs: Vec<String> = String::from_utf8_lossy(&enum_out.stdout)
+        .lines()
+        .skip(1) // -B 批量模式首行是列名 Database
+        .map(|l| l.trim().to_string())
+        .filter(|d| !d.is_empty() && !MYSQL_SYS_DBS.contains(&d.to_ascii_lowercase().as_str()))
+        .collect();
+    if dbs.is_empty() {
+        return Ok(None);
+    }
+
+    // 4. 按库导出：--databases 带建库语句；--single-transaction 一致性快照不锁库；
+    //    --result-file 直写文件避免 shell 重定向的编码问题（UTF-8 原样落盘）
+    let backup_dir = std::path::Path::new(config_dir).join("backups");
+    std::fs::create_dir_all(&backup_dir).map_err(|e| format!("创建备份目录 {} 失败：{e}", backup_dir.display()))?;
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let out_file = std::path::Path::new(backup_dir).join(format!("mysql-{}.sql", timestamp_utc(secs)));
+    let out_file = backup_dir.join(format!("mysql-biz-{}.sql", timestamp_utc(secs)));
     let out = std::process::Command::new(&dump_exe)
+        .args(mysql_auth_args(cred.port, &cred.user, &cred.password))
         .args([
-            "-uroot",
-            "--all-databases",
             "--single-transaction",
             "--routines",
             "--triggers",
             "--events",
-            format!("--result-file={}", out_file.display()).as_str(),
+            "--databases",
         ])
+        .args(&dbs)
+        .arg(format!("--result-file={}", out_file.display()))
         .output()
         .map_err(|e| format!("无法运行 mysqldump：{e}"))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).to_string();
         let err = stderr.trim();
         let _ = std::fs::remove_file(&out_file);
-        return Err(format!(
-            "mysqldump 导出失败：{err}（MSI 版若设过 root 密码，请手动备份后重试）"
-        ));
+        return Err(format!("mysqldump 导出失败：{err}"));
     }
     let size = std::fs::metadata(&out_file).map(|m| m.len()).unwrap_or(0);
     if size == 0 {
         let _ = std::fs::remove_file(&out_file);
         return Err("备份文件为空，视为备份失败".to_string());
     }
-    Ok(out_file.to_string_lossy().to_string())
+    Ok(Some(out_file.to_string_lossy().to_string()))
 }
 
 /// 收尾：更新任务终态 + 清空环境检查缓存（下一次 /api/env 全量实测）。
