@@ -741,7 +741,10 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
           </Paper>
 
           {/* ===== 右栏：表数据 / 表结构 / SQL 控制台 / 用户与权限 / 服务器 ===== */}
-          <Paper variant="outlined" sx={{ flex: 1, minWidth: 0, p: 2 }}>
+          <Paper
+            variant="outlined"
+            sx={{ flex: 1, minWidth: 0, p: 2, display: "flex", flexDirection: "column", overflow: "hidden" }}
+          >
             <Tabs value={rightTab} onChange={(_, v: RightTab) => setRightTab(v)} variant="scrollable" scrollButtons="auto">
               <Tab value="data" icon={<TableChartIcon fontSize="small" />} iconPosition="start" label="表数据" />
               <Tab value="schema" icon={<SchemaIcon fontSize="small" />} iconPosition="start" label="表结构" />
@@ -757,7 +760,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
             )}
 
             {(rightTab === "data" || rightTab === "schema") && db && table && (
-              <>
+              <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", minWidth: 0 }}>
                 {/* 表工具条：当前表 + 维护操作 */}
                 <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.5 }} flexWrap="wrap" rowGap={1}>
                   <Chip size="small" icon={<StorageIcon />} label={`${db}.${table}`} sx={{ fontFamily: "monospace" }} />
@@ -776,7 +779,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                   </Button>
                 </Stack>
                 <MysqlTablePanel db={db} table={table} view={rightTab === "schema" ? "schema" : "data"} onNotify={flash} />
-              </>
+              </Box>
             )}
 
             {rightTab === "sql" && (

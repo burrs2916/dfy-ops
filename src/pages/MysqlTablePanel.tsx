@@ -162,7 +162,7 @@ export default function MysqlTablePanel({
 
   if (view === "schema") {
     return (
-      <Stack spacing={1.5} sx={{ mt: 1.5 }}>
+    <Stack spacing={1.5} sx={{ mt: 1.5, flex: 1, minHeight: 0 }}>
         <Stack direction="row" spacing={1} alignItems="center">
           <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
             {table} · 表结构
@@ -192,7 +192,7 @@ export default function MysqlTablePanel({
             加载中…
           </Typography>
         ) : schema?.ok ? (
-          <TableContainer sx={{ maxHeight: 620, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
+          <TableContainer sx={{ flex: 1, minHeight: 0, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
             <Table size="small" stickyHeader>
               <TableHead>
                 <TableRow>
@@ -224,7 +224,7 @@ export default function MysqlTablePanel({
   }
 
   return (
-    <Stack spacing={1} sx={{ mt: 1.5 }}>
+    <Stack spacing={1} sx={{ mt: 1.5, flex: 1, minHeight: 0 }}>
       {/* 数据为主角：筛选默认收起，激活时在标题行显示条件徽标（可一键清除） */}
       <Stack direction="row" spacing={1} alignItems="center">
         {kw && (
@@ -325,7 +325,8 @@ export default function MysqlTablePanel({
 
       {data?.ok ? (
         <>
-          <TableContainer sx={{ maxHeight: 620, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
+          {/* 表格填满页签内的剩余布局区域：表头 sticky 常驻，区域内滚动（对齐 Navicat 常规布局） */}
+          <TableContainer sx={{ flex: 1, minHeight: 0, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
             <Table size="small" stickyHeader>
               <TableHead>
                 <TableRow>
