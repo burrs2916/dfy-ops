@@ -39,8 +39,8 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import type { MysqlDataPage, MysqlQueryResult } from "../types";
 
-// 与后端 data 接口单页上限一致：一次拉满 200 行，观感接近 Navicat 打开表
-const PAGE_SIZE = 200;
+// 单页行数可选：默认 100，大表不至于一页塞太多；后端单页上限 200
+const PAGE_SIZES = [50, 100, 200] as const;
 
 export type TableView = "data" | "schema";
 
@@ -60,6 +60,8 @@ export default function MysqlTablePanel({
   onNotify: (text: string, severity: "success" | "error") => void;
 }) {
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState<number>(100);
+  const [jump, setJump] = useState("");
   const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
   const [colInput, setColInput] = useState("");
   const [kwInput, setKwInput] = useState("");
@@ -102,14 +104,20 @@ export default function MysqlTablePanel({
   };
 
   const loadData = useCallback(
-    async (p: number, s: { col: string; dir: "asc" | "desc" } | null, c: string, k: string) => {
+    async (
+      p: number,
+      s: { col: string; dir: "asc" | "desc" } | null,
+      c: string,
+      k: string,
+      size?: number,
+    ) => {
       setLoading(true);
       try {
         const r = await api.mysqlData({
           db,
           table,
           page: p,
-          size: PAGE_SIZE,
+          size: size ?? pageSize,
           order: s?.col,
           dir: s?.dir,
           col: c || undefined,
@@ -127,7 +135,7 @@ export default function MysqlTablePanel({
         setLoading(false);
       }
     },
-    [db, table, onNotify],
+    [db, table, onNotify, pageSize],
   );
 
   // 换表：重置浏览状态 + 拉第一页
@@ -139,6 +147,7 @@ export default function MysqlTablePanel({
     setCol("");
     setKw("");
     setDdl(null);
+    setJump("");
     void loadData(1, null, "", "");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [db, table]);
@@ -192,7 +201,25 @@ export default function MysqlTablePanel({
     void loadData(1, next, col, kw);
   };
 
-  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / PAGE_SIZE));
+  const totalPages = Math.max(1, Math.ceil((data?.total ?? 0) / pageSize));
+
+  // 跳转指定页（越界自动收敛）
+  const gotoPage = () => {
+    const n = parseInt(jump, 10);
+    if (!Number.isFinite(n) || n === 0) return;
+    const p = Math.min(Math.max(n, 1), totalPages);
+    setPage(p);
+    setJump("");
+    void loadData(p, sort, col, kw);
+  };
+
+  // 每页行数切换：回到第 1 页重新拉取
+  const changePageSize = (n: number) => {
+    setPageSize(n);
+    setPage(1);
+    setJump("");
+    void loadData(1, sort, col, kw, n);
+  };
 
   if (view === "schema") {
     return (
@@ -417,9 +444,21 @@ export default function MysqlTablePanel({
           {/* 分页脚 */}
           <Stack direction="row" spacing={1} alignItems="center">
             <Typography variant="caption" color="text.secondary">
-              共 {data.total ?? 0} 行 · 第 {data.page ?? page} / {totalPages} 页 · 每页 {PAGE_SIZE} 行 · 点击行查看详情
+              共 {data.total ?? 0} 行 · 第 {data.page ?? page} / {totalPages} 页 · 点击行查看详情
             </Typography>
             <Box sx={{ flex: 1 }} />
+            <Select
+              size="small"
+              value={pageSize}
+              onChange={(e) => changePageSize(Number(e.target.value))}
+              sx={{ height: 32, fontSize: 13 }}
+            >
+              {PAGE_SIZES.map((n) => (
+                <MenuItem key={n} value={n}>
+                  {n} 行/页
+                </MenuItem>
+              ))}
+            </Select>
             <Button
               size="small"
               startIcon={<FileDownloadIcon />}
@@ -452,6 +491,20 @@ export default function MysqlTablePanel({
               sx={{ textTransform: "none" }}
             >
               下一页
+            </Button>
+            <TextField
+              size="small"
+              placeholder="页码"
+              sx={{ width: 76 }}
+              inputProps={{ inputMode: "numeric", style: { textAlign: "center", fontSize: 13 } }}
+              value={jump}
+              onChange={(e) => setJump(e.target.value.replace(/\D/g, ""))}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") gotoPage();
+              }}
+            />
+            <Button size="small" disabled={loading} onClick={gotoPage} sx={{ textTransform: "none" }}>
+              跳转
             </Button>
           </Stack>
         </>
