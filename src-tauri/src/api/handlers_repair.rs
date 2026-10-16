@@ -210,10 +210,12 @@ pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_
                     .map(|(a, b, c)| format!("{a}.{b}.{c}"))
                     .or_else(crate::ops::env_repair::java_msi_version_label);
                 let ok = crate::ops::env_repair::java_home_configured(dir.as_deref());
+                // PATH 配置态只在平台托管目录存在时评估（zip 管线管的）；
+                // MSI 装的 java 由 FeatureEnvironment 自动配系统 PATH，不评不会误报缺失
                 let path_ok = dir
                     .as_ref()
                     .map(|d| crate::ops::env_repair::user_path_has(&format!("{d}\\bin")))
-                    .unwrap_or(false);
+                    .unwrap_or(true);
                 (dir, ver, ok, path_ok)
             })
             .await

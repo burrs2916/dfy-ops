@@ -1133,7 +1133,10 @@ function RepairCenter({
 
       {/* ===== 数据库运维（MySQL）：CSS 隐藏挂载，独立功能域 ===== */}
       <Box sx={{ display: subTab === "mysql" ? undefined : "none" }}>
-        <MySQLOps />
+        <MySQLOps
+          active={subTab === "mysql"}
+          mysqlInstalled={installedOf("mysql")?.serviceInstalled ?? false}
+        />
       </Box>
 
       {/* ===== 环境问题与 AI 方案（CSS 隐藏挂载：切页不丢 AI 方案卡与追问输入） ===== */}

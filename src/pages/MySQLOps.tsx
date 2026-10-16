@@ -48,7 +48,7 @@ const btnSx = { textTransform: "none" as const, whiteSpace: "nowrap" as const };
 /** SQL 控制台结果最多渲染行数（防止大结果集卡死表格） */
 const MAX_ROWS = 200;
 
-export default function MySQLOps() {
+export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; mysqlInstalled: boolean }) {
   const [ov, setOv] = useState<MysqlOverview | null>(null);
   const [ovLoading, setOvLoading] = useState(true);
   const [notice, setNotice] = useState<{ text: string; severity: "success" | "error" } | null>(null);
@@ -89,12 +89,17 @@ export default function MySQLOps() {
     }
   }, [flash]);
 
+  // 页面可见（子页签切到「数据库运维」）即刷新连接信息——面板是 CSS 隐藏挂载，
+  // mount 一次后不重走 useEffect，切页刷新才能反映安装页里刚做的启停
   useEffect(() => {
-    void refreshOverview();
+    if (active) void refreshOverview();
+  }, [active, refreshOverview]);
+
+  useEffect(() => {
     return () => {
       if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
     };
-  }, [refreshOverview]);
+  }, []);
 
   // 选中库后拉取表列表
   useEffect(() => {
@@ -216,6 +221,13 @@ export default function MySQLOps() {
 
   return (
     <Stack spacing={2}>
+      {/* MySQL 未安装：显示引导，隐藏全部操作（启停/密码/导入都无从谈起） */}
+      {!mysqlInstalled && (
+        <Alert severity="info">
+          MySQL 尚未安装——请先切到「安装与维护」页签安装 MySQL，安装完成后回到本页进行数据库运维。
+        </Alert>
+      )}
+
       {/* ===== 连接信息与快捷操作 ===== */}
       <Paper variant="outlined" sx={{ p: 2 }}>
         <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap" rowGap={1}>
@@ -250,7 +262,7 @@ export default function MySQLOps() {
             >
               刷新
             </Button>
-            {running ? (
+            {mysqlInstalled && (running ? (
               <Button
                 size="small"
                 variant="outlined"
@@ -273,7 +285,7 @@ export default function MySQLOps() {
               >
                 启动服务
               </Button>
-            )}
+            ))}
             <Button
               size="small"
               variant="outlined"
@@ -314,7 +326,8 @@ export default function MySQLOps() {
         )}
       </Paper>
 
-      {running && (
+      {/* ===== 主区块：CSS 隐藏挂载（停止服务不卸载，SQL 输入/结果/选中库保留） ===== */}
+      <Box sx={{ display: running ? undefined : "none" }}>
         <Stack direction="row" spacing={2} alignItems="stretch" sx={{ alignItems: "flex-start" }}>
           {/* ===== 左栏：库 / 表浏览 ===== */}
           <Paper
@@ -425,7 +438,7 @@ export default function MySQLOps() {
                   value={sql}
                   onChange={(e) => setSql(e.target.value)}
                   placeholder={db ? `在 ${db} 中执行，如 SELECT * FROM 表名 LIMIT 100` : "输入 SQL（选中左侧库后自动在该库执行）"}
-                  sx={{ fontFamily: "monospace" }}
+                  sx={{ "& .MuiInputBase-input": { fontFamily: "monospace" } }}
                 />
                 <Stack direction="row" spacing={1} alignItems="center">
                   <Button
@@ -512,7 +525,7 @@ export default function MySQLOps() {
             )}
           </Paper>
         </Stack>
-      )}
+      </Box>
 
       <PasswordDialog
         open={pwdOpen}
