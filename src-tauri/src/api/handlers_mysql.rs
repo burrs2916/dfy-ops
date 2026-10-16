@@ -686,24 +686,14 @@ pub async fn data(State(state): State<Arc<AppState>>, Query(q): Query<DataQuery>
             .and_then(|r| r.first().and_then(|v| v.parse::<u64>().ok()))
             .unwrap_or(0);
         let offset = (q.page - 1) * q.size;
-        let (_, rows) = run_sql(
+        // run_sql 首个元组元素就是 -B 输出的列名行；此前误取 LIMIT 0 查询的
+        // 行结果（恒为空）导致表头永远渲染不出来
+        let (columns, rows) = run_sql(
             &st,
             &cred,
             &format!("SELECT * FROM {table_ref}{where_sql}{order_sql} LIMIT {offset},{}", q.size),
             None,
         )?;
-        // 列名单独取（SELECT * 的 header 行就是列名）
-        let (_, header_rows) = run_sql(
-            &st,
-            &cred,
-            &format!("SELECT * FROM {table_ref} LIMIT 0"),
-            None,
-        )?;
-        let columns: Vec<String> = header_rows
-            .iter()
-            .next()
-            .map(|r| r.clone())
-            .unwrap_or_default();
         Ok::<_, String>((columns, rows, total))
     })
     .await;
