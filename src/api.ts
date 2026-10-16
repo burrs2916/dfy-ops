@@ -20,7 +20,9 @@ import type {
   ServiceStatus,
   GenericUninstallStart,
   MysqlCreateUserInput,
+  MysqlDataPage,
   MysqlOverview,
+  MysqlQueryResult,
   MysqlTableInfo,
   MysqlUserInfo,
   SqlResult,
@@ -174,6 +176,62 @@ export const api = {
     request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/password", {
       method: "POST",
       body: JSON.stringify({ current, next }),
+    }),
+  // ===== 库/表维护与浏览（成熟运维能力） =====
+  mysqlCreateDb: (name: string) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/create-db", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  // 删库：后端先 mysqldump 自动备份，备份失败自动中止
+  mysqlDropDb: (name: string) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/drop-db", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  mysqlColumns: (db: string, table: string) =>
+    request<MysqlQueryResult>(
+      `/api/mysql/columns?db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}`,
+    ),
+  mysqlData: (q: {
+    db: string;
+    table: string;
+    page?: number;
+    size?: number;
+    order?: string;
+    dir?: "asc" | "desc";
+    col?: string;
+    kw?: string;
+  }) => {
+    const qs = new URLSearchParams({ db: q.db, table: q.table });
+    if (q.page) qs.set("page", String(q.page));
+    if (q.size) qs.set("size", String(q.size));
+    if (q.order) qs.set("order", q.order);
+    if (q.dir) qs.set("dir", q.dir);
+    if (q.col) qs.set("col", q.col);
+    if (q.kw) qs.set("kw", q.kw);
+    return request<MysqlDataPage>(`/api/mysql/data?${qs.toString()}`);
+  },
+  mysqlDdl: (db: string, table: string) =>
+    request<{ ok: boolean; ddl?: string; error?: string }>(
+      `/api/mysql/ddl?db=${encodeURIComponent(db)}&table=${encodeURIComponent(table)}`,
+    ),
+  // truncate/drop 由后端先自动备份；optimize/analyze 免备份
+  mysqlTableAction: (db: string, table: string, action: "optimize" | "analyze" | "truncate" | "drop") =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/table-action", {
+      method: "POST",
+      body: JSON.stringify({ db, table, action }),
+    }),
+  mysqlProcesslist: () => request<MysqlQueryResult>("/api/mysql/processlist"),
+  mysqlKill: (id: number) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/kill", {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    }),
+  mysqlDropUser: (user: string, host: string) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/drop-user", {
+      method: "POST",
+      body: JSON.stringify({ user, host }),
     }),
   startAll: () =>
     request<ActionResult[]>("/api/services/start-all", { method: "POST" }),

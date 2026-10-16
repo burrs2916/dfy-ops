@@ -70,6 +70,65 @@ fn sql_quote(s: &str) -> String {
     format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
+/// 标识符合法性（库名/表名/列名）：字母数字（含中文）、下划线、$。
+/// 校验通过后可安全用反引号包裹，杜绝标识符注入。
+fn valid_ident(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+/// 反引号包裹标识符（调用前必须过 valid_ident）。
+fn quote_ident(s: &str) -> String {
+    format!("`{}`", s)
+}
+
+/// 删除类操作（删库/删表/清空）前的自动备份：mysqldump 导出整库到
+/// config/backups/mysql_{db}_{epoch}.sql。产品硬性要求——删除前必须先备份，
+/// 备份失败则中止删除。
+fn backup_database(
+    state: &AppState,
+    cred: &MysqlCredential,
+    db: &str,
+) -> Result<String, String> {
+    let dir = registry_install_dir(state, "mysql");
+    let dump = format!("{dir}\\bin\\mysqldump.exe");
+    if !std::path::Path::new(&dump).is_file() {
+        return Err(format!("未找到 mysqldump（{dump}）"));
+    }
+    let backup_dir = state.config_dir.join("backups");
+    std::fs::create_dir_all(&backup_dir).map_err(|e| format!("无法创建备份目录：{e}"))?;
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let file = backup_dir.join(format!("mysql_{db}_{ts}.sql"));
+    let out_file =
+        std::fs::File::create(&file).map_err(|e| format!("无法创建备份文件：{e}"))?;
+    let port = cred.port.to_string();
+    let mut cmd = std::process::Command::new(&dump);
+    cmd.args([
+        "-h",
+        "127.0.0.1",
+        "-P",
+        &port,
+        "-u",
+        &cred.user,
+        "--default-character-set=utf8mb4",
+        "--databases",
+        db,
+    ]);
+    if !cred.password.is_empty() {
+        cmd.arg(format!("-p{}", cred.password));
+    }
+    cmd.stdout(std::process::Stdio::from(out_file));
+    let out = cmd.output().map_err(|e| format!("无法启动 mysqldump：{e}"))?;
+    if !out.status.success() {
+        let _ = std::fs::remove_file(&file);
+        let tail = stderr_error_tail(&String::from_utf8_lossy(&out.stderr));
+        return Err(if tail.is_empty() { "mysqldump 执行失败".into() } else { tail });
+    }
+    Ok(file.to_string_lossy().to_string())
+}
+
 /// 执行一条 SQL（-B 批处理 TSV）。返回（列名, 数据行），已还原转义。
 /// 非查询语句返回空列空行。失败返回 stderr 里的 ERROR 摘要。
 fn run_sql(
@@ -358,4 +417,350 @@ pub async fn credential(State(state): State<Arc<AppState>>) -> Json<serde_json::
         "port": cred.port,
         "hasPassword": !cred.password.is_empty(),
     }))
+}
+
+// ===== 库级维护 =====
+
+#[derive(Debug, Deserialize)]
+pub struct DbNameReq {
+    pub name: String,
+}
+
+/// POST /api/mysql/create-db —— 建库（utf8mb4 默认字符集）。
+pub async fn create_db(State(state): State<Arc<AppState>>, Json(req): Json<DbNameReq>) -> Json<serde_json::Value> {
+    if !valid_ident(&req.name) {
+        return Json(json!({ "ok": false, "error": "库名只能包含字母、数字、下划线、$" }));
+    }
+    let cred = mysql_credential::load(&state.config_dir);
+    let sql = format!(
+        "CREATE DATABASE {} DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
+        quote_ident(&req.name)
+    );
+    let st = state.clone();
+    let res = blocking(move || run_sql(&st, &cred, &sql, None)).await;
+    match res {
+        Ok(_) => Json(json!({ "ok": true, "message": format!("数据库 {} 创建成功", req.name) })),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+/// POST /api/mysql/drop-db —— 删库：先 mysqldump 自动备份整库，备份失败则中止。
+pub async fn drop_db(State(state): State<Arc<AppState>>, Json(req): Json<DbNameReq>) -> Json<serde_json::Value> {
+    if !valid_ident(&req.name) {
+        return Json(json!({ "ok": false, "error": "库名含非法字符" }));
+    }
+    let st = state.clone();
+    let name = req.name.clone();
+    let res = blocking(move || {
+        let cred = mysql_credential::load(&st.config_dir);
+        let backup = backup_database(&st, &cred, &name)
+            .map_err(|e| format!("已中止删除（自动备份失败）：{e}"))?;
+        run_sql(&st, &cred, &format!("DROP DATABASE {}", quote_ident(&name)), None)?;
+        Ok::<_, String>(backup)
+    })
+    .await;
+    match res {
+        Ok(backup) => {
+            state.repair.log(format!("MySQL 删库 {} 完成，已自动备份到 {}", req.name, backup));
+            Json(json!({ "ok": true, "message": format!("数据库 {} 已删除（删除前已备份：{}）", req.name, backup) }))
+        }
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+// ===== 表级浏览与维护 =====
+
+#[derive(Debug, Deserialize)]
+pub struct TableQuery {
+    pub db: String,
+    pub table: String,
+}
+
+/// GET /api/mysql/columns?db=&table= —— 表结构（information_schema.COLUMNS 全字段）。
+pub async fn columns(State(state): State<Arc<AppState>>, Query(q): Query<TableQuery>) -> Json<serde_json::Value> {
+    if !valid_ident(&q.db) || !valid_ident(&q.table) {
+        return Json(json!({ "ok": false, "error": "库/表名含非法字符" }));
+    }
+    let cred = mysql_credential::load(&state.config_dir);
+    let sql = format!(
+        "SELECT COLUMN_NAME, COLUMN_TYPE, IS_NULLABLE, COLUMN_KEY, IFNULL(COLUMN_DEFAULT,'NULL'), EXTRA, IFNULL(COLUMN_COMMENT,'') \
+         FROM information_schema.COLUMNS WHERE TABLE_SCHEMA={} AND TABLE_NAME={} ORDER BY ORDINAL_POSITION",
+        sql_quote(&q.db),
+        sql_quote(&q.table)
+    );
+    let st = state.clone();
+    let res = blocking(move || run_sql(&st, &cred, &sql, None)).await;
+    match res {
+        Ok((headers, rows)) => Json(json!({ "ok": true, "columns": headers, "rows": rows })),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+/// GET /api/mysql/ddl?db=&table= —— 建表语句（SHOW CREATE TABLE）。
+pub async fn ddl(State(state): State<Arc<AppState>>, Query(q): Query<TableQuery>) -> Json<serde_json::Value> {
+    if !valid_ident(&q.db) || !valid_ident(&q.table) {
+        return Json(json!({ "ok": false, "error": "库/表名含非法字符" }));
+    }
+    let cred = mysql_credential::load(&state.config_dir);
+    let sql = format!("SHOW CREATE TABLE {}.{}", quote_ident(&q.db), quote_ident(&q.table));
+    let st = state.clone();
+    let res = blocking(move || {
+        run_sql(&st, &cred, &sql, None).map(|(_, rows)| {
+            rows.first().and_then(|r| r.get(1).cloned()).unwrap_or_default()
+        })
+    })
+    .await;
+    match res {
+        Ok(ddl_text) => Json(json!({ "ok": true, "ddl": ddl_text })),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DataQuery {
+    pub db: String,
+    pub table: String,
+    #[serde(default = "one")]
+    pub page: u32,
+    #[serde(default = "page_size")]
+    pub size: u32,
+    /// 排序列（可选）
+    #[serde(default)]
+    pub order: Option<String>,
+    /// asc / desc
+    #[serde(default)]
+    pub dir: Option<String>,
+    /// 筛选列（可选；缺省在全部列上搜）
+    #[serde(default)]
+    pub col: Option<String>,
+    /// 筛选关键字（LIKE 模糊匹配）
+    #[serde(default)]
+    pub kw: Option<String>,
+}
+
+fn one() -> u32 {
+    1
+}
+
+fn page_size() -> u32 {
+    50
+}
+
+/// GET /api/mysql/data —— 表数据分页浏览：LIKE 筛选 + 排序 + COUNT 总行数。
+/// 标识符全部过 valid_ident 白名单后反引号包裹；筛选值走 SQL 字符串转义。
+pub async fn data(State(state): State<Arc<AppState>>, Query(q): Query<DataQuery>) -> Json<serde_json::Value> {
+    if !valid_ident(&q.db) || !valid_ident(&q.table) {
+        return Json(json!({ "ok": false, "error": "库/表名含非法字符" }));
+    }
+    if let Some(o) = q.order.as_deref() {
+        if !valid_ident(o) {
+            return Json(json!({ "ok": false, "error": "排序列名含非法字符" }));
+        }
+    }
+    if let Some(c) = q.col.as_deref() {
+        if !valid_ident(c) {
+            return Json(json!({ "ok": false, "error": "筛选列名含非法字符" }));
+        }
+    }
+    if !(1..=200).contains(&q.size) || q.page == 0 {
+        return Json(json!({ "ok": false, "error": "分页参数非法" }));
+    }
+    let table_ref = format!("{}.{}", quote_ident(&q.db), quote_ident(&q.table));
+    let st = state.clone();
+    let res = blocking(move || {
+        let cred = mysql_credential::load(&st.config_dir);
+        // WHERE：指定列则单列 LIKE，否则全列 OR LIKE（最多前 30 列，防止宽表语句爆炸）
+        let mut where_sql = String::new();
+        if let Some(kw) = q.kw.as_deref().filter(|k| !k.is_empty()) {
+            let like = sql_quote(&format!("%{kw}%"));
+            match q.col.as_deref() {
+                Some(c) => where_sql = format!(" WHERE {} LIKE {like}", quote_ident(c)),
+                None => {
+                    let (_, col_rows) = run_sql(
+                        &st,
+                        &cred,
+                        &format!(
+                            "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
+                             WHERE TABLE_SCHEMA={} AND TABLE_NAME={} ORDER BY ORDINAL_POSITION LIMIT 30",
+                            sql_quote(&q.db),
+                            sql_quote(&q.table)
+                        ),
+                        None,
+                    )?;
+                    let conds: Vec<String> = col_rows
+                        .iter()
+                        .filter_map(|r| r.first().cloned())
+                        .map(|c| format!("{} LIKE {like}", quote_ident(&c)))
+                        .collect();
+                    if !conds.is_empty() {
+                        where_sql = format!(" WHERE {}", conds.join(" OR "));
+                    }
+                }
+            }
+        }
+        let order_sql = q
+            .order
+            .as_deref()
+            .map(|o| {
+                let dir = match q.dir.as_deref().unwrap_or("").to_ascii_uppercase().as_str() {
+                    "DESC" => "DESC",
+                    _ => "ASC",
+                };
+                format!(" ORDER BY {} {dir}", quote_ident(o))
+            })
+            .unwrap_or_default();
+        let total = run_sql(&st, &cred, &format!("SELECT COUNT(*) FROM {table_ref}{where_sql}"), None)?
+            .1
+            .first()
+            .and_then(|r| r.first().and_then(|v| v.parse::<u64>().ok()))
+            .unwrap_or(0);
+        let offset = (q.page - 1) * q.size;
+        let (_, rows) = run_sql(
+            &st,
+            &cred,
+            &format!("SELECT * FROM {table_ref}{where_sql}{order_sql} LIMIT {offset},{}", q.size),
+            None,
+        )?;
+        // 列名单独取（SELECT * 的 header 行就是列名）
+        let (_, header_rows) = run_sql(
+            &st,
+            &cred,
+            &format!("SELECT * FROM {table_ref} LIMIT 0"),
+            None,
+        )?;
+        let columns: Vec<String> = header_rows
+            .iter()
+            .next()
+            .map(|r| r.clone())
+            .unwrap_or_default();
+        Ok::<_, String>((columns, rows, total))
+    })
+    .await;
+    match res {
+        Ok((columns, rows, total)) => Json(json!({
+            "ok": true, "columns": columns, "rows": rows, "total": total,
+            "page": q.page, "size": q.size,
+        })),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TableActionReq {
+    pub db: String,
+    pub table: String,
+    /// optimize / analyze / truncate / drop
+    pub action: String,
+}
+
+/// POST /api/mysql/table-action —— 表维护：optimize/analyze 免备份；
+/// truncate/drop 属删除类，先 mysqldump 自动备份（备份失败中止）。
+pub async fn table_action(State(state): State<Arc<AppState>>, Json(req): Json<TableActionReq>) -> Json<serde_json::Value> {
+    if !valid_ident(&req.db) || !valid_ident(&req.table) {
+        return Json(json!({ "ok": false, "error": "库/表名含非法字符" }));
+    }
+    let destructive = matches!(req.action.as_str(), "truncate" | "drop");
+    let sql = match req.action.as_str() {
+        "optimize" => format!("OPTIMIZE TABLE {}", quote_ident(&req.table)),
+        "analyze" => format!("ANALYZE TABLE {}", quote_ident(&req.table)),
+        "truncate" => format!("TRUNCATE TABLE {}", quote_ident(&req.table)),
+        "drop" => format!("DROP TABLE {}", quote_ident(&req.table)),
+        other => return Json(json!({ "ok": false, "error": format!("未知操作：{other}") })),
+    };
+    let st = state.clone();
+    let db = req.db.clone();
+    let db_for_log = req.db.clone();
+    let action = req.action.clone();
+    let res = blocking(move || {
+        let cred = mysql_credential::load(&st.config_dir);
+        let backup = if destructive {
+            Some(backup_database(&st, &cred, &db).map_err(|e| format!("已中止操作（自动备份失败）：{e}"))?)
+        } else {
+            None
+        };
+        // 在目标库上下文执行（OPTIMIZE/TRUNCATE 的 table_ref 无库前缀）
+        run_sql(&st, &cred, &sql, Some(&db))?;
+        Ok::<_, String>(backup)
+    })
+    .await;
+    match res {
+        Ok(backup) => {
+            let label = match action.as_str() {
+                "optimize" => "优化",
+                "analyze" => "分析",
+                "truncate" => "清空",
+                _ => "删除",
+            };
+            let note = backup
+                .as_ref()
+                .map(|b| format!("，删除前已备份：{b}"))
+                .unwrap_or_default();
+            state.repair.log(format!(
+                "MySQL 表 {}（{}.{}）{}完成{note}",
+                req.table, req.db, db_for_log, label
+            ));
+            Json(json!({ "ok": true, "message": format!(
+                "{}完成{}",
+                label,
+                backup.as_ref().map(|b| format!("（已备份：{b}）")).unwrap_or_default()
+            ) }))
+        }
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+// ===== 服务器会话（processlist） =====
+
+/// GET /api/mysql/processlist —— 当前连接/会话列表。
+pub async fn processlist(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let cred = mysql_credential::load(&state.config_dir);
+    let st = state.clone();
+    let res = blocking(move || run_sql(&st, &cred, "SHOW FULL PROCESSLIST", None)).await;
+    match res {
+        Ok((headers, rows)) => Json(json!({ "ok": true, "columns": headers, "rows": rows })),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct KillReq {
+    pub id: u64,
+}
+
+/// POST /api/mysql/kill —— 终止一个会话（KILL {id}，id 为数字天然安全）。
+pub async fn kill(State(state): State<Arc<AppState>>, Json(req): Json<KillReq>) -> Json<serde_json::Value> {
+    let cred = mysql_credential::load(&state.config_dir);
+    let st = state.clone();
+    let res = blocking(move || run_sql(&st, &cred, &format!("KILL {}", req.id), None)).await;
+    match res {
+        Ok(_) => Json(json!({ "ok": true, "message": format!("会话 {} 已终止", req.id) })),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DropUserReq {
+    pub user: String,
+    pub host: String,
+}
+
+/// POST /api/mysql/drop-user —— 删除用户（撤销其全部授权）。
+pub async fn drop_user(State(state): State<Arc<AppState>>, Json(req): Json<DropUserReq>) -> Json<serde_json::Value> {
+    if !valid_ident(&req.user) {
+        return Json(json!({ "ok": false, "error": "用户名含非法字符" }));
+    }
+    if req.host.is_empty() || req.host.contains('\'') || req.host.contains('\\') {
+        return Json(json!({ "ok": false, "error": "主机名含非法字符" }));
+    }
+    let cred = mysql_credential::load(&state.config_dir);
+    let sql = format!("DROP USER {}@{}", sql_quote(&req.user), sql_quote(&req.host));
+    let st = state.clone();
+    let res = blocking(move || run_sql(&st, &cred, &sql, None)).await;
+    match res {
+        Ok(_) => {
+            state.repair.log(format!("MySQL 用户 {}@{} 已删除", req.user, req.host));
+            Json(json!({ "ok": true, "message": format!("用户 {}@{} 已删除", req.user, req.host) }))
+        }
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
 }

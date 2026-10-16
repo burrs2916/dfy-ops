@@ -297,3 +297,22 @@ export interface SqlResult {
   rowCount?: number;
   error?: string;
 }
+
+/** 表结构 / processlist 等通用结果集（columns 为列名数组，rows 为字符串矩阵） */
+export interface MysqlQueryResult {
+  ok: boolean;
+  columns?: string[];
+  rows?: string[][];
+  error?: string;
+}
+
+/** GET /api/mysql/data：表数据分页浏览（total 为筛选后总行数） */
+export interface MysqlDataPage {
+  ok: boolean;
+  columns?: string[];
+  rows?: string[][];
+  total?: number;
+  page?: number;
+  size?: number;
+  error?: string;
+}

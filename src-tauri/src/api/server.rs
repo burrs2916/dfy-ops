@@ -227,6 +227,22 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/mysql/credential",
             axum::routing::get(handlers_mysql::credential),
         )
+        // 库/表维护：建删库（删前自动备份）、表结构/DDL、数据分页、表操作、会话管理
+        .route("/api/mysql/create-db", axum::routing::post(handlers_mysql::create_db))
+        .route("/api/mysql/drop-db", axum::routing::post(handlers_mysql::drop_db))
+        .route("/api/mysql/columns", axum::routing::get(handlers_mysql::columns))
+        .route("/api/mysql/data", axum::routing::get(handlers_mysql::data))
+        .route("/api/mysql/ddl", axum::routing::get(handlers_mysql::ddl))
+        .route(
+            "/api/mysql/table-action",
+            axum::routing::post(handlers_mysql::table_action),
+        )
+        .route(
+            "/api/mysql/processlist",
+            axum::routing::get(handlers_mysql::processlist),
+        )
+        .route("/api/mysql/kill", axum::routing::post(handlers_mysql::kill))
+        .route("/api/mysql/drop-user", axum::routing::post(handlers_mysql::drop_user))
         .route(
             "/api/settings/app",
             axum::routing::get(handlers::get_app_settings),

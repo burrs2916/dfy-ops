@@ -7,9 +7,11 @@ import {
   Dialog,
   DialogActions,
   DialogContent,
+  DialogContentText,
   DialogTitle,
   Divider,
   FormControl,
+  IconButton,
   InputLabel,
   List,
   ListItemButton,
@@ -39,14 +41,81 @@ import KeyIcon from "@mui/icons-material/Key";
 import PersonAddIcon from "@mui/icons-material/PersonAdd";
 import TerminalIcon from "@mui/icons-material/Terminal";
 import GroupIcon from "@mui/icons-material/Group";
+import StorageIcon from "@mui/icons-material/Storage";
+import AddCircleOutlineIcon from "@mui/icons-material/AddCircleOutline";
+import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
+import TableChartIcon from "@mui/icons-material/TableChart";
+import SchemaIcon from "@mui/icons-material/Schema";
+import MonitorHeartIcon from "@mui/icons-material/MonitorHeart";
+import BuildCircleIcon from "@mui/icons-material/BuildCircle";
+import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
-import type { MysqlOverview, MysqlTableInfo, MysqlUserInfo, SqlResult } from "../types";
+import type {
+  MysqlOverview,
+  MysqlTableInfo,
+  MysqlUserInfo,
+  SqlResult,
+} from "../types";
+import MysqlTablePanel from "./MysqlTablePanel";
 
 const btnSx = { textTransform: "none" as const, whiteSpace: "nowrap" as const };
 
-/** SQL 控制台结果最多渲染行数（防止大结果集卡死表格） */
-const MAX_ROWS = 200;
+type RightTab = "data" | "schema" | "sql" | "users" | "server";
+
+/** 强确认对话框：删除类操作必须显式输入「确认」之外的强提示文案确认 */
+function ConfirmDialog({
+  target,
+  onClose,
+}: {
+  target: { title: string; content: string; confirmText: string; action: () => Promise<void> } | null;
+  onClose: () => void;
+}) {
+  const [typed, setTyped] = useState("");
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setTyped(""), [target]);
+  return (
+    <Dialog open={target !== null} onClose={onClose} maxWidth="xs" fullWidth>
+      <DialogTitle sx={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 1 }}>
+        <WarningAmberIcon color="warning" />
+        {target?.title}
+      </DialogTitle>
+      <DialogContent>
+        <DialogContentText sx={{ whiteSpace: "pre-wrap" }}>{target?.content}</DialogContentText>
+        <TextField
+          size="small"
+          fullWidth
+          sx={{ mt: 2 }}
+          label={`输入 ${target?.confirmText ?? ""} 以确认`}
+          value={typed}
+          onChange={(e) => setTyped(e.target.value)}
+        />
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} sx={btnSx}>
+          取消
+        </Button>
+        <Button
+          variant="contained"
+          color="error"
+          disabled={busy || typed !== target?.confirmText}
+          onClick={async () => {
+            setBusy(true);
+            try {
+              await target!.action();
+              onClose();
+            } finally {
+              setBusy(false);
+            }
+          }}
+          sx={btnSx}
+        >
+          {busy ? "执行中…" : "确认执行"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
 
 export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; mysqlInstalled: boolean }) {
   const [ov, setOv] = useState<MysqlOverview | null>(null);
@@ -56,26 +125,44 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
 
   // 库表浏览
   const [db, setDb] = useState<string | null>(null);
+  const [table, setTable] = useState<string | null>(null);
   const [tables, setTables] = useState<MysqlTableInfo[]>([]);
   const [tablesLoading, setTablesLoading] = useState(false);
+  const [newDbOpen, setNewDbOpen] = useState(false);
+  const [newDbName, setNewDbName] = useState("");
 
-  // SQL 控制台 / 用户权限（右栏两个 Tab）
-  const [rightTab, setRightTab] = useState<"sql" | "users">("sql");
+  // 右栏视图
+  const [rightTab, setRightTab] = useState<RightTab>("sql");
+
+  // SQL 控制台
   const [sql, setSql] = useState("SHOW DATABASES");
   const [querying, setQuerying] = useState(false);
   const [result, setResult] = useState<SqlResult | null>(null);
+  const [history, setHistory] = useState<string[]>([]);
 
-  const [pwdOpen, setPwdOpen] = useState(false);
-  const [createOpen, setCreateOpen] = useState(false);
+  // 用户与权限
   const [users, setUsers] = useState<MysqlUserInfo[] | null>(null);
   const [usersLoading, setUsersLoading] = useState(false);
+  const [pwdOpen, setPwdOpen] = useState(false);
+  const [createOpen, setCreateOpen] = useState(false);
+
+  // 服务器（processlist）
+  const [procs, setProcs] = useState<{ columns: string[]; rows: string[][] } | null>(null);
+  const [procsLoading, setProcsLoading] = useState(false);
+
   const [importing, setImporting] = useState(false);
+  const [confirm, setConfirm] = useState<{
+    title: string;
+    content: string;
+    confirmText: string;
+    action: () => Promise<void>;
+  } | null>(null);
   const noticeTimer = useRef<number | null>(null);
 
   const flash = useCallback((text: string, severity: "success" | "error") => {
     setNotice({ text, severity });
     if (noticeTimer.current) window.clearTimeout(noticeTimer.current);
-    noticeTimer.current = window.setTimeout(() => setNotice(null), 5000);
+    noticeTimer.current = window.setTimeout(() => setNotice(null), 6000);
   }, []);
 
   const refreshOverview = useCallback(async () => {
@@ -144,7 +231,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
       const text = (statement ?? sql).trim();
       if (!text) return;
       if (text.split(";").filter((s) => s.trim()).length > 1) {
-        flash("SQL 控制台一次执行一条语句（分号结尾，多语句请用「导入 SQL」）", "error");
+        flash("SQL 控制台一次执行一条语句（分号结尾，批量语句请用「导入 SQL」）", "error");
         return;
       }
       setQuerying(true);
@@ -152,8 +239,11 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
       try {
         const r = await api.mysqlExec(text, db ?? undefined);
         setResult(r);
-        if (r.ok && !/^(\s*)(select|show|desc|explain|with)\b/i.test(text)) {
-          flash(`执行成功${r.rowCount ? `，返回 ${r.rowCount} 行` : ""}`, "success");
+        if (r.ok) {
+          setHistory((h) => [text, ...h.filter((x) => x !== text)].slice(0, 10));
+          if (!/^(\s*)(select|show|desc|explain|with)\b/i.test(text)) {
+            flash(`执行成功${r.rowCount ? `，返回 ${r.rowCount} 行` : ""}`, "success");
+          }
         }
       } catch (e) {
         setResult({ ok: false, error: String(e) });
@@ -164,15 +254,10 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     [sql, db, flash],
   );
 
-  const openTable = useCallback(
-    (name: string) => {
-      const stmt = `SELECT * FROM \`${db ?? ""}\`.\`${name}\` LIMIT 100`;
-      setSql(stmt);
-      setRightTab("sql");
-      void execSql(stmt);
-    },
-    [db, execSql],
-  );
+  const openTable = useCallback((t: string) => {
+    setTable(t);
+    setRightTab("data");
+  }, []);
 
   const loadUsers = useCallback(async () => {
     setUsersLoading(true);
@@ -190,6 +275,23 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
   useEffect(() => {
     if (rightTab === "users" && ov?.running && users === null) void loadUsers();
   }, [rightTab, ov?.running, users, loadUsers]);
+
+  const loadProcs = useCallback(async () => {
+    setProcsLoading(true);
+    try {
+      const r = await api.mysqlProcesslist();
+      if (r.ok) setProcs({ columns: r.columns ?? [], rows: r.rows ?? [] });
+      else flash(r.error ?? "获取会话列表失败", "error");
+    } catch (e) {
+      flash(`获取会话列表失败：${String(e)}`, "error");
+    } finally {
+      setProcsLoading(false);
+    }
+  }, [flash]);
+
+  useEffect(() => {
+    if (rightTab === "server" && ov?.running) void loadProcs();
+  }, [rightTab, ov?.running, loadProcs]);
 
   const onImport = useCallback(async () => {
     let picked: string | null = null;
@@ -216,8 +318,80 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     }
   }, [flash]);
 
+  const tableAction = useCallback(
+    (action: "optimize" | "analyze" | "truncate" | "drop") => {
+      if (!db || !table) return;
+      const label = { optimize: "优化", analyze: "分析", truncate: "清空", drop: "删除" }[action];
+      const destructive = action === "truncate" || action === "drop";
+      const run = async () => {
+        try {
+          const r = await api.mysqlTableAction(db, table, action);
+          if (r.ok) flash(r.message ?? `${label}完成`, "success");
+          else flash(r.error ?? `${label}失败`, "error");
+        } catch (e) {
+          flash(`${label}失败：${String(e)}`, "error");
+        }
+      };
+      if (destructive) {
+        setConfirm({
+          title: `${label}表 ${table}`,
+          content: destructive
+            ? `即将${label}表 ${db}.${table}。\n平台会先自动备份该库（mysqldump），备份成功后才执行${label}；备份失败将中止操作。`
+            : "",
+          confirmText: table,
+          action: run,
+        });
+      } else {
+        void run();
+      }
+    },
+    [db, table, flash],
+  );
+
+  const dropDb = useCallback(
+    (name: string) => {
+      setConfirm({
+        title: `删除数据库 ${name}`,
+        content: `即将删除数据库 ${name} 及其全部数据。\n平台会先自动备份该库（mysqldump），备份成功后才执行删除；备份失败将中止。`,
+        confirmText: name,
+        action: async () => {
+          try {
+            const r = await api.mysqlDropDb(name);
+            if (r.ok) {
+              flash(r.message ?? "删除完成", "success");
+              if (db === name) {
+                setDb(null);
+                setTable(null);
+              }
+              void refreshOverview();
+            } else flash(r.error ?? "删除失败", "error");
+          } catch (e) {
+            flash(`删除失败：${String(e)}`, "error");
+          }
+        },
+      });
+    },
+    [db, flash, refreshOverview],
+  );
+
+  const createDb = useCallback(async () => {
+    if (!newDbName.trim()) return;
+    try {
+      const r = await api.mysqlCreateDb(newDbName.trim());
+      if (r.ok) {
+        flash(r.message ?? "创建成功", "success");
+        setNewDbOpen(false);
+        setNewDbName("");
+        void refreshOverview();
+      } else flash(r.error ?? "创建失败", "error");
+    } catch (e) {
+      flash(`创建失败：${String(e)}`, "error");
+    }
+  }, [newDbName, flash, refreshOverview]);
+
   const running = ov?.running === true;
   const sysDbs = new Set(["information_schema", "mysql", "performance_schema", "sys"]);
+  const idColIndex = procs?.columns.findIndex((c) => c.toLowerCase() === "id") ?? -1;
 
   return (
     <Stack spacing={2}>
@@ -236,11 +410,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
               MySQL {ov?.version ?? (ovLoading ? "检测中…" : "未连接")}
             </Typography>
             {ov && (
-              <Chip
-                size="small"
-                color={running ? "success" : "default"}
-                label={running ? "运行中" : "已停止"}
-              />
+              <Chip size="small" color={running ? "success" : "default"} label={running ? "运行中" : "已停止"} />
             )}
             {ov?.hasPassword === false && running && (
               <Tooltip title="初始安装为空密码，建议尽快设置">
@@ -253,57 +423,38 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
           </Typography>
           <Box sx={{ flex: 1 }} />
           <Stack direction="row" spacing={1}>
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={<RefreshIcon />}
-              onClick={() => void refreshOverview()}
-              sx={btnSx}
-            >
+            <Button size="small" variant="outlined" startIcon={<RefreshIcon />} onClick={() => void refreshOverview()} sx={btnSx}>
               刷新
             </Button>
-            {mysqlInstalled && (running ? (
-              <Button
-                size="small"
-                variant="outlined"
-                color="error"
-                startIcon={<StopIcon />}
-                disabled={svcBusy}
-                onClick={() => void runService("stop")}
-                sx={btnSx}
-              >
-                停止服务
-              </Button>
-            ) : (
-              <Button
-                size="small"
-                variant="contained"
-                startIcon={<PlayArrowIcon />}
-                disabled={svcBusy || ovLoading}
-                onClick={() => void runService("start")}
-                sx={btnSx}
-              >
-                启动服务
-              </Button>
-            ))}
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={<KeyIcon />}
-              disabled={!running}
-              onClick={() => setPwdOpen(true)}
-              sx={btnSx}
-            >
+            {mysqlInstalled &&
+              (running ? (
+                <Button
+                  size="small"
+                  variant="outlined"
+                  color="error"
+                  startIcon={<StopIcon />}
+                  disabled={svcBusy}
+                  onClick={() => void runService("stop")}
+                  sx={btnSx}
+                >
+                  停止服务
+                </Button>
+              ) : (
+                <Button
+                  size="small"
+                  variant="contained"
+                  startIcon={<PlayArrowIcon />}
+                  disabled={svcBusy || ovLoading}
+                  onClick={() => void runService("start")}
+                  sx={btnSx}
+                >
+                  启动服务
+                </Button>
+              ))}
+            <Button size="small" variant="outlined" startIcon={<KeyIcon />} disabled={!running} onClick={() => setPwdOpen(true)} sx={btnSx}>
               修改密码
             </Button>
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={<UploadFileIcon />}
-              disabled={!running || importing}
-              onClick={() => void onImport()}
-              sx={btnSx}
-            >
+            <Button size="small" variant="outlined" startIcon={<UploadFileIcon />} disabled={!running || importing} onClick={() => void onImport()} sx={btnSx}>
               导入 SQL
             </Button>
           </Stack>
@@ -319,7 +470,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
             设置后平台自动托管，导入与控制台仍可无感使用。
           </Alert>
         )}
-        {!ovLoading && !running && (
+        {!ovLoading && mysqlInstalled && !running && (
           <Alert severity="info" sx={{ mt: 1.5 }}>
             MySQL 服务未运行——启动服务后即可使用数据库运维功能。
           </Alert>
@@ -328,25 +479,33 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
 
       {/* ===== 主区块：CSS 隐藏挂载（停止服务不卸载，SQL 输入/结果/选中库保留） ===== */}
       <Box sx={{ display: running ? undefined : "none" }}>
-        <Stack direction="row" spacing={2} alignItems="stretch" sx={{ alignItems: "flex-start" }}>
+        <Stack direction="row" spacing={2} alignItems="flex-start">
           {/* ===== 左栏：库 / 表浏览 ===== */}
           <Paper
             variant="outlined"
-            sx={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column", maxHeight: 640 }}
+            sx={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column", maxHeight: 660 }}
           >
             <Box sx={{ px: 2, pt: 1.5, pb: 1 }}>
-              <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-                数据库
-              </Typography>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                  数据库
+                </Typography>
+                <Box sx={{ flex: 1 }} />
+                <Tooltip title="新建数据库">
+                  <IconButton size="small" color="primary" disabled={!running} onClick={() => setNewDbOpen(true)}>
+                    <AddCircleOutlineIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              </Stack>
               <Typography variant="caption" color="text.secondary">
-                点击库名查看表；点击表名预览前 100 行
+                点库看表 · 点表浏览数据
               </Typography>
             </Box>
             <Divider />
-            <List dense disablePadding sx={{ overflow: "auto", maxHeight: 560, width: "100%" }}>
+            <List dense disablePadding sx={{ overflow: "auto", maxHeight: 580, width: "100%" }}>
               {(ov?.databases ?? []).map((d) => (
                 <Box key={d}>
-                  <ListItemButton selected={db === d} onClick={() => setDb(db === d ? null : d)}>
+                  <ListItemButton selected={db === d} onClick={() => { setDb(db === d ? null : d); setTable(null); }}>
                     <ListItemText
                       primary={d}
                       primaryTypographyProps={{
@@ -355,6 +514,19 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                       }}
                       secondary={sysDbs.has(d) ? "系统库" : undefined}
                     />
+                    {!sysDbs.has(d) && (
+                      <Tooltip title="删除该库（先自动备份，需输入库名确认）">
+                        <IconButton
+                          size="small"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            dropDb(d);
+                          }}
+                        >
+                          <DeleteOutlineIcon sx={{ fontSize: 16 }} color="action" />
+                        </IconButton>
+                      </Tooltip>
+                    )}
                   </ListItemButton>
                   {db === d && (
                     <Box sx={{ pl: 2, pr: 1, pb: 1 }}>
@@ -378,6 +550,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                               cursor: "pointer",
                               borderRadius: 1,
                               px: 1,
+                              bgcolor: table === t.name ? "action.selected" : undefined,
                               "&:hover": { bgcolor: "action.hover" },
                             }}
                             onClick={() => openTable(t.name)}
@@ -411,22 +584,38 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
             </List>
           </Paper>
 
-          {/* ===== 右栏：SQL 控制台 / 用户与权限 ===== */}
+          {/* ===== 右栏：表数据 / 表结构 / SQL 控制台 / 用户与权限 / 服务器 ===== */}
           <Paper variant="outlined" sx={{ flex: 1, minWidth: 0, p: 2 }}>
-            <Tabs value={rightTab} onChange={(_, v: "sql" | "users") => setRightTab(v)}>
-              <Tab
-                value="sql"
-                icon={<TerminalIcon fontSize="small" />}
-                iconPosition="start"
-                label="SQL 控制台"
-              />
-              <Tab
-                value="users"
-                icon={<GroupIcon fontSize="small" />}
-                iconPosition="start"
-                label="用户与权限"
-              />
+            <Tabs value={rightTab} onChange={(_, v: RightTab) => setRightTab(v)} variant="scrollable" scrollButtons="auto">
+              <Tab value="data" icon={<TableChartIcon fontSize="small" />} iconPosition="start" label="表数据" disabled={!table} />
+              <Tab value="schema" icon={<SchemaIcon fontSize="small" />} iconPosition="start" label="表结构" disabled={!table} />
+              <Tab value="sql" icon={<TerminalIcon fontSize="small" />} iconPosition="start" label="SQL 控制台" />
+              <Tab value="users" icon={<GroupIcon fontSize="small" />} iconPosition="start" label="用户与权限" />
+              <Tab value="server" icon={<MonitorHeartIcon fontSize="small" />} iconPosition="start" label="服务器" />
             </Tabs>
+
+            {(rightTab === "data" || rightTab === "schema") && db && table && (
+              <>
+                {/* 表工具条：当前表 + 维护操作 */}
+                <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.5 }} flexWrap="wrap" rowGap={1}>
+                  <Chip size="small" icon={<StorageIcon />} label={`${db}.${table}`} sx={{ fontFamily: "monospace" }} />
+                  <Box sx={{ flex: 1 }} />
+                  <Button size="small" startIcon={<BuildCircleIcon />} onClick={() => tableAction("optimize")} sx={btnSx}>
+                    优化
+                  </Button>
+                  <Button size="small" startIcon={<BuildCircleIcon />} onClick={() => tableAction("analyze")} sx={btnSx}>
+                    分析
+                  </Button>
+                  <Button size="small" color="warning" onClick={() => tableAction("truncate")} sx={btnSx}>
+                    清空
+                  </Button>
+                  <Button size="small" color="error" onClick={() => tableAction("drop")} sx={btnSx}>
+                    删除表
+                  </Button>
+                </Stack>
+                <MysqlTablePanel db={db} table={table} view={rightTab === "schema" ? "schema" : "data"} onNotify={flash} />
+              </>
+            )}
 
             {rightTab === "sql" && (
               <Stack spacing={1.5} sx={{ mt: 1.5 }}>
@@ -440,47 +629,88 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                   placeholder={db ? `在 ${db} 中执行，如 SELECT * FROM 表名 LIMIT 100` : "输入 SQL（选中左侧库后自动在该库执行）"}
                   sx={{ "& .MuiInputBase-input": { fontFamily: "monospace" } }}
                 />
-                <Stack direction="row" spacing={1} alignItems="center">
-                  <Button
-                    size="small"
-                    variant="contained"
-                    disabled={querying || !sql.trim()}
-                    onClick={() => void execSql()}
-                    sx={btnSx}
-                  >
+                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" rowGap={1}>
+                  <Button size="small" variant="contained" disabled={querying || !sql.trim()} onClick={() => void execSql()} sx={btnSx}>
                     {querying ? "执行中…" : "执行"}
                   </Button>
-                  {db && (
-                    <Chip
-                      size="small"
-                      label={`当前库：${db}`}
-                      onDelete={() => setDb(null)}
-                    />
-                  )}
+                  {db && <Chip size="small" label={`当前库：${db}`} onDelete={() => setDb(null)} />}
                   <Box sx={{ flex: 1 }} />
+                  {history.length > 0 && (
+                    <FormControl size="small" sx={{ minWidth: 180 }}>
+                      <Select
+                        displayEmpty
+                        value=""
+                        onChange={(e) => {
+                          const h = e.target.value as string;
+                          if (h) {
+                            setSql(h);
+                            void execSql(h);
+                          }
+                        }}
+                      >
+                        <MenuItem value="" disabled>
+                          执行历史（最近 10 条）
+                        </MenuItem>
+                        {history.map((h, i) => (
+                          <MenuItem key={i} value={h} sx={{ maxWidth: 420 }}>
+                            <Typography variant="caption" sx={{ fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis" }}>
+                              {h}
+                            </Typography>
+                          </MenuItem>
+                        ))}
+                      </Select>
+                    </FormControl>
+                  )}
                   <Button size="small" onClick={() => setResult(null)} sx={btnSx}>
                     清空结果
                   </Button>
                 </Stack>
-                {result && !result.ok && (
-                  <Alert severity="error">{result.error}</Alert>
-                )}
-                {result?.ok && (
-                  <SqlResultTable result={result} />
-                )}
+                {result && !result.ok && <Alert severity="error">{result.error}</Alert>}
+                {result?.ok && (result.columns?.length ?? 0) === 0 ? (
+                  <Alert severity="success">执行成功（无结果集）</Alert>
+                ) : result?.ok ? (
+                  <TableContainer sx={{ maxHeight: 360, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
+                    <Table size="small" stickyHeader>
+                      <TableHead>
+                        <TableRow>
+                          {result.columns!.map((c, i) => (
+                            <TableCell key={i} sx={{ fontWeight: 700, fontFamily: "monospace" }}>
+                              {c}
+                            </TableCell>
+                          ))}
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {(result.rows ?? []).map((r, ri) => (
+                          <TableRow key={ri} hover>
+                            {r.map((cell, ci) => (
+                              <TableCell
+                                key={ci}
+                                sx={{
+                                  fontFamily: "monospace",
+                                  color: cell === "NULL" ? "text.disabled" : undefined,
+                                  whiteSpace: "nowrap",
+                                  maxWidth: 320,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                }}
+                              >
+                                {cell}
+                              </TableCell>
+                            ))}
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                ) : null}
               </Stack>
             )}
 
             {rightTab === "users" && (
               <Stack spacing={1.5} sx={{ mt: 1.5 }}>
                 <Stack direction="row" spacing={1} alignItems="center">
-                  <Button
-                    size="small"
-                    variant="contained"
-                    startIcon={<PersonAddIcon />}
-                    onClick={() => setCreateOpen(true)}
-                    sx={btnSx}
-                  >
+                  <Button size="small" variant="contained" startIcon={<PersonAddIcon />} onClick={() => setCreateOpen(true)} sx={btnSx}>
                     新建用户
                   </Button>
                   <Button size="small" startIcon={<RefreshIcon />} onClick={() => void loadUsers()} sx={btnSx}>
@@ -504,6 +734,33 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                         </Typography>
                         {u.user === "root" && <Chip size="small" label="平台管理员" />}
                         <Box sx={{ flex: 1 }} />
+                        {u.user !== "root" && (
+                          <Button
+                            size="small"
+                            color="error"
+                            onClick={() =>
+                              setConfirm({
+                                title: `删除用户 ${u.user}@${u.host}`,
+                                content: `即将删除该用户并撤销其全部授权。`,
+                                confirmText: u.user,
+                                action: async () => {
+                                  try {
+                                    const r = await api.mysqlDropUser(u.user, u.host);
+                                    if (r.ok) {
+                                      flash(r.message ?? "用户已删除", "success");
+                                      setUsers(null);
+                                    } else flash(r.error ?? "删除失败", "error");
+                                  } catch (e) {
+                                    flash(`删除失败：${String(e)}`, "error");
+                                  }
+                                },
+                              })
+                            }
+                            sx={btnSx}
+                          >
+                            删除
+                          </Button>
+                        )}
                       </Stack>
                       {u.grants.length > 0 && (
                         <Box sx={{ mt: 0.5 }}>
@@ -523,9 +780,124 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                 )}
               </Stack>
             )}
+
+            {rightTab === "server" && (
+              <Stack spacing={1.5} sx={{ mt: 1.5 }}>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
+                    当前会话（进程列表）
+                  </Typography>
+                  <Box sx={{ flex: 1 }} />
+                  <Button size="small" startIcon={<RefreshIcon />} onClick={() => void loadProcs()} disabled={procsLoading} sx={btnSx}>
+                    刷新
+                  </Button>
+                </Stack>
+                {procs?.columns.length ? (
+                  <TableContainer sx={{ maxHeight: 420, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
+                    <Table size="small" stickyHeader>
+                      <TableHead>
+                        <TableRow>
+                          {procs.columns.map((c, i) => (
+                            <TableCell key={i} sx={{ fontWeight: 700 }}>
+                              {c}
+                            </TableCell>
+                          ))}
+                          <TableCell>操作</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {procs.rows.map((r, ri) => {
+                          const pid = idColIndex >= 0 ? Number(r[idColIndex]) : NaN;
+                          return (
+                            <TableRow key={ri} hover>
+                              {r.map((cell, ci) => (
+                                <TableCell
+                                  key={ci}
+                                  sx={{
+                                    fontFamily: "monospace",
+                                    whiteSpace: "nowrap",
+                                    maxWidth: 280,
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                  }}
+                                >
+                                  {cell}
+                                </TableCell>
+                              ))}
+                              <TableCell>
+                                <Button
+                                  size="small"
+                                  color="error"
+                                  disabled={Number.isNaN(pid)}
+                                  onClick={() =>
+                                    setConfirm({
+                                      title: `终止会话 ${pid}`,
+                                      content: `即将 KILL 该会话。若它正在执行长事务/查询，操作将中断。`,
+                                      confirmText: String(pid),
+                                      action: async () => {
+                                        try {
+                                          const res = await api.mysqlKill(pid);
+                                          if (res.ok) {
+                                            flash(res.message ?? "会话已终止", "success");
+                                            void loadProcs();
+                                          } else flash(res.error ?? "终止失败", "error");
+                                        } catch (e) {
+                                          flash(`终止失败：${String(e)}`, "error");
+                                        }
+                                      },
+                                    })
+                                  }
+                                  sx={btnSx}
+                                >
+                                  终止
+                                </Button>
+                              </TableCell>
+                            </TableRow>
+                          );
+                        })}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                ) : (
+                  <Typography variant="body2" color="text.secondary">
+                    {procsLoading ? "加载中…" : "暂无会话数据"}
+                  </Typography>
+                )}
+              </Stack>
+            )}
           </Paper>
         </Stack>
       </Box>
+
+      {/* 新建库 */}
+      <Dialog open={newDbOpen} onClose={() => setNewDbOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ fontWeight: 700 }}>新建数据库</DialogTitle>
+        <DialogContent>
+          <TextField
+            autoFocus
+            size="small"
+            fullWidth
+            sx={{ mt: 1 }}
+            label="库名"
+            value={newDbName}
+            onChange={(e) => setNewDbName(e.target.value)}
+            helperText="utf8mb4 字符集；仅字母、数字、下划线、$"
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void createDb();
+            }}
+          />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setNewDbOpen(false)} sx={btnSx}>
+            取消
+          </Button>
+          <Button variant="contained" disabled={!newDbName.trim()} onClick={() => void createDb()} sx={btnSx}>
+            创建
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <ConfirmDialog target={confirm} onClose={() => setConfirm(null)} />
 
       <PasswordDialog
         open={pwdOpen}
@@ -553,7 +925,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
 
       <Snackbar
         open={notice !== null}
-        autoHideDuration={5000}
+        autoHideDuration={6000}
         onClose={() => setNotice(null)}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
@@ -562,54 +934,6 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
         </Alert>
       </Snackbar>
     </Stack>
-  );
-}
-
-// ===== SQL 结果表格 =====
-function SqlResultTable({ result }: { result: SqlResult }) {
-  const rows = (result.rows ?? []).slice(0, MAX_ROWS);
-  if ((result.columns ?? []).length === 0) {
-    return (
-      <Alert severity="success" sx={{ mt: 0.5 }}>
-        执行成功（无结果集）
-      </Alert>
-    );
-  }
-  return (
-    <TableContainer sx={{ maxHeight: 360, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
-      <Table size="small" stickyHeader>
-        <TableHead>
-          <TableRow>
-            {result.columns!.map((c, i) => (
-              <TableCell key={i} sx={{ fontWeight: 700, fontFamily: "monospace" }}>
-                {c}
-              </TableCell>
-            ))}
-          </TableRow>
-        </TableHead>
-        <TableBody>
-          {rows.map((r, ri) => (
-            <TableRow key={ri} hover>
-              {r.map((cell, ci) => (
-                <TableCell
-                  key={ci}
-                  sx={{
-                    fontFamily: "monospace",
-                    color: cell === "NULL" ? "text.disabled" : undefined,
-                    whiteSpace: "nowrap",
-                    maxWidth: 320,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                  }}
-                >
-                  {cell}
-                </TableCell>
-              ))}
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </TableContainer>
   );
 }
 
@@ -766,13 +1090,7 @@ function CreateUserDialog({
       <DialogTitle sx={{ fontWeight: 700 }}>新建 MySQL 用户</DialogTitle>
       <DialogContent>
         <Stack spacing={2} sx={{ mt: 0.5 }}>
-          <TextField
-            label="用户名"
-            size="small"
-            value={user}
-            onChange={(e) => setUser(e.target.value)}
-            fullWidth
-          />
+          <TextField label="用户名" size="small" value={user} onChange={(e) => setUser(e.target.value)} fullWidth />
           <TextField
             label="允许连接的主机"
             size="small"
@@ -781,13 +1099,7 @@ function CreateUserDialog({
             helperText="localhost 仅本机；% 允许任意主机"
             fullWidth
           />
-          <TextField
-            label="密码"
-            size="small"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            fullWidth
-          />
+          <TextField label="密码" size="small" value={password} onChange={(e) => setPassword(e.target.value)} fullWidth />
           <FormControl size="small" fullWidth>
             <InputLabel>权限</InputLabel>
             <Select value={privilege} label="权限" onChange={(e) => setPrivilege(e.target.value as typeof privilege)}>
@@ -815,12 +1127,7 @@ function CreateUserDialog({
         <Button onClick={onClose} sx={btnSx}>
           取消
         </Button>
-        <Button
-          variant="contained"
-          disabled={busy || !user || !password}
-          onClick={() => void submit()}
-          sx={btnSx}
-        >
+        <Button variant="contained" disabled={busy || !user || !password} onClick={() => void submit()} sx={btnSx}>
           {busy ? "创建中…" : "创建用户"}
         </Button>
       </DialogActions>
