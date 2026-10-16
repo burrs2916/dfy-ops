@@ -39,7 +39,7 @@ import { save } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import type { MysqlDataPage, MysqlQueryResult } from "../types";
 
-// 单页行数可选：默认 100，大表不至于一页塞太多；后端单页上限 200
+// 单页行数可选：默认 50（少而清爽），大表可自行切到 100/200；后端单页上限 200
 const PAGE_SIZES = [50, 100, 200] as const;
 
 export type TableView = "data" | "schema";
@@ -60,7 +60,7 @@ export default function MysqlTablePanel({
   onNotify: (text: string, severity: "success" | "error") => void;
 }) {
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState<number>(100);
+  const [pageSize, setPageSize] = useState<number>(50);
   const [jump, setJump] = useState("");
   const [sort, setSort] = useState<{ col: string; dir: "asc" | "desc" } | null>(null);
   const [colInput, setColInput] = useState("");
