@@ -228,6 +228,10 @@ export interface UninstallTargetStatus {
   target: string;
   label: string;
   installDir: string;
+  /** 实测版本号（java：实跑 java -version；其他目标 null）——卡片直观展示用 */
+  version: string | null;
+  /** JAVA_HOME 是否已在系统配置（注册表核实：用户级/系统级任一）；java 用 */
+  javaHomeConfigured: boolean;
   serviceInstalled: boolean;
   dirExists: boolean;
   /** 服务运行态（MySQL/Redis 有服务；java 恒 false）——运维面板启停按钮依据 */

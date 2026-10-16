@@ -701,7 +701,7 @@ function RepairCenter({
       const stopping = busyOps === `${t}:stop`;
       const svcBusy = starting || stopping;
       statusLine = (
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0, flexWrap: "wrap", rowGap: 0.25 }}>
           {isSvc ? (
             <Chip
               size="small"
@@ -711,9 +711,16 @@ function RepairCenter({
           ) : (
             <Chip size="small" color="success" label="已安装" />
           )}
-          <Typography variant="caption" sx={{ fontFamily: "monospace", color: "text.secondary", wordBreak: "break-all" }}>
-            {st.installDir || "由 Windows Installer 管理"}
+          <Typography variant="body2" sx={{ fontWeight: 600, wordBreak: "break-all" }}>
+            {t === "java"
+              ? `JDK ${st.version ?? "版本未知"} · ${st.javaHomeConfigured ? "JAVA_HOME 已配置" : "JAVA_HOME 未配置"}`
+              : st.installDir || "由 Windows Installer 管理"}
           </Typography>
+          {t === "java" && st.installDir && (
+            <Typography variant="caption" sx={{ fontFamily: "monospace", color: "text.secondary", wordBreak: "break-all", width: "100%" }}>
+              {st.installDir}
+            </Typography>
+          )}
         </Stack>
       );
       actions = (

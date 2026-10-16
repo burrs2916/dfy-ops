@@ -198,11 +198,34 @@ pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_
     let mut targets = Vec::new();
     for t in UNINSTALLABLE {
         let (service_installed, dir_exists, service_running) = probe_target(&state, t).await;
+        // java 补充实测信息：平台托管主目录 + 实跑 java -version 的版本号
+        // + 注册表核实的 JAVA_HOME 配置态，让「装好了没、什么版本、环境变量
+        // 配了没」在卡片上一眼可见
+        let (java_dir, java_version, java_home_ok) = if t == "java" {
+            blocking(|| {
+                let dir = crate::ops::env_repair::managed_java_home();
+                let ver = dir
+                    .as_ref()
+                    .and_then(|h| crate::ops::env_repair::probe_home_version(h))
+                    .map(|(a, b, c)| format!("{a}.{b}.{c}"));
+                let ok = crate::ops::env_repair::java_home_configured(dir.as_deref());
+                (dir, ver, ok)
+            })
+            .await
+        } else {
+            (None, None, false)
+        };
         targets.push(serde_json::json!({
             "target": t,
             "label": resource::target_label(t),
-            // java 没有平台掌控的安装目录（MSI 自己管理），前端按 target 特判展示
-            "installDir": if t == "java" { String::new() } else { registry_install_dir(&state, t) },
+            // java：平台 zip 管线装的返回托管主目录（MSI 装的由 Windows Installer 管理，为空）
+            "installDir": if t == "java" {
+                java_dir.unwrap_or_default()
+            } else {
+                registry_install_dir(&state, t)
+            },
+            "version": java_version,
+            "javaHomeConfigured": java_home_ok,
             "serviceInstalled": service_installed,
             "dirExists": dir_exists,
             "serviceRunning": service_running,

@@ -38,7 +38,7 @@ impl JavaInstall {
 }
 
 /// 探测某个 home 的 java 版本（`<home>/bin/java -version`，输出在 stderr）。
-fn probe_home_version(home: &str) -> Option<(u32, u32, u32)> {
+pub fn probe_home_version(home: &str) -> Option<(u32, u32, u32)> {
     let exe = if cfg!(target_os = "windows") {
         format!("{home}\\bin\\java.exe")
     } else {
@@ -93,6 +93,42 @@ pub fn managed_java_home() -> Option<String> {
     #[cfg(not(target_os = "windows"))]
     {
         None
+    }
+}
+
+/// JAVA_HOME 是否已在系统里配置（卡片如实展示「已配置/未配置」的依据）：
+/// 用户级 HKCU\Environment（平台 zip 管线 setx 写入处）或系统级 HKLM Session
+/// Manager\Environment（Temurin MSI 的 FeatureJavaHome 写入处）任一存在即算。
+/// 传 managed home 时进一步要求值与其一致（平台接管口径，路径比较忽略大小写）。
+/// 非 Windows 恒 false。
+pub fn java_home_configured(managed: Option<&str>) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+        use winreg::RegKey;
+        let read = |root: winreg::RegKey, path: &str| -> Option<String> {
+            root.open_subkey(path)
+                .ok()?
+                .get_value::<String, _>("JAVA_HOME")
+                .ok()
+        };
+        let hkcu = read(RegKey::predef(HKEY_CURRENT_USER), "Environment");
+        let hklm = read(
+            RegKey::predef(HKEY_LOCAL_MACHINE),
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        );
+        match managed {
+            Some(d) => [hkcu, hklm]
+                .into_iter()
+                .flatten()
+                .any(|v| v.trim().eq_ignore_ascii_case(d)),
+            None => hkcu.is_some() || hklm.is_some(),
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = managed;
+        false
     }
 }
 
