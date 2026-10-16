@@ -199,15 +199,16 @@ pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_
     for t in UNINSTALLABLE {
         let (service_installed, dir_exists, service_running) = probe_target(&state, t).await;
         // java 补充实测信息：平台托管主目录 + 实跑 java -version 的版本号
-        // + 注册表核实的 JAVA_HOME 配置态，让「装好了没、什么版本、环境变量
-        // 配了没」在卡片上一眼可见
+        // （MSI 装的从卸载条目名提取主版本）+ 注册表核实的 JAVA_HOME 配置态，
+        // 让「装好了没、什么版本、环境变量配了没」在卡片上一眼可见
         let (java_dir, java_version, java_home_ok) = if t == "java" {
             blocking(|| {
                 let dir = crate::ops::env_repair::managed_java_home();
                 let ver = dir
                     .as_ref()
                     .and_then(|h| crate::ops::env_repair::probe_home_version(h))
-                    .map(|(a, b, c)| format!("{a}.{b}.{c}"));
+                    .map(|(a, b, c)| format!("{a}.{b}.{c}"))
+                    .or_else(crate::ops::env_repair::java_msi_version_label);
                 let ok = crate::ops::env_repair::java_home_configured(dir.as_deref());
                 (dir, ver, ok)
             })

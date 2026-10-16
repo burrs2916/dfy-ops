@@ -1076,6 +1076,25 @@ pub fn java_msi_entries() -> Vec<(String, String)> {
     msi_uninstall_entries(java_product_name)
 }
 
+/// MSI 安装的 java 版本标签（卡片展示用）：从第一条 DisplayName 提取首个
+/// 纯数字词，如 "Eclipse Temurin JRE 21 (x64)" → "21"、"Java 8 Update 301"
+/// → "8"。无条目或无法解析返回 None。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn java_msi_version_label() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let entries = java_msi_entries();
+        let dn = entries.first()?.0.clone();
+        dn.split(|c: char| !c.is_ascii_digit())
+            .find(|p| !p.is_empty())
+            .map(String::from)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
 /// 注册表卸载条目里的 MySQL MSI 产品（完全清理用：平台卸载时一并静默卸载）。
 #[cfg(target_os = "windows")]
 pub fn mysql_msi_entries() -> Vec<(String, String)> {
@@ -1303,7 +1322,9 @@ async fn run_uninstall(
 async fn run_java_uninstall(state: Arc<RepairState>, env_cache: EnvCache) {
     state.log("正在枚举本机 MSI 方式安装的 Java/JDK 条目…");
     let entries = tokio::task::spawn_blocking(java_msi_entries).await.unwrap_or_default();
-    let managed = std::path::Path::new(JDK_MANAGED_HOME).join("bin").is_dir();
+    // 与安装/探测同口径：覆盖嵌套布局（Temurin zip 解压后 bin 不在顶层），
+    // 只查顶层 bin 会把嵌套安装误判成「无安装痕迹」而拒绝卸载
+    let managed = managed_java_home().is_some();
     if entries.is_empty() && !managed {
         finish(
             state,
@@ -1344,7 +1365,7 @@ async fn run_java_uninstall(state: Arc<RepairState>, env_cache: EnvCache) {
     // ===== 复核 =====
     state.patch(|j| j.stage = "verify".into());
     let after = tokio::task::spawn_blocking(java_msi_entries).await.unwrap_or_default();
-    let dir_gone = !std::path::Path::new(JDK_MANAGED_HOME).join("bin").exists();
+    let dir_gone = managed_java_home().is_none();
     if after.is_empty() && dir_gone {
         state.log("卸载完成：MSI 条目已清空，平台免安装目录已删除，用户级 JAVA_HOME 已清除");
         state.log("提示：已开终端里的 JAVA_HOME/PATH 是旧值，重开终端或重新登录后生效");
