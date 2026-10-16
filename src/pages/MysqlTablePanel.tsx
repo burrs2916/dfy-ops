@@ -5,7 +5,6 @@ import {
   Button,
   Chip,
   CircularProgress,
-  Divider,
   FormControl,
   IconButton,
   InputLabel,
@@ -29,10 +28,13 @@ import ArrowUpwardIcon from "@mui/icons-material/ArrowUpward";
 import ArrowDownwardIcon from "@mui/icons-material/ArrowDownward";
 import CodeIcon from "@mui/icons-material/Code";
 import ContentCopyIcon from "@mui/icons-material/ContentCopy";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
+import ExpandLessIcon from "@mui/icons-material/ExpandLess";
 import { api } from "../api";
 import type { MysqlDataPage, MysqlQueryResult } from "../types";
 
-const PAGE_SIZE = 50;
+// 与后端 data 接口单页上限一致：一次拉满 200 行，观感接近 Navicat 打开表
+const PAGE_SIZE = 200;
 
 export type TableView = "data" | "schema";
 
@@ -57,6 +59,7 @@ export default function MysqlTablePanel({
   const [kwInput, setKwInput] = useState("");
   const [col, setCol] = useState("");
   const [kw, setKw] = useState("");
+  const [filterOpen, setFilterOpen] = useState(false);
   const [data, setData] = useState<MysqlDataPage | null>(null);
   const [loading, setLoading] = useState(false);
   const [schema, setSchema] = useState<MysqlQueryResult | null>(null);
@@ -189,7 +192,7 @@ export default function MysqlTablePanel({
             加载中…
           </Typography>
         ) : schema?.ok ? (
-          <TableContainer sx={{ maxHeight: 420, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
+          <TableContainer sx={{ maxHeight: 620, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
             <Table size="small" stickyHeader>
               <TableHead>
                 <TableRow>
@@ -221,77 +224,108 @@ export default function MysqlTablePanel({
   }
 
   return (
-    <Stack spacing={1.5} sx={{ mt: 1.5 }}>
-      {/* 筛选工具条 */}
+    <Stack spacing={1} sx={{ mt: 1.5 }}>
+      {/* 数据为主角：筛选默认收起，激活时在标题行显示条件徽标（可一键清除） */}
       <Stack direction="row" spacing={1} alignItems="center">
-        <FormControl size="small" sx={{ minWidth: 140 }}>
-          <InputLabel>筛选列</InputLabel>
-          <Select value={colInput} label="筛选列" onChange={(e) => setColInput(e.target.value)}>
-            <MenuItem value="">
-              <em>全部列</em>
-            </MenuItem>
-            {(data?.columns ?? []).map((c) => (
-              <MenuItem key={c} value={c}>
-                {c}
-              </MenuItem>
-            ))}
-          </Select>
-        </FormControl>
-        <TextField
-          size="small"
-          placeholder="模糊搜索关键字"
-          value={kwInput}
-          onChange={(e) => setKwInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter") {
-              setCol(colInput);
-              setKw(kwInput);
+        {kw && (
+          <Chip
+            size="small"
+            color="primary"
+            variant="outlined"
+            label={`筛选：${col || "全部列"} ~ ${kw}`}
+            onDelete={() => {
+              setColInput("");
+              setKwInput("");
+              setCol("");
+              setKw("");
               setPage(1);
-              void loadData(1, sort, colInput, kwInput);
-            }
-          }}
-          sx={{ width: 220 }}
-        />
+              void loadData(1, sort, "", "");
+            }}
+          />
+        )}
+        <Box sx={{ flex: 1 }} />
+        {loading && <CircularProgress size={16} />}
         <Button
           size="small"
-          variant="contained"
           startIcon={<SearchIcon />}
-          onClick={() => {
-            setCol(colInput);
-            setKw(kwInput);
-            setPage(1);
-            void loadData(1, sort, colInput, kwInput);
-          }}
+          endIcon={filterOpen ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+          onClick={() => setFilterOpen((o) => !o)}
           sx={{ textTransform: "none", whiteSpace: "nowrap" }}
         >
           筛选
         </Button>
-        <Tooltip title="清空筛选条件">
-          <span>
-            <IconButton
-              size="small"
-              disabled={!col && !kw}
-              onClick={() => {
-                setColInput("");
-                setKwInput("");
-                setCol("");
-                setKw("");
-                setPage(1);
-                void loadData(1, sort, "", "");
-              }}
-            >
-              <RestartAltIcon fontSize="small" />
-            </IconButton>
-          </span>
-        </Tooltip>
-        <Box sx={{ flex: 1 }} />
-        {loading && <CircularProgress size={16} />}
-        {kw && <Chip size="small" label={`筛选：${col || "全部列"} ~ ${kw}`} />}
       </Stack>
+
+      {filterOpen && (
+        <Paper variant="outlined" sx={{ p: 1.25 }}>
+          <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" rowGap={1}>
+            <FormControl size="small" sx={{ minWidth: 140 }}>
+              <InputLabel>筛选列</InputLabel>
+              <Select value={colInput} label="筛选列" onChange={(e) => setColInput(e.target.value)}>
+                <MenuItem value="">
+                  <em>全部列</em>
+                </MenuItem>
+                {(data?.columns ?? []).map((c) => (
+                  <MenuItem key={c} value={c}>
+                    {c}
+                  </MenuItem>
+                ))}
+              </Select>
+            </FormControl>
+            <TextField
+              size="small"
+              placeholder="模糊搜索关键字"
+              value={kwInput}
+              onChange={(e) => setKwInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  setCol(colInput);
+                  setKw(kwInput);
+                  setPage(1);
+                  void loadData(1, sort, colInput, kwInput);
+                }
+              }}
+              sx={{ width: 220 }}
+            />
+            <Button
+              size="small"
+              variant="contained"
+              startIcon={<SearchIcon />}
+              onClick={() => {
+                setCol(colInput);
+                setKw(kwInput);
+                setPage(1);
+                void loadData(1, sort, colInput, kwInput);
+              }}
+              sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+            >
+              应用筛选
+            </Button>
+            <Tooltip title="清空筛选条件">
+              <span>
+                <IconButton
+                  size="small"
+                  disabled={!col && !kw}
+                  onClick={() => {
+                    setColInput("");
+                    setKwInput("");
+                    setCol("");
+                    setKw("");
+                    setPage(1);
+                    void loadData(1, sort, "", "");
+                  }}
+                >
+                  <RestartAltIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
+          </Stack>
+        </Paper>
+      )}
 
       {data?.ok ? (
         <>
-          <TableContainer sx={{ maxHeight: 420, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
+          <TableContainer sx={{ maxHeight: 620, border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
             <Table size="small" stickyHeader>
               <TableHead>
                 <TableRow>
@@ -368,10 +402,6 @@ export default function MysqlTablePanel({
       ) : (
         <Alert severity="info">{loading ? "查询中…" : "暂无数据（或筛选无结果）"}</Alert>
       )}
-      <Divider />
-      <Typography variant="caption" color="text.secondary">
-        点击列头排序；表维护操作（优化/分析/清空/删除）在上方工具条
-      </Typography>
     </Stack>
   );
 }

@@ -52,6 +52,8 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import SettingsIcon from "@mui/icons-material/Settings";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import TuneIcon from "@mui/icons-material/Tune";
+import ChevronRightIcon from "@mui/icons-material/ChevronRight";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import DescriptionIcon from "@mui/icons-material/Description";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import NetworkCheckIcon from "@mui/icons-material/NetworkCheck";
@@ -136,6 +138,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
   const [table, setTable] = useState<string | null>(null);
   const [tables, setTables] = useState<MysqlTableInfo[]>([]);
   const [tablesLoading, setTablesLoading] = useState(false);
+  const [expandedDbs, setExpandedDbs] = useState<Set<string>>(new Set());
   const [newDbOpen, setNewDbOpen] = useState(false);
   const [newDbName, setNewDbName] = useState("");
 
@@ -579,7 +582,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
       {/* ===== 主区块：CSS 隐藏挂载（停止服务不卸载，SQL 输入/结果/选中库保留） ===== */}
       <Box sx={{ display: running ? undefined : "none" }}>
         <Stack direction="row" spacing={2} alignItems="flex-start">
-          {/* ===== 左栏：库 / 表浏览 ===== */}
+          {/* ===== 左栏：Navicat 风格库表树（箭头展开 · 图标分层 · 悬浮操作） ===== */}
           <Paper
             variant="outlined"
             sx={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column", maxHeight: 660 }}
@@ -589,6 +592,14 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                 <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
                   数据库
                 </Typography>
+                {(ov?.databases.length ?? 0) > 0 && (
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={ov!.databases.length}
+                    sx={{ height: 18, fontSize: 11, color: "text.secondary" }}
+                  />
+                )}
                 <Box sx={{ flex: 1 }} />
                 <Tooltip title="新建数据库">
                   <IconButton size="small" color="primary" disabled={!running} onClick={() => setNewDbOpen(true)}>
@@ -597,82 +608,128 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                 </Tooltip>
               </Stack>
               <Typography variant="caption" color="text.secondary">
-                点库看表 · 点表浏览数据
+                点击数据库展开表，点击表查看数据
               </Typography>
             </Box>
             <Divider />
-            <List dense disablePadding sx={{ overflow: "auto", maxHeight: 580, width: "100%" }}>
-              {(ov?.databases ?? []).map((d) => (
-                <Box key={d}>
-                  <ListItemButton selected={db === d} onClick={() => { setDb(db === d ? null : d); setTable(null); }}>
-                    <ListItemText
-                      primary={d}
-                      primaryTypographyProps={{
-                        variant: "body2",
-                        sx: { fontWeight: sysDbs.has(d) ? 400 : 600, fontFamily: "monospace" },
+            <List dense disablePadding sx={{ overflow: "auto", maxHeight: 580, width: "100%", pb: 1 }}>
+              {(ov?.databases ?? []).map((d) => {
+                const open = expandedDbs.has(d);
+                return (
+                  <Box key={d}>
+                    <ListItemButton
+                      dense
+                      selected={db === d}
+                      onClick={() => {
+                        setDb(d);
+                        setTable(null);
+                        setExpandedDbs((s) => {
+                          const n = new Set(s);
+                          if (n.has(d)) n.delete(d);
+                          else n.add(d);
+                          return n;
+                        });
                       }}
-                      secondary={sysDbs.has(d) ? "系统库" : undefined}
-                    />
-                    {!sysDbs.has(d) && (
-                      <Tooltip title="删除该库（先自动备份，需输入库名确认）">
-                        <IconButton
-                          size="small"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            dropDb(d);
-                          }}
-                        >
-                          <DeleteOutlineIcon sx={{ fontSize: 16 }} color="action" />
-                        </IconButton>
-                      </Tooltip>
-                    )}
-                  </ListItemButton>
-                  {db === d && (
-                    <Box sx={{ pl: 2, pr: 1, pb: 1 }}>
-                      {tablesLoading ? (
-                        <Typography variant="caption" color="text.secondary">
-                          加载中…
-                        </Typography>
-                      ) : tables.length === 0 ? (
-                        <Typography variant="caption" color="text.secondary">
-                          该库没有表
-                        </Typography>
+                    >
+                      {open ? (
+                        <ExpandMoreIcon sx={{ fontSize: 16, color: "text.secondary", mr: 0.5 }} />
                       ) : (
-                        tables.map((t) => (
-                          <Stack
-                            key={t.name}
-                            direction="row"
-                            spacing={1}
-                            alignItems="center"
-                            sx={{
-                              py: 0.25,
-                              cursor: "pointer",
-                              borderRadius: 1,
-                              px: 1,
-                              bgcolor: table === t.name ? "action.selected" : undefined,
-                              "&:hover": { bgcolor: "action.hover" },
-                            }}
-                            onClick={() => openTable(t.name)}
-                          >
-                            <Typography
-                              variant="body2"
-                              sx={{ fontFamily: "monospace", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}
-                            >
-                              {t.name}
-                            </Typography>
-                            <Box sx={{ flex: 1 }} />
-                            <Tooltip title={`约 ${t.rows} 行 · ${t.sizeKb} KB`}>
-                              <Typography variant="caption" color="text.secondary">
-                                {t.rows} 行
-                              </Typography>
-                            </Tooltip>
-                          </Stack>
-                        ))
+                        <ChevronRightIcon sx={{ fontSize: 16, color: "text.secondary", mr: 0.5 }} />
                       )}
-                    </Box>
-                  )}
-                </Box>
-              ))}
+                      <StorageIcon
+                        sx={{ fontSize: 15, mr: 1, color: sysDbs.has(d) ? "text.disabled" : "primary.main" }}
+                      />
+                      <ListItemText
+                        primary={d}
+                        primaryTypographyProps={{
+                          variant: "body2",
+                          sx: { fontWeight: sysDbs.has(d) ? 400 : 600, fontFamily: "monospace" },
+                        }}
+                        secondary={sysDbs.has(d) ? "系统库" : undefined}
+                      />
+                      {!sysDbs.has(d) && (
+                        <Tooltip title="删除该库（先自动备份，需输入库名确认）">
+                          <IconButton
+                            size="small"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              dropDb(d);
+                            }}
+                            sx={{
+                              opacity: 0,
+                              transition: "opacity 0.15s",
+                              ".MuiListItemButton-root:hover &": { opacity: 1 },
+                            }}
+                          >
+                            <DeleteOutlineIcon sx={{ fontSize: 16 }} color="action" />
+                          </IconButton>
+                        </Tooltip>
+                      )}
+                    </ListItemButton>
+                    {open && (
+                      <Box sx={{ pl: 4.5, pr: 1, pb: 1, bgcolor: "action.hover" }}>
+                        {tablesLoading ? (
+                          <Typography variant="caption" color="text.secondary">
+                            加载中…
+                          </Typography>
+                        ) : tables.length === 0 ? (
+                          <Typography variant="caption" color="text.secondary">
+                            该库没有表
+                          </Typography>
+                        ) : (
+                          tables.map((t) => {
+                            const active = table === t.name;
+                            return (
+                              <Stack
+                                key={t.name}
+                                direction="row"
+                                spacing={0.75}
+                                alignItems="center"
+                                sx={{
+                                  py: 0.4,
+                                  px: 1,
+                                  mb: 0.25,
+                                  cursor: "pointer",
+                                  borderRadius: 1,
+                                  bgcolor: active ? "primary.main" : undefined,
+                                  "&:hover": { bgcolor: active ? "primary.dark" : "action.selected" },
+                                }}
+                                onClick={() => openTable(t.name)}
+                              >
+                                <TableChartIcon
+                                  sx={{ fontSize: 14, color: active ? "common.white" : "text.secondary" }}
+                                />
+                                <Typography
+                                  variant="body2"
+                                  sx={{
+                                    fontFamily: "monospace",
+                                    minWidth: 0,
+                                    overflow: "hidden",
+                                    textOverflow: "ellipsis",
+                                    fontWeight: active ? 600 : undefined,
+                                    color: active ? "common.white" : undefined,
+                                  }}
+                                >
+                                  {t.name}
+                                </Typography>
+                                <Box sx={{ flex: 1 }} />
+                                <Tooltip title={`约 ${t.rows} 行 · ${t.sizeKb} KB`}>
+                                  <Typography
+                                    variant="caption"
+                                    sx={{ color: active ? "common.white" : "text.secondary", opacity: active ? 0.85 : 1 }}
+                                  >
+                                    {t.rows} 行
+                                  </Typography>
+                                </Tooltip>
+                              </Stack>
+                            );
+                          })
+                        )}
+                      </Box>
+                    )}
+                  </Box>
+                );
+              })}
               {(ov?.databases.length ?? 0) === 0 && (
                 <Box sx={{ p: 2 }}>
                   <Typography variant="caption" color="text.secondary">
