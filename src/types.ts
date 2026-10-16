@@ -230,6 +230,8 @@ export interface UninstallTargetStatus {
   installDir: string;
   serviceInstalled: boolean;
   dirExists: boolean;
+  /** 服务运行态（MySQL/Redis 有服务；java 恒 false）——运维面板启停按钮依据 */
+  serviceRunning: boolean;
   canUninstall: boolean;
 }
 

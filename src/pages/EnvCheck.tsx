@@ -27,6 +27,7 @@ import {
   TableRow,
   Tabs,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import {
@@ -44,8 +45,10 @@ import {
   SettingsInputAntenna,
   SmartToy,
   Storage,
+  UploadFile,
   Widgets,
 } from "@mui/icons-material";
+import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import { useAppSettingsStore, useOpsStore } from "../store";
 import type {
@@ -114,6 +117,8 @@ const TARGET_LABEL: Record<string, string> = {
 
 /** 安装与维护卡片的展示顺序：用户重点的数据库/运行时在前 */
 const SOFTWARE_ORDER = ["mysql", "java", "redis", "vernemq", "minio", "greptime"];
+/** 注册了 Windows 服务、可启停的软件（与后端 service_spec 口径一致；java 无服务） */
+const SERVICE_TARGETS = new Set(["mysql", "redis"]);
 /** 一句话说清每个软件是干嘛的（卡片副标题，消灭抽象概念） */
 const TARGET_DESC: Record<string, string> = {
   mysql: "数据库",
@@ -439,6 +444,8 @@ function RepairCenter({
   const [planCopied, setPlanCopied] = useState(false);
   // 安装痕迹首次探测中（Windows 上 sc/注册表扫描需 1-2 秒，先如实显示加载态）
   const [probing, setProbing] = useState(true);
+  // 探测请求本身失败（后端未启动等）：与「未安装」区分开，避免误导一键安装
+  const [probeFailed, setProbeFailed] = useState(false);
   // 子导航：「安装与维护」= 装软件主流程；「环境问题与 AI 方案」= 检测问题跟进
   const [subTab, setSubTab] = useState<"install" | "issues">("install");
 
@@ -462,28 +469,79 @@ function RepairCenter({
     }
   }, [resourceDir]);
 
-  useEffect(() => {
-    if (repairRunning) return; // 任务进行中不探（结束时会再刷）
-    let alive = true;
+  /** 安装痕迹探测（可手动重入：服务启停 / 导入后即时刷新状态） */
+  const probeStatus = useCallback(() => {
     setProbing(true);
     api
       .uninstallStatus()
       .then((s) => {
-        if (alive) {
-          setInstalled(s.targets);
-          setProbing(false);
-        }
+        setInstalled(s.targets);
+        setProbeFailed(false);
       })
       .catch(() => {
-        if (alive) {
-          setInstalled([]);
-          setProbing(false);
+        setInstalled([]);
+        setProbeFailed(true);
+      })
+      .finally(() => setProbing(false));
+  }, []);
+
+  useEffect(() => {
+    if (repairRunning) return; // 任务进行中不探（结束时会再刷）
+    probeStatus();
+  }, [repairRunning, probeStatus]);
+
+  /** 服务启停 / SQL 导入的进行中标记（按钮防抖 + loading） */
+  const [busyOps, setBusyOps] = useState<string | null>(null);
+
+  /** 启动 / 停止平台服务（MySQL80、Redis；net start/stop + UAC 确认），完成后即时重探 */
+  const onServiceAction = useCallback(
+    async (target: string, action: "start" | "stop") => {
+      setBusyOps(`${target}:${action}`);
+      try {
+        const r = await api.serviceAction(target, action);
+        if (r.ok) {
+          setSnack({ open: true, msg: r.message || "操作成功", severity: "success" });
+        } else {
+          setSnack({ open: true, msg: r.error || "操作失败", severity: "error" });
         }
+      } catch (e) {
+        setSnack({ open: true, msg: e instanceof Error ? e.message : String(e), severity: "error" });
+      } finally {
+        setBusyOps(null);
+        probeStatus();
+      }
+    },
+    [probeStatus],
+  );
+
+  /** 导入 SQL 到 MySQL：原生文件选择器选 .sql → stdin 直灌执行 */
+  const onImportSql = useCallback(async () => {
+    let picked: string | null = null;
+    try {
+      const r = await open({
+        multiple: false,
+        title: "选择要导入的 SQL 文件",
+        filters: [{ name: "SQL", extensions: ["sql"] }],
       });
-    return () => {
-      alive = false;
-    };
-  }, [repairRunning]);
+      picked = typeof r === "string" ? r : null;
+    } catch {
+      return;
+    }
+    if (!picked) return;
+    setBusyOps("mysql:import");
+    try {
+      const r = await api.mysqlImport(picked);
+      if (r.ok) {
+        setSnack({ open: true, msg: "SQL 导入完成", severity: "success" });
+      } else {
+        setSnack({ open: true, msg: r.error || "导入失败", severity: "error" });
+      }
+    } catch (e) {
+      setSnack({ open: true, msg: e instanceof Error ? e.message : String(e), severity: "error" });
+    } finally {
+      setBusyOps(null);
+    }
+  }, []);
 
   /** AI 方案：首次用当前问题项；追问时携带上一轮方案文本。 */
   const generatePlan = useCallback(
@@ -593,9 +651,9 @@ function RepairCenter({
   // 安装与维护的子页签（待安装/已安装/远程部署）
   const [instTab, setInstTab] = useState<"toInstall" | "installed" | "remote">("toInstall");
 
-  /** 软件卡片：状态机（执行中 > 已安装 > 残留 > 有包 > 无包）。
-   *  探测（probing）不阻塞渲染——已装状态未知时按待安装显示，结果回来自动归位，
-   *  避免进入页面 6 张卡集体转圈的"慢"体感。 */
+  /** 软件卡片：状态机（执行中 > 检测中/探测不可用 > 已安装 > 残留 > 有包 > 无包）。
+   *  探测（probing）不阻塞渲染——已装状态未知时如实显示「检测中」，结果回来自动归位，
+   *  避免进入页面 6 张卡集体转圈的"慢"体感，也不冒充「未安装」误导一键安装。 */
   const renderCard = (t: string) => {
     const st = installedOf(t);
     const pkg = bestPkg(t);
@@ -613,10 +671,46 @@ function RepairCenter({
           </Typography>
         </Stack>
       );
-    } else if (st?.serviceInstalled) {
+    } else if (!st && probing) {
+      // 探测中状态未知：不冒充「未安装」，避免误导用户去一键安装
+      statusLine = (
+        <Stack direction="row" spacing={1} alignItems="center">
+          <CircularProgress size={14} />
+          <Typography variant="body2" color="text.secondary">
+            正在检测安装状态…
+          </Typography>
+        </Stack>
+      );
+    } else if (!st && probeFailed) {
       statusLine = (
         <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
-          <Chip size="small" color="success" label="已安装" />
+          <Chip size="small" color="warning" label="探测不可用" />
+          <Typography variant="body2" color="text.secondary">
+            安装状态获取失败（运维后端未响应），可重试
+          </Typography>
+        </Stack>
+      );
+      actions = (
+        <Button size="small" variant="outlined" startIcon={<Refresh />} onClick={() => probeStatus()} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+          重试
+        </Button>
+      );
+    } else if (st?.serviceInstalled) {
+      const isSvc = SERVICE_TARGETS.has(t);
+      const starting = busyOps === `${t}:start`;
+      const stopping = busyOps === `${t}:stop`;
+      const svcBusy = starting || stopping;
+      statusLine = (
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
+          {isSvc ? (
+            <Chip
+              size="small"
+              color={st.serviceRunning ? "success" : "default"}
+              label={starting ? "启动中…" : stopping ? "停止中…" : st.serviceRunning ? "运行中" : "已停止"}
+            />
+          ) : (
+            <Chip size="small" color="success" label="已安装" />
+          )}
           <Typography variant="caption" sx={{ fontFamily: "monospace", color: "text.secondary", wordBreak: "break-all" }}>
             {st.installDir || "由 Windows Installer 管理"}
           </Typography>
@@ -624,7 +718,47 @@ function RepairCenter({
       );
       actions = (
         <>
-          <Button size="small" variant="outlined" disabled={repairDisabled} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+          {isSvc && !st.serviceRunning && (
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={starting ? <CircularProgress size={14} color="inherit" /> : <PlayArrow />}
+              disabled={repairDisabled || svcBusy}
+              onClick={() => void onServiceAction(t, "start")}
+              sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+            >
+              启动
+            </Button>
+          )}
+          {isSvc && st.serviceRunning && (
+            <Button
+              size="small"
+              variant="outlined"
+              startIcon={stopping ? <CircularProgress size={14} color="inherit" /> : <Pause />}
+              disabled={repairDisabled || svcBusy}
+              onClick={() => void onServiceAction(t, "stop")}
+              sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+            >
+              停止
+            </Button>
+          )}
+          {t === "mysql" && (
+            <Tooltip title={st.serviceRunning ? "从本机 .sql 文件导入数据库" : "MySQL 未运行，请先启动服务"}>
+              <span>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={busyOps === "mysql:import" ? <CircularProgress size={14} color="inherit" /> : <UploadFile />}
+                  disabled={repairDisabled || svcBusy || busyOps === "mysql:import" || !st.serviceRunning}
+                  onClick={() => void onImportSql()}
+                  sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+                >
+                  导入 SQL
+                </Button>
+              </span>
+            </Tooltip>
+          )}
+          <Button size="small" variant="outlined" disabled={repairDisabled || svcBusy} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
             重装
           </Button>
           <Button
@@ -632,7 +766,7 @@ function RepairCenter({
             variant="outlined"
             color="error"
             startIcon={<DeleteOutline />}
-            disabled={!st.canUninstall || repairDisabled}
+            disabled={!st.canUninstall || repairDisabled || svcBusy}
             onClick={() => {
               setRemoveData(false);
               setConfirmText("");
@@ -801,9 +935,10 @@ function RepairCenter({
         />
       </Tabs>
 
-      {/* ===== 安装与维护：页头 + 三个并列子 Tab（待安装/已安装/远程部署） ===== */}
-      {subTab === "install" && (
-        <>
+      {/* ===== 安装与维护：页头 + 三个并列子 Tab（待安装/已安装/远程部署） =====
+          CSS 隐藏挂载（display 切换）：切到「环境问题」页不卸载本面板，
+          探测结果与卡片状态原样保留，切回即现 */}
+      <Box sx={{ display: subTab === "install" ? undefined : "none" }}>
           <Box sx={{ mb: -0.5 }}>
             <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: 0.2 }}>
               环境修复
@@ -934,12 +1069,10 @@ function RepairCenter({
               </>
             );
           })()}
-        </>
-      )}
+      </Box>
 
-      {/* ===== 环境问题与 AI 方案 ===== */}
-      {subTab === "issues" && (
-        <>
+      {/* ===== 环境问题与 AI 方案（CSS 隐藏挂载：切页不丢 AI 方案卡与追问输入） ===== */}
+      <Box sx={{ display: subTab === "issues" ? undefined : "none" }}>
           {planError && <Alert severity="error">{planError}</Alert>}
 
       {/* 问题项汇总 */}
@@ -1124,8 +1257,7 @@ function RepairCenter({
           </Stack>
         </Paper>
       )}
-        </>
-      )}
+      </Box>
 
       {/* 代执行确认弹窗：白名单命令 + UAC 提权，执行前必须人工确认 */}
       <Dialog open={!!execCommand} onClose={() => !executing && setExecCommand(null)} maxWidth="sm" fullWidth>

@@ -88,6 +88,7 @@ fn match_target(name_lower: &str) -> Option<&'static str> {
 }
 
 /// 按文件名识别归属软件：安装包扩展名 + 名字模式（scan 的单元测试锚点）。
+#[cfg_attr(not(test), allow(dead_code))]
 fn classify(file_name: &str) -> Option<&'static str> {
     let n = file_name.to_lowercase();
     is_pkg_ext(&n).then_some(()).and_then(|()| match_target(&n))
@@ -276,6 +277,7 @@ pub fn validate_command(cmd: &str) -> Result<(), String> {
 
 /// 目标软件的预置 MSI 静默安装命令（UAC 提权执行）。None = 该软件无预置
 /// MSI 安装链路（EXE/ZIP 类走 AI 方案）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 pub fn msi_install_command(target: &str, msi_path: &str) -> Option<String> {
     let quoted = format!("\"{msi_path}\"");
     match target {

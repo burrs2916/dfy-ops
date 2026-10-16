@@ -128,6 +128,20 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ target, removeData }),
     }),
+  // 数据库运维：服务启停（net start/stop，UAC 确认）与 SQL 导入（stdin 直灌）
+  serviceAction: (target: string, action: "start" | "stop") =>
+    request<{ ok: boolean; running?: boolean; message?: string; error?: string }>(
+      "/api/env/repair/service",
+      {
+        method: "POST",
+        body: JSON.stringify({ target, action }),
+      },
+    ),
+  mysqlImport: (file: string) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/env/repair/mysql/import", {
+      method: "POST",
+      body: JSON.stringify({ file }),
+    }),
   startAll: () =>
     request<ActionResult[]>("/api/services/start-all", { method: "POST" }),
   stopAll: () =>

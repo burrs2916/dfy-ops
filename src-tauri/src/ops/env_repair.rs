@@ -71,6 +71,31 @@ fn parse_java_home_v(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// 平台管理目录中的 Java 主目录：与安装管线 locate_home 同口径（顶层 bin
+/// 或一层嵌套，如 jdk-17.0.20+1\bin）。探测必须覆盖嵌套布局——Temurin 官方
+/// zip 解压后 bin 不在顶层，只查顶层会「装完仍显示未安装」。非 Windows 恒 None。
+pub fn managed_java_home() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let root = std::path::Path::new(JDK_MANAGED_HOME);
+        if root.join(r"bin\java.exe").is_file() {
+            return Some(JDK_MANAGED_HOME.to_string());
+        }
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for e in entries.flatten() {
+                if e.path().is_dir() && e.path().join(r"bin\java.exe").is_file() {
+                    return Some(e.path().to_string_lossy().to_string());
+                }
+            }
+        }
+        None
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        None
+    }
+}
+
 /// 列出本机全部 Java 运行时（去重、逐个探测版本；探测失败的目录剔除）。
 #[cfg(target_os = "windows")]
 pub fn installed_jdks() -> Vec<JavaInstall> {
@@ -80,8 +105,8 @@ pub fn installed_jdks() -> Vec<JavaInstall> {
 
     let mut homes: BTreeSet<String> = BTreeSet::new();
     // 平台免安装目录优先：我们的 zip 管线装的 JDK（无注册表产品，检测必须走目录）
-    if std::path::Path::new(JDK_MANAGED_HOME).join("bin").exists() {
-        homes.insert(JDK_MANAGED_HOME.to_string());
+    if let Some(home) = managed_java_home() {
+        homes.insert(home);
     }
     // JAVA_HOME 兜底：zip 解压安装的 JDK 往往无注册表条目、不在常见目录、
     // 也不进 PATH（如 CI runner 的 hostedtoolcache），只设了 JAVA_HOME——
@@ -201,8 +226,8 @@ impl RepairState {
             job.logs.drain(..drain);
         }
     }
-    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-    fn log(&self, msg: impl Into<String>) {
+    /// 追加任务日志（修复中心进度区展示；上限 200 条自动截断）。
+    pub fn log(&self, msg: impl Into<String>) {
         let msg = msg.into();
         self.patch(move |j| j.logs.push(msg));
     }
@@ -524,11 +549,13 @@ pub fn service_spec(target: &str) -> Option<(&'static str, u16)> {
     }
 }
 
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn mysql_ini_path(home: &str) -> String {
     format!("{home}\\my.ini")
 }
 
 /// my.ini 内容：路径统一用正斜杠（MySQL 兼容），datadir 指向 home/data。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn build_mysql_ini(home: &str) -> String {
     let h = home.replace('\\', "/");
     format!(
@@ -537,6 +564,7 @@ fn build_mysql_ini(home: &str) -> String {
 }
 
 /// Redis 配置路径：zip 自带 redis.windows.conf 则用之，否则用平台最小配置。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn redis_conf_path(home: &str) -> String {
     let bundled = format!("{home}\\redis.windows.conf");
     if std::path::Path::new(&bundled).is_file() {
@@ -547,6 +575,7 @@ fn redis_conf_path(home: &str) -> String {
 }
 
 /// Redis 最小配置（zip 不带 redis.windows.conf 时的兜底）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn build_redis_conf() -> String {
     "port 6379\nbind 0.0.0.0\n".to_string()
 }
@@ -611,33 +640,41 @@ fn ps_quote(s: &str) -> String {
 }
 
 /// UAC 提权执行单条命令（程序 + 参数串），等待完成；返回 Err = 非零退出/取消。
-#[cfg(target_os = "windows")]
-fn runas_wait(exe: &str, args: &str) -> Result<(), String> {
-    let body = if args.is_empty() {
-        format!(
-            "$p = Start-Process -FilePath {} -Verb RunAs -Wait -PassThru; if ($p) {{ exit $p.ExitCode }} else {{ exit 1 }}",
-            ps_quote(exe)
-        )
-    } else {
-        format!(
-            "$p = Start-Process -FilePath {} -ArgumentList {} -Verb RunAs -Wait -PassThru; if ($p) {{ exit $p.ExitCode }} else {{ exit 1 }}",
-            ps_quote(exe),
-            ps_quote(args)
-        )
-    };
-    let out = std::process::Command::new("powershell")
-        .args(["-NoProfile", "-Command", &body])
-        .output()
-        .map_err(|e| format!("无法启动 PowerShell：{e}"))?;
-    if out.status.success() {
-        Ok(())
-    } else {
-        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        Err(if err.is_empty() {
-            format!("命令执行失败（退出码 {:?}，可能用户在 UAC 中点了取消）", out.status.code())
+/// 非 Windows 恒 Err（dev 机上服务启停接口会如实报错）。
+pub fn runas_wait(exe: &str, args: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let body = if args.is_empty() {
+            format!(
+                "$p = Start-Process -FilePath {} -Verb RunAs -Wait -PassThru; if ($p) {{ exit $p.ExitCode }} else {{ exit 1 }}",
+                ps_quote(exe)
+            )
         } else {
-            err
-        })
+            format!(
+                "$p = Start-Process -FilePath {} -ArgumentList {} -Verb RunAs -Wait -PassThru; if ($p) {{ exit $p.ExitCode }} else {{ exit 1 }}",
+                ps_quote(exe),
+                ps_quote(args)
+            )
+        };
+        let out = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", &body])
+            .output()
+            .map_err(|e| format!("无法启动 PowerShell：{e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            Err(if err.is_empty() {
+                format!("命令执行失败（退出码 {:?}，可能用户在 UAC 中点了取消）", out.status.code())
+            } else {
+                err
+            })
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (exe, args);
+        Err("该操作仅支持 Windows 目标机".into())
     }
 }
 
@@ -914,7 +951,29 @@ pub fn service_exists(svc: &str) -> bool {
     }
 }
 
+/// 服务是否处于 RUNNING（sc query 的 STATE 行；探测无需管理员权限）。
+pub fn service_running(svc: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("sc")
+            .args(["query", svc])
+            .output()
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .any(|l| l.trim_start().starts_with("STATE") && l.contains("RUNNING"))
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = svc;
+        false
+    }
+}
+
 /// DisplayName 是否像 Java/JDK MSI 产品（避免 "JavaScript ..." 之类误伤）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn java_product_name(display: &str) -> bool {
     let d = display.to_lowercase();
     d.contains("temurin")
@@ -926,11 +985,13 @@ fn java_product_name(display: &str) -> bool {
 }
 
 /// DisplayName 是否为 MySQL MSI 产品（MySQL Installer 装的 Server/Connector 等）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn mysql_product_name(display: &str) -> bool {
     display.to_lowercase().contains("mysql")
 }
 
 /// 从 MSI 形态的 UninstallString 提取产品码 {GUID}；非 msiexec 条目返回 None。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn extract_msi_guid(uninstall_string: &str) -> Option<String> {
     let s = uninstall_string.trim();
     if !s.to_lowercase().contains("msiexec") {
@@ -1269,11 +1330,13 @@ async fn run_java_uninstall(state: Arc<RepairState>, env_cache: EnvCache) {
 
 /// MySQL datadir 是否已初始化（data/mysql 系统库目录存在）。
 /// 卸载时保留数据 → 重装复用时必须跳过 --initialize-insecure（目录非空会失败）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn mysql_data_initialized(home: &str) -> bool {
     std::path::Path::new(home).join("data").join("mysql").is_dir()
 }
 
 /// UNIX 秒 → UTC "YYYYmmdd-HHMMSS"（civil_from_days 算法，不引时间库）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn timestamp_utc(secs: u64) -> String {
     let days = (secs / 86400) as i64;
     let rem = secs % 86400;
@@ -1293,6 +1356,7 @@ fn timestamp_utc(secs: u64) -> String {
 
 /// 候选 mysqldump 路径（按优先级）：平台安装目录 → MySQL Installer 常见安装位
 /// → PATH（平台无关的纯字符串生成，供测试与查找共用）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn mysqldump_candidates(install_dir: &str) -> Vec<String> {
     let mut out = vec![format!("{install_dir}\\bin\\mysqldump.exe")];
     for v in ["8.4", "8.0", "5.7"] {

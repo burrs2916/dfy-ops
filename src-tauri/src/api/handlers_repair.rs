@@ -163,31 +163,33 @@ fn registry_install_dir(state: &AppState, target: &str) -> String {
 
 /// 探测一个目标的安装痕迹（服务存在 + 目录存在；java = MSI 条目或平台免安装
 /// 目录；mysql 的服务检测叠加 MSI 产品条目——外部 MySQL Installer 装的也算已装）。
-async fn probe_target(state: &AppState, target: &str) -> (bool, bool) {
+/// 同时返回服务运行态（运维面板展示与启停按钮状态用；java 无服务恒 false）。
+async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
     if target == "java" {
         let installed = blocking(|| {
             !crate::ops::env_repair::java_msi_entries().is_empty()
-                || std::path::Path::new(crate::ops::env_repair::JDK_MANAGED_HOME)
-                    .join("bin")
-                    .is_dir()
+                || crate::ops::env_repair::managed_java_home().is_some()
         })
         .await;
-        return (installed, false);
+        return (installed, false, false);
     }
     let Some((svc, _)) = crate::ops::env_repair::service_spec(target) else {
-        return (false, false);
+        return (false, false, false);
     };
     let install_dir = registry_install_dir(state, target);
     let msi = target == "mysql";
-    let (svc_exists, dir_exists, msi_installed) = blocking(move || {
+    let (svc_exists, dir_exists, msi_installed, running) = blocking(move || {
+        let exists = crate::ops::env_repair::service_exists(svc);
+        let running = exists && crate::ops::env_repair::service_running(svc);
         (
-            crate::ops::env_repair::service_exists(svc),
+            exists,
             std::path::Path::new(&install_dir).is_dir(),
             msi && !crate::ops::env_repair::mysql_msi_entries().is_empty(),
+            running,
         )
     })
     .await;
-    (svc_exists || msi_installed, dir_exists)
+    (svc_exists || msi_installed, dir_exists, running)
 }
 
 /// GET /api/env/repair/uninstall/status —— 可卸载组件的安装痕迹探测，
@@ -195,7 +197,7 @@ async fn probe_target(state: &AppState, target: &str) -> (bool, bool) {
 pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let mut targets = Vec::new();
     for t in UNINSTALLABLE {
-        let (service_installed, dir_exists) = probe_target(&state, t).await;
+        let (service_installed, dir_exists, service_running) = probe_target(&state, t).await;
         targets.push(serde_json::json!({
             "target": t,
             "label": resource::target_label(t),
@@ -203,10 +205,122 @@ pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_
             "installDir": if t == "java" { String::new() } else { registry_install_dir(&state, t) },
             "serviceInstalled": service_installed,
             "dirExists": dir_exists,
+            "serviceRunning": service_running,
             "canUninstall": service_installed || dir_exists,
         }));
     }
     Json(serde_json::json!({ "targets": targets }))
+}
+
+#[derive(Deserialize)]
+pub struct ServiceActionReq {
+    pub target: String,
+    /// "start" | "stop"
+    pub action: String,
+}
+
+/// POST /api/env/repair/service —— 启动 / 停止平台注册的第三方服务
+/// （MySQL80、Redis）。net start/stop 需要管理员权限，走 runas_wait 一次 UAC；
+/// 幂等：已运行再 start、已停止再 stop 直接成功返回。
+pub async fn service_action(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ServiceActionReq>,
+) -> Json<serde_json::Value> {
+    if !UNINSTALLABLE.contains(&req.target.as_str()) {
+        return Json(serde_json::json!({ "ok": false, "error": format!("不支持的服务：{}", req.target) }));
+    }
+    let Some((svc, _)) = crate::ops::env_repair::service_spec(&req.target) else {
+        return Json(serde_json::json!({ "ok": false, "error": format!("未找到 { } 的服务定义", req.target) }));
+    };
+    let verb = match req.action.as_str() {
+        "start" => "start",
+        "stop" => "stop",
+        other => {
+            return Json(serde_json::json!({ "ok": false, "error": format!("未知操作：{other}") }))
+        }
+    };
+    let svc = svc.to_string();
+    let svc_probe = svc.clone();
+    let running_now = blocking(move || crate::ops::env_repair::service_running(&svc_probe)).await;
+    if running_now == (verb == "start") {
+        return Json(serde_json::json!({ "ok": true, "running": running_now, "message": "已是目标状态，无需操作" }));
+    }
+    let args = format!("{verb} {svc}");
+    let label = format!("{} 服务{}", crate::ops::resource::target_label(&req.target), if verb == "start" { "启动" } else { "停止" });
+    let res = blocking(move || crate::ops::env_repair::runas_wait("net", &args)).await;
+    match res {
+        Ok(()) => {
+            let svc2 = svc.clone();
+            let running = blocking(move || crate::ops::env_repair::service_running(&svc2)).await;
+            // net stop 后 STATE 短暂过渡，以复核为准；失败给出明确原因
+            if running == (verb == "start") {
+                state.repair.log(format!("{label} 完成"));
+                Json(serde_json::json!({ "ok": true, "running": running, "message": format!("{label}成功") }))
+            } else {
+                Json(serde_json::json!({ "ok": false, "error": format!("{label}后状态未达预期（当前{}），可在服务管理器查看详情", if running { "运行中" } else { "已停止" }) }))
+            }
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("{label}失败：{e}") })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MysqlImportReq {
+    /// 本机 .sql 文件绝对路径（前端原生文件选择器取得）
+    pub file: String,
+}
+
+/// POST /api/env/repair/mysql/import —— 导入 SQL 到本机 MySQL。
+/// mysql 客户端从平台安装目录定位；文件内容经 stdin 直灌（无 shell 重定向，
+/// 路径含空格/中文均安全）。初始化默认 root 空密码，与安装口径一致。
+pub async fn mysql_import(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MysqlImportReq>,
+) -> Json<serde_json::Value> {
+    let dir = registry_install_dir(&state, "mysql");
+    let file = req.file;
+    let file_for_log = file.clone();
+    let res = blocking(move || {
+        let client = format!("{dir}\\bin\\mysql.exe");
+        let client = if std::path::Path::new(&client).is_file() {
+            client
+        } else {
+            return Err(format!("未找到 mysql 客户端（{client}），请确认 MySQL 已由平台安装"));
+        };
+        if !std::path::Path::new(&file).is_file() {
+            return Err(format!("SQL 文件不存在：{file}"));
+        }
+        let f = std::fs::File::open(&file).map_err(|e| format!("无法读取 SQL 文件：{e}"))?;
+        let out = std::process::Command::new(&client)
+            .args(["-h", "127.0.0.1", "-P", "3306", "-u", "root", "--default-character-set=utf8mb4"])
+            .stdin(std::process::Stdio::from(f))
+            .output()
+            .map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let tail: String = err
+                .lines()
+                .filter(|l| l.contains("ERROR") || !l.trim().is_empty())
+                .rev()
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" | ");
+            Err(format!("导入失败（服务运行中且 root 密码为初始空密码时才可免密导入）：{tail}"))
+        }
+    })
+    .await;
+    match res {
+        Ok(()) => {
+            state.repair.log(format!("MySQL 导入完成：{}", file_for_log));
+            Json(serde_json::json!({ "ok": true, "message": "导入完成" }))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -466,7 +580,7 @@ pub async fn repair_plan(
     // 已安装状态：让 AI 区分「全新安装」与「修复/重装」，方案更贴近实情
     let mut installed = Vec::new();
     for t in UNINSTALLABLE {
-        let (on, _) = probe_target(&state, t).await;
+        let (on, _, _) = probe_target(&state, t).await;
         installed.push((resource::target_label(t).to_string(), on));
     }
     let prompt = build_plan_prompt(

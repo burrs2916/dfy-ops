@@ -195,6 +195,15 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/env/repair/uninstall",
             axum::routing::post(handlers_repair::uninstall),
         )
+        // 数据库运维：服务启停（net start/stop + UAC）与 SQL 导入（stdin 直灌）
+        .route(
+            "/api/env/repair/service",
+            axum::routing::post(handlers_repair::service_action),
+        )
+        .route(
+            "/api/env/repair/mysql/import",
+            axum::routing::post(handlers_repair::mysql_import),
+        )
         .route(
             "/api/settings/app",
             axum::routing::get(handlers::get_app_settings),
