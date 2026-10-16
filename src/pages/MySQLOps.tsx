@@ -476,9 +476,21 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
       )}
 
       {/* ===== 连接信息与快捷操作 ===== */}
-      <Paper variant="outlined" sx={{ p: 2 }}>
+      <Paper variant="outlined" sx={{ p: 2, position: "relative", overflow: "hidden" }}>
+        {/* 品牌渐变饰条（#0D9488 → #0EA5E9），呼应 logo 提升页面质感 */}
+        <Box
+          sx={{
+            position: "absolute",
+            top: 0,
+            left: 0,
+            right: 0,
+            height: 3,
+            background: "linear-gradient(90deg, #0D9488, #0EA5E9)",
+          }}
+        />
         <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap" rowGap={1}>
           <Stack direction="row" spacing={1} alignItems="center">
+            <StorageIcon color="primary" fontSize="small" />
             <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
               MySQL {ov?.version ?? (ovLoading ? "检测中…" : "未连接")}
             </Typography>
@@ -719,6 +731,12 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                   maxRows={8}
                   value={sql}
                   onChange={(e) => setSql(e.target.value)}
+                  onKeyDown={(e) => {
+                    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                      e.preventDefault();
+                      if (sql.trim() && !querying) void execSql();
+                    }
+                  }}
                   placeholder={db ? `在 ${db} 中执行，如 SELECT * FROM 表名 LIMIT 100` : "输入 SQL（选中左侧库后自动在该库执行）"}
                   sx={{ "& .MuiInputBase-input": { fontFamily: "monospace" } }}
                 />
@@ -726,6 +744,9 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                   <Button size="small" variant="contained" disabled={querying || !sql.trim()} onClick={() => void execSql()} sx={btnSx}>
                     {querying ? "执行中…" : "执行"}
                   </Button>
+                  <Typography variant="caption" color="text.secondary">
+                    Ctrl+Enter
+                  </Typography>
                   {db && <Chip size="small" label={`当前库：${db}`} onDelete={() => setDb(null)} />}
                   <Box sx={{ flex: 1 }} />
                   {history.length > 0 && (
@@ -879,15 +900,23 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                         )}
                       </Stack>
                       {u.grants.length > 0 && (
-                        <Box sx={{ mt: 0.5 }}>
+                        <Box sx={{ mt: 0.75 }}>
                           {u.grants.map((g, i) => (
-                            <Typography
-                              key={i}
-                              variant="caption"
-                              sx={{ display: "block", fontFamily: "monospace", color: "text.secondary", wordBreak: "break-all" }}
-                            >
-                              {g}
-                            </Typography>
+                            <Tooltip key={i} title={g} placement="top-start">
+                              <Typography
+                                variant="caption"
+                                sx={{
+                                  display: "block",
+                                  fontFamily: "monospace",
+                                  color: "text.secondary",
+                                  whiteSpace: "nowrap",
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                }}
+                              >
+                                {g}
+                              </Typography>
+                            </Tooltip>
                           ))}
                         </Box>
                       )}
@@ -998,7 +1027,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                   </Button>
                 </Stack>
                 <Alert severity="info" variant="outlined">
-                  修改后立即生效（SET GLOBAL），重启服务后恢复 my.ini 配置值；需要持久化请告诉我改配置文件的方案。
+                  修改后立即生效（SET GLOBAL）；重启服务后恢复为 my.ini 配置值，需要持久化请在下方「配置文件（my.ini）」中修改。
                 </Alert>
                 {varsLoading ? (
                   <Typography variant="body2" color="text.secondary">
@@ -1052,8 +1081,24 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                       </Typography>
                     </Tooltip>
                   )}
+                  {iniPath && iniContent !== iniOriginal && (
+                    <Chip size="small" color="warning" label="有未保存修改" />
+                  )}
                   <Box sx={{ flex: 1 }} />
-                  <Button size="small" startIcon={<RefreshIcon />} onClick={() => void loadIni()} disabled={iniLoading} sx={btnSx}>
+                  <Button
+                    size="small"
+                    startIcon={<RefreshIcon />}
+                    onClick={() => {
+                      if (
+                        iniContent !== iniOriginal &&
+                        !window.confirm("当前有未保存的修改，重新加载将丢弃这些修改。继续？")
+                      )
+                        return;
+                      void loadIni();
+                    }}
+                    disabled={iniLoading}
+                    sx={btnSx}
+                  >
                     重新加载
                   </Button>
                   <Button

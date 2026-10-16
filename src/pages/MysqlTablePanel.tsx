@@ -60,6 +60,7 @@ export default function MysqlTablePanel({
   const [data, setData] = useState<MysqlDataPage | null>(null);
   const [loading, setLoading] = useState(false);
   const [schema, setSchema] = useState<MysqlQueryResult | null>(null);
+  const [schemaKey, setSchemaKey] = useState<string | null>(null);
   const [schemaLoading, setSchemaLoading] = useState(false);
   const [ddl, setDdl] = useState<string | null>(null);
 
@@ -105,15 +106,21 @@ export default function MysqlTablePanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [db, table]);
 
-  // 换视图到「表结构」时拉结构（DDL 惰性加载）
+  // 换视图到「表结构」时拉结构（DDL 惰性加载）；同一张表已加载过则跳过，
+  // 避免在「表数据/表结构」页签间来回切换时每次都起 mysql 进程重复查询
   useEffect(() => {
     if (view !== "schema") return;
+    const key = `${db}.${table}`;
+    if (schemaKey === key && schema) return;
     let cancelled = false;
     setSchemaLoading(true);
     api
       .mysqlColumns(db, table)
       .then((r) => {
-        if (!cancelled) setSchema(r);
+        if (!cancelled) {
+          setSchema(r);
+          setSchemaKey(key);
+        }
       })
       .catch((e) => {
         if (!cancelled) onNotify(`获取表结构失败：${String(e)}`, "error");
@@ -124,7 +131,7 @@ export default function MysqlTablePanel({
     return () => {
       cancelled = true;
     };
-  }, [view, db, table, onNotify]);
+  }, [view, db, table, schemaKey, schema, onNotify]);
 
   const loadDdl = useCallback(async () => {
     try {
