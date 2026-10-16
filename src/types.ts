@@ -316,3 +316,9 @@ export interface MysqlDataPage {
   size?: number;
   error?: string;
 }
+
+/** GET /api/mysql/variables 的一项常用参数 */
+export interface MysqlVariableItem {
+  name: string;
+  value: string;
+}

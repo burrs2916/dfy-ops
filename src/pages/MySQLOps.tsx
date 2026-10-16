@@ -49,12 +49,16 @@ import SchemaIcon from "@mui/icons-material/Schema";
 import MonitorHeartIcon from "@mui/icons-material/MonitorHeart";
 import BuildCircleIcon from "@mui/icons-material/BuildCircle";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
+import SettingsIcon from "@mui/icons-material/Settings";
+import VpnKeyIcon from "@mui/icons-material/VpnKey";
+import TuneIcon from "@mui/icons-material/Tune";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import type {
   MysqlOverview,
   MysqlTableInfo,
   MysqlUserInfo,
+  MysqlVariableItem,
   SqlResult,
 } from "../types";
 import MysqlTablePanel from "./MysqlTablePanel";
@@ -145,10 +149,13 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
   const [usersLoading, setUsersLoading] = useState(false);
   const [pwdOpen, setPwdOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
+  const [credOpen, setCredOpen] = useState(false);
 
-  // 服务器（processlist）
+  // 服务器（processlist + 常用参数动态配置）
   const [procs, setProcs] = useState<{ columns: string[]; rows: string[][] } | null>(null);
   const [procsLoading, setProcsLoading] = useState(false);
+  const [vars, setVars] = useState<MysqlVariableItem[] | null>(null);
+  const [varsLoading, setVarsLoading] = useState(false);
 
   const [importing, setImporting] = useState(false);
   const [confirm, setConfirm] = useState<{
@@ -289,9 +296,25 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     }
   }, [flash]);
 
+  const loadVars = useCallback(async () => {
+    setVarsLoading(true);
+    try {
+      const r = await api.mysqlVariables();
+      if (r.ok && r.items) setVars(r.items);
+      else flash(r.error ?? "获取参数失败", "error");
+    } catch (e) {
+      flash(`获取参数失败：${String(e)}`, "error");
+    } finally {
+      setVarsLoading(false);
+    }
+  }, [flash]);
+
   useEffect(() => {
-    if (rightTab === "server" && ov?.running) void loadProcs();
-  }, [rightTab, ov?.running, loadProcs]);
+    if (rightTab === "server" && ov?.running) {
+      void loadProcs();
+      void loadVars();
+    }
+  }, [rightTab, ov?.running, loadProcs, loadVars]);
 
   const onImport = useCallback(async () => {
     let picked: string | null = null;
@@ -454,6 +477,20 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
             <Button size="small" variant="outlined" startIcon={<KeyIcon />} disabled={!running} onClick={() => setPwdOpen(true)} sx={btnSx}>
               修改密码
             </Button>
+            <Tooltip title="平台连接 MySQL 的用户/密码/端口（平台外改过密码后在这里重新对上）">
+              <span>
+                <Button
+                  size="small"
+                  variant="outlined"
+                  startIcon={<SettingsIcon />}
+                  disabled={!mysqlInstalled}
+                  onClick={() => setCredOpen(true)}
+                  sx={btnSx}
+                >
+                  连接配置
+                </Button>
+              </span>
+            </Tooltip>
             <Button size="small" variant="outlined" startIcon={<UploadFileIcon />} disabled={!running || importing} onClick={() => void onImport()} sx={btnSx}>
               导入 SQL
             </Button>
@@ -735,6 +772,17 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                         {u.user === "root" && <Chip size="small" label="平台管理员" />}
                         <Box sx={{ flex: 1 }} />
                         {u.user !== "root" && (
+                          <UserPasswordButton
+                            user={u.user}
+                            host={u.host}
+                            onDone={(m) => {
+                              flash(m, "success");
+                              setUsers(null);
+                            }}
+                            onError={(e) => flash(e, "error")}
+                          />
+                        )}
+                        {u.user !== "root" && (
                           <Button
                             size="small"
                             color="error"
@@ -865,6 +913,58 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                 )}
               </Stack>
             )}
+
+            {rightTab === "server" && (
+              <Divider sx={{ my: 2 }} />
+            )}
+
+            {rightTab === "server" && (
+              <Stack spacing={1.5}>
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Typography variant="subtitle2" sx={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 0.5 }}>
+                    <TuneIcon fontSize="small" /> 常用参数（在线调整）
+                  </Typography>
+                  <Box sx={{ flex: 1 }} />
+                  <Button size="small" startIcon={<RefreshIcon />} onClick={() => void loadVars()} disabled={varsLoading} sx={btnSx}>
+                    刷新
+                  </Button>
+                </Stack>
+                <Alert severity="info" variant="outlined">
+                  修改后立即生效（SET GLOBAL），重启服务后恢复 my.ini 配置值；需要持久化请告诉我改配置文件的方案。
+                </Alert>
+                {varsLoading ? (
+                  <Typography variant="body2" color="text.secondary">
+                    加载中…
+                  </Typography>
+                ) : (vars?.length ?? 0) === 0 ? (
+                  <Typography variant="body2" color="text.secondary">
+                    暂无参数数据
+                  </Typography>
+                ) : (
+                  <TableContainer sx={{ border: "1px solid", borderColor: "divider", borderRadius: 1 }}>
+                    <Table size="small">
+                      <TableHead>
+                        <TableRow>
+                          <TableCell sx={{ fontWeight: 700 }}>参数</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>当前值</TableCell>
+                          <TableCell sx={{ fontWeight: 700 }}>调整</TableCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {vars!.map((v) => (
+                          <VariableRow
+                            key={v.name}
+                            item={v}
+                            onSaved={(m) => flash(m, "success")}
+                            onError={(e) => flash(e, "error")}
+                          />
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </TableContainer>
+                )}
+              </Stack>
+            )}
           </Paper>
         </Stack>
       </Box>
@@ -919,6 +1019,18 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
           setCreateOpen(false);
           flash(msg, "success");
           setUsers(null);
+        }}
+        onError={(e) => flash(e, "error")}
+      />
+
+      <CredentialDialog
+        open={credOpen}
+        onClose={() => setCredOpen(false)}
+        ov={ov}
+        onDone={(msg) => {
+          setCredOpen(false);
+          flash(msg, "success");
+          void refreshOverview();
         }}
         onError={(e) => flash(e, "error")}
       />
@@ -1129,6 +1241,284 @@ function CreateUserDialog({
         </Button>
         <Button variant="contained" disabled={busy || !user || !password} onClick={() => void submit()} sx={btnSx}>
           {busy ? "创建中…" : "创建用户"}
+        </Button>
+      </DialogActions>
+    </Dialog>
+  );
+}
+
+// ===== 业务用户改密码（root 执行，无需旧密码） =====
+function UserPasswordButton({
+  user,
+  host,
+  onDone,
+  onError,
+}: {
+  user: string;
+  host: string;
+  onDone: (msg: string) => void;
+  onError: (msg: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!open) {
+      setPassword("");
+      setConfirm("");
+    }
+  }, [open]);
+
+  const submit = async () => {
+    if (password !== confirm) {
+      onError("两次输入的密码不一致");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await api.mysqlUserPassword(user, host, password);
+      if (r.ok) {
+        setOpen(false);
+        onDone(r.message ?? "密码修改成功");
+      } else onError(r.error ?? "修改失败");
+    } catch (e) {
+      onError(`修改失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <Button size="small" startIcon={<VpnKeyIcon />} onClick={() => setOpen(true)} sx={btnSx}>
+        改密码
+      </Button>
+      <Dialog open={open} onClose={() => setOpen(false)} maxWidth="xs" fullWidth>
+        <DialogTitle sx={{ fontWeight: 700 }}>修改用户密码</DialogTitle>
+        <DialogContent>
+          <Stack spacing={2} sx={{ mt: 0.5 }}>
+            <Typography variant="body2" color="text.secondary">
+              目标账号 <Typography component="span" sx={{ fontFamily: "monospace", fontWeight: 600 }}>{user}@{host}</Typography>
+              ，由 root 执行改密，无需旧密码。使用该账号的应用需同步更新连接密码。
+            </Typography>
+            <TextField
+              label="新密码（至少 6 位）"
+              type="password"
+              size="small"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              fullWidth
+            />
+            <TextField
+              label="确认新密码"
+              type="password"
+              size="small"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              fullWidth
+            />
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setOpen(false)} sx={btnSx}>
+            取消
+          </Button>
+          <Button
+            variant="contained"
+            disabled={busy || password.length < 6 || !confirm}
+            onClick={() => void submit()}
+            sx={btnSx}
+          >
+            {busy ? "提交中…" : "确认修改"}
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </>
+  );
+}
+
+// ===== 服务器参数行：单参数在线调整（SET GLOBAL） =====
+function VariableRow({
+  item,
+  onSaved,
+  onError,
+}: {
+  item: MysqlVariableItem;
+  onSaved: (msg: string) => void;
+  onError: (msg: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(item.value);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!editing) setValue(item.value);
+  }, [item.value, editing]);
+
+  const cancel = () => {
+    setValue(item.value);
+    setEditing(false);
+  };
+
+  const save = async () => {
+    const v = value.trim();
+    if (!v || v === item.value) {
+      cancel();
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await api.mysqlSetVariable(item.name, v);
+      if (r.ok) {
+        setEditing(false);
+        onSaved(r.message ?? `${item.name} 已调整`);
+      } else onError(r.error ?? "调整失败");
+    } catch (e) {
+      onError(`调整失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <TableRow hover>
+      <TableCell sx={{ fontFamily: "monospace", fontWeight: 600, whiteSpace: "nowrap" }}>{item.name}</TableCell>
+      <TableCell sx={{ fontFamily: "monospace", maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <Tooltip title={item.value} disableHoverListener={editing}>
+          <span>{item.value}</span>
+        </Tooltip>
+      </TableCell>
+      <TableCell>
+        {editing ? (
+          <Stack direction="row" spacing={1} alignItems="center">
+            <TextField
+              size="small"
+              autoFocus
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void save();
+                if (e.key === "Escape") cancel();
+              }}
+              sx={{ width: 220 }}
+            />
+            <Button size="small" variant="contained" disabled={busy} onClick={() => void save()} sx={btnSx}>
+              {busy ? "保存中…" : "保存"}
+            </Button>
+            <Button size="small" disabled={busy} onClick={cancel} sx={btnSx}>
+              取消
+            </Button>
+          </Stack>
+        ) : (
+          <Button size="small" onClick={() => setEditing(true)} sx={btnSx}>
+            调整
+          </Button>
+        )}
+      </TableCell>
+    </TableRow>
+  );
+}
+
+// ===== 连接配置：平台托管凭据修正（平台外改过密码/端口后的自救入口） =====
+function CredentialDialog({
+  open,
+  onClose,
+  ov,
+  onDone,
+  onError,
+}: {
+  open: boolean;
+  onClose: () => void;
+  ov: MysqlOverview | null;
+  onDone: (msg: string) => void;
+  onError: (msg: string) => void;
+}) {
+  const [user, setUser] = useState("");
+  const [port, setPort] = useState("");
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setUser(ov?.user ?? "");
+      setPort(ov?.port != null ? String(ov.port) : "");
+      setPassword("");
+    }
+    // ov 只在打开瞬间取预填值，打开期间不随刷新重置输入
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  const submit = async () => {
+    if (!user.trim()) {
+      onError("用户名不能为空");
+      return;
+    }
+    const portNum = Number(port.trim());
+    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+      onError("端口必须是 1-65535 的整数");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await api.mysqlUpdateCredential({
+        user: user.trim(),
+        port: portNum,
+        ...(password ? { password } : {}),
+      });
+      if (r.ok) onDone(r.message ?? "连接配置已保存");
+      else onError(r.error ?? "保存失败");
+    } catch (e) {
+      onError(`保存失败：${String(e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Dialog open={open} onClose={onClose} maxWidth="xs" fullWidth>
+      <DialogTitle sx={{ fontWeight: 700 }}>连接配置</DialogTitle>
+      <DialogContent>
+        <Stack spacing={2} sx={{ mt: 0.5 }}>
+          <Alert severity="info">
+            这是平台连接 MySQL 使用的配置。若你在平台外修改过密码或端口导致平台连不上数据库，在这里改成实际值即可恢复。
+          </Alert>
+          <TextField
+            label="用户名"
+            size="small"
+            value={user}
+            onChange={(e) => setUser(e.target.value)}
+            fullWidth
+          />
+          <TextField
+            label="密码"
+            type="password"
+            size="small"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            helperText="留空表示不修改密码"
+            fullWidth
+          />
+          <TextField
+            label="端口"
+            size="small"
+            value={port}
+            onChange={(e) => setPort(e.target.value)}
+            helperText="1-65535，默认 3306"
+            fullWidth
+          />
+          <Typography variant="caption" color="text.secondary">
+            保存仅更新平台托管配置，不会修改 MySQL 本身；保存后点「刷新」验证连接。
+          </Typography>
+        </Stack>
+      </DialogContent>
+      <DialogActions>
+        <Button onClick={onClose} sx={btnSx}>
+          取消
+        </Button>
+        <Button variant="contained" disabled={busy} onClick={() => void submit()} sx={btnSx}>
+          {busy ? "保存中…" : "保存"}
         </Button>
       </DialogActions>
     </Dialog>

@@ -25,6 +25,7 @@ import type {
   MysqlQueryResult,
   MysqlTableInfo,
   MysqlUserInfo,
+  MysqlVariableItem,
   SqlResult,
   UninstallTargetStatus,
 } from "./types";
@@ -232,6 +233,27 @@ export const api = {
     request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/drop-user", {
       method: "POST",
       body: JSON.stringify({ user, host }),
+    }),
+  // ===== 动态配置 =====
+  // 业务用户改密（root 操作，不需要旧密码）
+  mysqlUserPassword: (user: string, host: string, password: string) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/user-password", {
+      method: "POST",
+      body: JSON.stringify({ user, host, password }),
+    }),
+  // 修正平台托管的连接配置（平台外改过密码/端口后的自救入口，只写托管文件）
+  mysqlUpdateCredential: (body: { user?: string; password?: string; port?: number }) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/credential", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  mysqlVariables: () =>
+    request<{ ok: boolean; items?: MysqlVariableItem[]; error?: string }>("/api/mysql/variables"),
+  // 白名单内的常用参数在线调整（SET GLOBAL，重启后恢复 my.ini 值）
+  mysqlSetVariable: (name: string, value: string) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/set-variable", {
+      method: "POST",
+      body: JSON.stringify({ name, value }),
     }),
   startAll: () =>
     request<ActionResult[]>("/api/services/start-all", { method: "POST" }),

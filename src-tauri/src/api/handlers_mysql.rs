@@ -764,3 +764,151 @@ pub async fn drop_user(State(state): State<Arc<AppState>>, Json(req): Json<DropU
         Err(e) => Json(json!({ "ok": false, "error": e })),
     }
 }
+
+#[derive(Debug, Deserialize)]
+pub struct UserPasswordReq {
+    pub user: String,
+    pub host: String,
+    pub password: String,
+}
+
+/// POST /api/mysql/user-password —— 修改业务用户密码（root 操作，不需要旧密码）。
+pub async fn user_password(State(state): State<Arc<AppState>>, Json(req): Json<UserPasswordReq>) -> Json<serde_json::Value> {
+    if !valid_ident(&req.user) {
+        return Json(json!({ "ok": false, "error": "用户名含非法字符" }));
+    }
+    if req.host.is_empty() || req.host.contains('\'') || req.host.contains('\\') {
+        return Json(json!({ "ok": false, "error": "主机名含非法字符" }));
+    }
+    if req.password.is_empty() {
+        return Json(json!({ "ok": false, "error": "密码不能为空" }));
+    }
+    let cred = mysql_credential::load(&state.config_dir);
+    let sql = format!(
+        "ALTER USER {}@{} IDENTIFIED BY {}",
+        sql_quote(&req.user),
+        sql_quote(&req.host),
+        sql_quote(&req.password)
+    );
+    let st = state.clone();
+    let res = blocking(move || run_sql(&st, &cred, &sql, None)).await;
+    match res {
+        Ok(_) => {
+            state.repair.log(format!("MySQL 用户 {}@{} 密码已修改", req.user, req.host));
+            Json(json!({ "ok": true, "message": format!("用户 {}@{} 密码修改成功", req.user, req.host) }))
+        }
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateCredentialReq {
+    #[serde(default)]
+    pub user: Option<String>,
+    /// 平台连接 MySQL 用的密码（手动同步：在平台外改过 root 密码后在这里修正）
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default)]
+    pub port: Option<u16>,
+}
+
+/// POST /api/mysql/credential —— 修正平台托管的连接配置（只写托管文件，不碰 MySQL）。
+/// 自救入口：密码在平台外被改动导致平台连不上时，在这里输入真实密码重新对上。
+pub async fn update_credential(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<UpdateCredentialReq>,
+) -> Json<serde_json::Value> {
+    let mut cred = mysql_credential::load(&state.config_dir);
+    if let Some(u) = req.user.as_deref() {
+        if u.trim().is_empty() {
+            return Json(json!({ "ok": false, "error": "用户名不能为空" }));
+        }
+        cred.user = u.trim().to_string();
+    }
+    if let Some(p) = req.password {
+        cred.password = p;
+    }
+    if let Some(port) = req.port {
+        if !(1..=65535).contains(&port) {
+            return Json(json!({ "ok": false, "error": "端口范围 1-65535" }));
+        }
+        cred.port = port;
+    }
+    if let Err(e) = mysql_credential::save(&state.config_dir, &cred) {
+        return Json(json!({ "ok": false, "error": e }));
+    }
+    state.repair.log("MySQL 平台连接配置已更新（托管凭据同步）");
+    Json(json!({ "ok": true, "message": "平台连接配置已保存，可点「刷新」验证连接" }))
+}
+
+// ===== 服务器参数动态配置 =====
+
+/// 可在线调整的常用参数白名单（GET 展示与 POST 设置共用，防任意 SET GLOBAL）。
+/// 注明类型：数字类 SET GLOBAL 校验纯数字值。
+const MANAGED_VARIABLES: &[(&str, bool)] = &[
+    ("max_connections", true),
+    ("max_allowed_packet", true),
+    ("wait_timeout", true),
+    ("interactive_timeout", true),
+    ("innodb_buffer_pool_size", true),
+    ("character_set_server", false),
+    ("collation_server", false),
+    ("time_zone", false),
+    ("sql_mode", false),
+];
+
+/// GET /api/mysql/variables —— 常用参数当前值（SHOW VARIABLES 白名单内）。
+pub async fn variables(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let names: Vec<String> = MANAGED_VARIABLES.iter().map(|(n, _)| sql_quote(n)).collect();
+    let sql = format!("SHOW VARIABLES WHERE Variable_name IN ({})", names.join(", "));
+    let cred = mysql_credential::load(&state.config_dir);
+    let st = state.clone();
+    let res = blocking(move || run_sql(&st, &cred, &sql, None)).await;
+    match res {
+        Ok((_, rows)) => {
+            let items: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|r| json!({ "name": r.first().cloned().unwrap_or_default(), "value": r.get(1).cloned().unwrap_or_default() }))
+                .collect();
+            Json(json!({ "ok": true, "items": items }))
+        }
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetVariableReq {
+    pub name: String,
+    pub value: String,
+}
+
+/// POST /api/mysql/set-variable —— 动态调整常用参数（SET GLOBAL，运行时生效）。
+/// 仅白名单内的变量可设置；数字类校验纯数字。重启后恢复 my.ini 配置值。
+pub async fn set_variable(State(state): State<Arc<AppState>>, Json(req): Json<SetVariableReq>) -> Json<serde_json::Value> {
+    let Some((_, is_numeric)) = MANAGED_VARIABLES.iter().find(|(n, _)| *n == req.name) else {
+        return Json(json!({ "ok": false, "error": format!("不支持修改参数：{}（仅支持平台白名单内的常用参数）", req.name) }));
+    };
+    let value = req.value.trim().to_string();
+    if value.is_empty() {
+        return Json(json!({ "ok": false, "error": "参数值不能为空" }));
+    }
+    if *is_numeric && !value.chars().all(|c| c.is_ascii_digit()) {
+        return Json(json!({ "ok": false, "error": "该参数只接受纯数字值" }));
+    }
+    if !*is_numeric && (value.contains('\'') || value.contains('\\') || value.contains(';')) {
+        return Json(json!({ "ok": false, "error": "参数值含非法字符" }));
+    }
+    let cred = mysql_credential::load(&state.config_dir);
+    let lit = if *is_numeric { value.clone() } else { sql_quote(&value) };
+    let sql = format!("SET GLOBAL {} = {}", quote_ident(&req.name), lit);
+    let st = state.clone();
+    let name = req.name.clone();
+    let res = blocking(move || run_sql(&st, &cred, &sql, None)).await;
+    match res {
+        Ok(_) => {
+            state.repair.log(format!("MySQL 参数 {} 已动态调整为 {}（重启后恢复 my.ini 配置值）", name, value));
+            Json(json!({ "ok": true, "message": format!("{} 已调整为 {}（运行时生效；重启后恢复 my.ini 配置值）", name, value) }))
+        }
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}

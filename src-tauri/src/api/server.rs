@@ -243,6 +243,20 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/mysql/kill", axum::routing::post(handlers_mysql::kill))
         .route("/api/mysql/drop-user", axum::routing::post(handlers_mysql::drop_user))
+        // 动态配置：托管连接修正 / 业务用户改密 / 常用参数在线调整（白名单）
+        .route(
+            "/api/mysql/user-password",
+            axum::routing::post(handlers_mysql::user_password),
+        )
+        .route(
+            "/api/mysql/credential",
+            axum::routing::post(handlers_mysql::update_credential),
+        )
+        .route("/api/mysql/variables", axum::routing::get(handlers_mysql::variables))
+        .route(
+            "/api/mysql/set-variable",
+            axum::routing::post(handlers_mysql::set_variable),
+        )
         .route(
             "/api/settings/app",
             axum::routing::get(handlers::get_app_settings),

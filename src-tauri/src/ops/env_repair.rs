@@ -235,20 +235,21 @@ pub fn user_path_has(entry: &str) -> bool {
     }
 }
 
-/// 向用户级 PATH 追加条目（已存在则不动，返回 false）。非 Windows Err。
+/// 向用户级 PATH 追加条目（已存在则不动，返回 false）。仅 Windows 有实现与调用。
+#[cfg(target_os = "windows")]
 pub fn ensure_user_path_entry(entry: &str) -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     {
         let (raw, vtype) = read_user_path_raw()?;
         if raw
             .split(';')
-            .any(|p: &str| norm_path_entry(p) == norm_path_entry(entry))
+            .any(|p| norm_path_entry(p) == norm_path_entry(entry))
         {
             return Ok(false);
         }
         let mut parts: Vec<&str> = raw
             .split(';')
-            .filter(|p: &str| !p.trim().is_empty())
+            .filter(|p| !p.trim().is_empty())
             .collect();
         parts.push(entry);
         write_user_path_raw(&parts.join(";"), vtype)?;
@@ -261,7 +262,8 @@ pub fn ensure_user_path_entry(entry: &str) -> Result<bool, String> {
     }
 }
 
-/// 从用户级 PATH 移除条目（不存在返回 false；卸载 java 清理用）。非 Windows Err。
+/// 从用户级 PATH 移除条目（不存在返回 false；卸载 java 清理用）。仅 Windows 有实现与调用。
+#[cfg(target_os = "windows")]
 pub fn remove_user_path_entry(entry: &str) -> Result<bool, String> {
     #[cfg(target_os = "windows")]
     {
@@ -269,7 +271,7 @@ pub fn remove_user_path_entry(entry: &str) -> Result<bool, String> {
         let target = norm_path_entry(entry);
         let all: Vec<&str> = raw
             .split(';')
-            .filter(|p: &str| !p.trim().is_empty())
+            .filter(|p| !p.trim().is_empty())
             .collect();
         let kept: Vec<&str> = all
             .iter()
