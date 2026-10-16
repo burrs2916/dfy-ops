@@ -1644,11 +1644,24 @@ fn timestamp_utc(secs: u64) -> String {
     format!("{y:04}{mo:02}{d:02}-{h:02}{m:02}{s:02}")
 }
 
-/// 候选 mysqldump 路径（按优先级）：平台安装目录 → MySQL Installer 常见安装位
-/// → PATH（平台无关的纯字符串生成，供测试与查找共用）。
+/// 候选 mysqldump 路径（按优先级）：平台安装目录顶层 bin → 一层嵌套 bin（zip
+/// 带顶层目录时主目录在嵌套层，与 locate_home 同口径）→ MySQL Installer 常见
+/// 安装位 → PATH（平台无关字符串生成 + 嵌套实扫，供测试与查找共用）。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn mysqldump_candidates(install_dir: &str) -> Vec<String> {
-    let mut out = vec![format!("{install_dir}\\bin\\mysqldump.exe")];
+    let bin = |base: &std::path::Path| {
+        base.join("bin").join("mysqldump.exe").to_string_lossy().to_string()
+    };
+    let root = std::path::Path::new(install_dir);
+    let mut out = vec![bin(root)];
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.push(bin(&p));
+            }
+        }
+    }
     for v in ["8.4", "8.0", "5.7"] {
         out.push(format!(r"C:\Program Files\MySQL\MySQL Server {v}\bin\mysqldump.exe"));
     }
@@ -1836,12 +1849,15 @@ mod tests {
         let _ = std::fs::remove_dir_all(&partial);
     }
 
-    /// 备份链路：mysqldump 候选顺序（平台目录 → MSI 常见位 → PATH）与
-    /// 时间戳格式（备份文件名可读、按时间排序）。
+    /// 备份链路：mysqldump 候选顺序（平台目录顶层 → 嵌套 → MSI 常见位 → PATH）
+    /// 与时间戳格式（备份文件名可读、按时间排序）。
     #[test]
     fn mysql_backup_helpers() {
         let cands = mysqldump_candidates(r"C:\services\mysql");
-        assert_eq!(cands[0], r"C:\services\mysql\bin\mysqldump.exe");
+        // 首位 = 平台目录下的 bin/mysqldump.exe（分隔符由 Path::join 决定，
+        // Windows 反斜杠、其余平台原样，均能被 is_file 正确识别）
+        assert!(cands[0].starts_with(r"C:\services\mysql"));
+        assert!(cands[0].ends_with("mysqldump.exe") && cands[0].contains("bin"));
         assert!(cands.iter().any(|p| p.contains("MySQL Server 8.0")));
         assert_eq!(cands.last().unwrap(), "mysqldump.exe", "PATH 兜底必须最后");
 

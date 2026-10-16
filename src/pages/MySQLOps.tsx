@@ -52,6 +52,9 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import SettingsIcon from "@mui/icons-material/Settings";
 import VpnKeyIcon from "@mui/icons-material/VpnKey";
 import TuneIcon from "@mui/icons-material/Tune";
+import DescriptionIcon from "@mui/icons-material/Description";
+import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
+import NetworkCheckIcon from "@mui/icons-material/NetworkCheck";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import type {
@@ -156,6 +159,14 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
   const [procsLoading, setProcsLoading] = useState(false);
   const [vars, setVars] = useState<MysqlVariableItem[] | null>(null);
   const [varsLoading, setVarsLoading] = useState(false);
+
+  // my.ini 配置文件（服务器页在线编辑；保存由后端自动备份）
+  const [iniPath, setIniPath] = useState<string | null>(null);
+  const [iniContent, setIniContent] = useState("");
+  const [iniOriginal, setIniOriginal] = useState("");
+  const [iniError, setIniError] = useState<string | null>(null);
+  const [iniLoading, setIniLoading] = useState(false);
+  const [iniSaving, setIniSaving] = useState(false);
 
   const [importing, setImporting] = useState(false);
   const [confirm, setConfirm] = useState<{
@@ -309,12 +320,50 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     }
   }, [flash]);
 
+  const loadIni = useCallback(async () => {
+    setIniLoading(true);
+    setIniError(null);
+    try {
+      const r = await api.mysqlConfigFile();
+      if (r.ok && r.content != null) {
+        setIniPath(r.path ?? "");
+        setIniContent(r.content);
+        setIniOriginal(r.content);
+      } else {
+        setIniPath(null);
+        setIniContent("");
+        setIniOriginal("");
+        setIniError(r.error ?? "未找到 my.ini");
+      }
+    } catch (e) {
+      setIniError(`读取配置失败：${String(e)}`);
+    } finally {
+      setIniLoading(false);
+    }
+  }, []);
+
+  const saveIni = useCallback(async () => {
+    setIniSaving(true);
+    try {
+      const r = await api.mysqlSaveConfigFile(iniContent);
+      if (r.ok) {
+        setIniOriginal(iniContent);
+        flash(r.message ?? "已保存，重启 MySQL 服务后生效", "success");
+      } else flash(r.error ?? "保存失败", "error");
+    } catch (e) {
+      flash(`保存失败：${String(e)}`, "error");
+    } finally {
+      setIniSaving(false);
+    }
+  }, [iniContent, flash]);
+
   useEffect(() => {
     if (rightTab === "server" && ov?.running) {
       void loadProcs();
       void loadVars();
+      void loadIni();
     }
-  }, [rightTab, ov?.running, loadProcs, loadVars]);
+  }, [rightTab, ov?.running, loadProcs, loadVars, loadIni]);
 
   const onImport = useCallback(async () => {
     let picked: string | null = null;
@@ -624,12 +673,18 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
           {/* ===== 右栏：表数据 / 表结构 / SQL 控制台 / 用户与权限 / 服务器 ===== */}
           <Paper variant="outlined" sx={{ flex: 1, minWidth: 0, p: 2 }}>
             <Tabs value={rightTab} onChange={(_, v: RightTab) => setRightTab(v)} variant="scrollable" scrollButtons="auto">
-              <Tab value="data" icon={<TableChartIcon fontSize="small" />} iconPosition="start" label="表数据" disabled={!table} />
-              <Tab value="schema" icon={<SchemaIcon fontSize="small" />} iconPosition="start" label="表结构" disabled={!table} />
+              <Tab value="data" icon={<TableChartIcon fontSize="small" />} iconPosition="start" label="表数据" />
+              <Tab value="schema" icon={<SchemaIcon fontSize="small" />} iconPosition="start" label="表结构" />
               <Tab value="sql" icon={<TerminalIcon fontSize="small" />} iconPosition="start" label="SQL 控制台" />
               <Tab value="users" icon={<GroupIcon fontSize="small" />} iconPosition="start" label="用户与权限" />
               <Tab value="server" icon={<MonitorHeartIcon fontSize="small" />} iconPosition="start" label="服务器" />
             </Tabs>
+
+            {(rightTab === "data" || rightTab === "schema") && !(db && table) && (
+              <Alert severity="info" sx={{ mt: 1.5 }}>
+                请先在左侧选择数据库并点击表名，即可在此浏览表数据或表结构。
+              </Alert>
+            )}
 
             {(rightTab === "data" || rightTab === "schema") && db && table && (
               <>
@@ -962,6 +1017,64 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                       </TableBody>
                     </Table>
                   </TableContainer>
+                )}
+              </Stack>
+            )}
+
+            {rightTab === "server" && <Divider sx={{ my: 2 }} />}
+
+            {rightTab === "server" && (
+              <Stack spacing={1.5}>
+                <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" rowGap={1}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 0.5 }}>
+                    <DescriptionIcon fontSize="small" /> 配置文件（my.ini）
+                  </Typography>
+                  {iniPath && (
+                    <Tooltip title={iniPath}>
+                      <Typography
+                        variant="caption"
+                        sx={{ fontFamily: "monospace", color: "text.secondary", maxWidth: 380, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      >
+                        {iniPath}
+                      </Typography>
+                    </Tooltip>
+                  )}
+                  <Box sx={{ flex: 1 }} />
+                  <Button size="small" startIcon={<RefreshIcon />} onClick={() => void loadIni()} disabled={iniLoading} sx={btnSx}>
+                    重新加载
+                  </Button>
+                  <Button
+                    size="small"
+                    variant="contained"
+                    startIcon={<SaveOutlinedIcon />}
+                    disabled={iniSaving || iniLoading || !iniPath || iniContent === iniOriginal}
+                    onClick={() => void saveIni()}
+                    sx={btnSx}
+                  >
+                    {iniSaving ? "保存中…" : "保存（自动备份）"}
+                  </Button>
+                </Stack>
+                {iniError ? (
+                  <Alert severity="warning" variant="outlined">
+                    {iniError}
+                  </Alert>
+                ) : (
+                  <>
+                    <Alert severity="info" variant="outlined">
+                      在线修改 MySQL 配置文件：保存前自动备份为 my.ini.bak-时间戳，重启 MySQL 服务后生效；格式错误会导致服务启动失败，可用备份文件还原。
+                    </Alert>
+                    <TextField
+                      size="small"
+                      multiline
+                      minRows={8}
+                      maxRows={16}
+                      value={iniContent}
+                      disabled={iniLoading || !iniPath}
+                      onChange={(e) => setIniContent(e.target.value)}
+                      placeholder={iniLoading ? "加载中…" : ""}
+                      sx={{ "& .MuiInputBase-input": { fontFamily: "monospace", fontSize: 13 } }}
+                    />
+                  </>
                 )}
               </Stack>
             )}
@@ -1439,24 +1552,59 @@ function CredentialDialog({
   const [port, setPort] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{ ok: boolean; text: string } | null>(null);
 
   useEffect(() => {
     if (open) {
       setUser(ov?.user ?? "");
       setPort(ov?.port != null ? String(ov.port) : "");
       setPassword("");
+      setTestResult(null);
     }
     // ov 只在打开瞬间取预填值，打开期间不随刷新重置输入
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  const parsePort = (): number | null => {
+    const n = Number(port.trim());
+    return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : null;
+  };
+
+  // 用表单当前值实测连接（不写托管文件）：保存前先验证
+  const runTest = async () => {
+    if (!user.trim()) {
+      setTestResult({ ok: false, text: "用户名不能为空" });
+      return;
+    }
+    const portNum = parsePort();
+    if (portNum === null) {
+      setTestResult({ ok: false, text: "端口必须是 1-65535 的整数" });
+      return;
+    }
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const r = await api.mysqlTestConnection(user.trim(), password, portNum);
+      setTestResult(
+        r.ok
+          ? { ok: true, text: `连接成功${r.version ? `，服务器版本 ${r.version}` : ""}` }
+          : { ok: false, text: r.error ?? "连接失败" },
+      );
+    } catch (e) {
+      setTestResult({ ok: false, text: `测试失败：${String(e)}` });
+    } finally {
+      setTesting(false);
+    }
+  };
 
   const submit = async () => {
     if (!user.trim()) {
       onError("用户名不能为空");
       return;
     }
-    const portNum = Number(port.trim());
-    if (!Number.isInteger(portNum) || portNum < 1 || portNum > 65535) {
+    const portNum = parsePort();
+    if (portNum === null) {
       onError("端口必须是 1-65535 的整数");
       return;
     }
@@ -1497,7 +1645,7 @@ function CredentialDialog({
             size="small"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            helperText="留空表示不修改密码"
+            helperText="留空表示不修改密码；测试连接按此处输入实测"
             fullWidth
           />
           <TextField
@@ -1508,16 +1656,30 @@ function CredentialDialog({
             helperText="1-65535，默认 3306"
             fullWidth
           />
+          {testResult && (
+            <Alert severity={testResult.ok ? "success" : "error"} sx={{ whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+              {testResult.text}
+            </Alert>
+          )}
           <Typography variant="caption" color="text.secondary">
             保存仅更新平台托管配置，不会修改 MySQL 本身；保存后点「刷新」验证连接。
           </Typography>
         </Stack>
       </DialogContent>
       <DialogActions>
+        <Button
+          startIcon={<NetworkCheckIcon />}
+          disabled={testing || busy}
+          onClick={() => void runTest()}
+          sx={btnSx}
+        >
+          {testing ? "测试中…" : "测试连接"}
+        </Button>
+        <Box sx={{ flex: 1 }} />
         <Button onClick={onClose} sx={btnSx}>
           取消
         </Button>
-        <Button variant="contained" disabled={busy} onClick={() => void submit()} sx={btnSx}>
+        <Button variant="contained" disabled={busy || testing} onClick={() => void submit()} sx={btnSx}>
           {busy ? "保存中…" : "保存"}
         </Button>
       </DialogActions>

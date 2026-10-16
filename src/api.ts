@@ -255,6 +255,23 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ name, value }),
     }),
+  // 用对话框当前表单值实测连接（不读写托管凭据，先验证再保存）
+  mysqlTestConnection: (user: string, password: string, port: number) =>
+    request<{ ok: boolean; version?: string; error?: string }>("/api/mysql/test-connection", {
+      method: "POST",
+      body: JSON.stringify({ user, password, port }),
+    }),
+  // my.ini 配置文件读取（服务器页编辑器）
+  mysqlConfigFile: () =>
+    request<{ ok: boolean; path?: string; content?: string; error?: string }>(
+      "/api/mysql/config-file",
+    ),
+  // my.ini 保存（后端先自动备份为 my.ini.bak-时间戳，重启服务后生效）
+  mysqlSaveConfigFile: (content: string) =>
+    request<{ ok: boolean; message?: string; backup?: string; error?: string }>(
+      "/api/mysql/config-file",
+      { method: "POST", body: JSON.stringify({ content }) },
+    ),
   startAll: () =>
     request<ActionResult[]>("/api/services/start-all", { method: "POST" }),
   stopAll: () =>

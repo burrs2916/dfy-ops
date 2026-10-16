@@ -308,18 +308,14 @@ pub async fn mysql_import(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MysqlImportReq>,
 ) -> Json<serde_json::Value> {
-    let dir = registry_install_dir(&state, "mysql");
     // 凭据走平台托管（数据库运维页设置过 root 密码则带密码导入）
     let cred = crate::ops::mysql_credential::load(&state.config_dir);
     let file = req.file;
     let file_for_log = file.clone();
+    let st = state.clone();
     let res = blocking(move || {
-        let client = format!("{dir}\\bin\\mysql.exe");
-        let client = if std::path::Path::new(&client).is_file() {
-            client
-        } else {
-            return Err(format!("未找到 mysql 客户端（{client}），请确认 MySQL 已由平台安装"));
-        };
+        // 客户端定位与数据库运维同口径（顶层 → 嵌套 → MSI 常见位 → PATH）
+        let client = super::handlers_mysql::mysql_client(&st)?;
         if !std::path::Path::new(&file).is_file() {
             return Err(format!("SQL 文件不存在：{file}"));
         }

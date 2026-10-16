@@ -15,15 +15,58 @@ use super::handlers_repair::{blocking, registry_install_dir};
 use super::server::AppState;
 use crate::ops::mysql_credential::{self, MysqlCredential};
 
-/// 平台 MySQL 客户端可执行文件路径。
-fn mysql_client(state: &AppState) -> Result<String, String> {
-    let dir = registry_install_dir(state, "mysql");
-    let client = format!("{dir}\\bin\\mysql.exe");
-    if std::path::Path::new(&client).is_file() {
-        Ok(client)
-    } else {
-        Err(format!("未找到 mysql 客户端（{client}），请确认 MySQL 已由平台安装且服务存在"))
+/// MySQL 客户端工具候选路径（按优先级，与 zip 安装管线 locate_home 同口径）：
+/// 平台目录顶层 bin → 一层嵌套 bin（zip 带顶层目录 mysql-8.x-winx64 时主目录
+/// 在嵌套层）→ MySQL Installer 常见安装位 → PATH。exe 传 "mysql.exe" /
+/// "mysqldump.exe"。PATH 条目（不含路径分隔符）以 --version 实跑验证。
+fn tool_candidates(registry_dir: &str, exe: &str) -> Vec<String> {
+    let bin = |base: &std::path::Path| {
+        base.join("bin").join(exe).to_string_lossy().to_string()
+    };
+    let root = std::path::Path::new(registry_dir);
+    let mut out = vec![bin(root)];
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.push(bin(&p));
+            }
+        }
     }
+    for v in ["8.4", "8.0", "5.7"] {
+        out.push(format!(r"C:\Program Files\MySQL\MySQL Server {v}\bin\{exe}"));
+    }
+    out.push(exe.to_string());
+    out
+}
+
+/// 在候选里找到第一个可用的可执行文件；PATH 兜底（无路径分隔符）实跑验证。
+fn find_tool(candidates: Vec<String>, label: &str) -> Result<String, String> {
+    candidates
+        .into_iter()
+        .find(|p| {
+            if p.contains('\\') || p.contains('/') {
+                std::path::Path::new(p).is_file()
+            } else {
+                std::process::Command::new(p)
+                    .arg("--version")
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false)
+            }
+        })
+        .ok_or_else(|| {
+            format!(
+                "未找到 {label}（已尝试平台安装目录及其嵌套子目录、常见 MSI 安装位、PATH）。\
+                 请确认 MySQL 已由平台安装，或切到「安装与维护」页签安装"
+            )
+        })
+}
+
+/// 平台 MySQL 客户端可执行文件路径（导入 SQL 等跨 handler 共用）。
+pub(crate) fn mysql_client(state: &AppState) -> Result<String, String> {
+    let dir = registry_install_dir(state, "mysql");
+    find_tool(tool_candidates(&dir, "mysql.exe"), "mysql 客户端")
 }
 
 /// 提取 CLI stderr 里的 ERROR 行（过滤 Warning 噪音），最多 3 行。
@@ -90,10 +133,7 @@ fn backup_database(
     db: &str,
 ) -> Result<String, String> {
     let dir = registry_install_dir(state, "mysql");
-    let dump = format!("{dir}\\bin\\mysqldump.exe");
-    if !std::path::Path::new(&dump).is_file() {
-        return Err(format!("未找到 mysqldump（{dump}）"));
-    }
+    let dump = find_tool(tool_candidates(&dir, "mysqldump.exe"), "mysqldump")?;
     let backup_dir = state.config_dir.join("backups");
     std::fs::create_dir_all(&backup_dir).map_err(|e| format!("无法创建备份目录：{e}"))?;
     let ts = std::time::SystemTime::now()
@@ -129,7 +169,7 @@ fn backup_database(
     Ok(file.to_string_lossy().to_string())
 }
 
-/// 执行一条 SQL（-B 批处理 TSV）。返回（列名, 数据行），已还原转义。
+/// 执行一条 SQL（-B 批处理 TSV，平台托管凭据）。返回（列名, 数据行），已还原转义。
 /// 非查询语句返回空列空行。失败返回 stderr 里的 ERROR 摘要。
 fn run_sql(
     state: &AppState,
@@ -138,11 +178,23 @@ fn run_sql(
     database: Option<&str>,
 ) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
     let client = mysql_client(state)?;
-    let port = cred.port.to_string();
-    let mut cmd = std::process::Command::new(&client);
-    cmd.args(["-h", "127.0.0.1", "-P", &port, "-u", &cred.user, "--default-character-set=utf8mb4", "-B"]);
-    if !cred.password.is_empty() {
-        cmd.arg(format!("-p{}", cred.password));
+    run_sql_with(&client, cred.port, &cred.user, &cred.password, sql, database)
+}
+
+/// 用显式连接参数执行一条 SQL（测试连接用：参数来自请求，不读托管凭据）。
+fn run_sql_with(
+    client: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    sql: &str,
+    database: Option<&str>,
+) -> Result<(Vec<String>, Vec<Vec<String>>), String> {
+    let port = port.to_string();
+    let mut cmd = std::process::Command::new(client);
+    cmd.args(["-h", "127.0.0.1", "-P", &port, "-u", user, "--default-character-set=utf8mb4", "-B"]);
+    if !password.is_empty() {
+        cmd.arg(format!("-p{}", password));
     }
     if let Some(db) = database {
         cmd.arg(db);
@@ -183,16 +235,27 @@ pub async fn overview(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
         }));
     }
     let (version, databases, error) = blocking(move || {
-        let v = run_sql(&state, &cred, "SELECT VERSION()", None)
+        let vres = run_sql(&state, &cred, "SELECT VERSION()", None);
+        let v = vres
+            .as_ref()
             .ok()
             .and_then(|(_, rows)| rows.first().and_then(|r| r.first().cloned()));
         let dbs: Vec<String> = run_sql(&state, &cred, "SHOW DATABASES", None)
             .map(|(_, rows)| rows.into_iter().filter_map(|r| r.into_iter().next()).collect())
             .unwrap_or_default();
-        let err = if v.is_none() {
-            Some("已连接但查询失败：请检查平台托管的 root 密码（可在下方修改）".to_string())
-        } else {
-            None
+        // 错误透传真实原因（客户端未找到 / Access denied / 拒绝连接），
+        // 不再一律归因为密码不对
+        let err = match vres {
+            Ok(_) if v.is_some() => None,
+            Ok(_) => Some("已连接但查询无结果".to_string()),
+            Err(e) => {
+                let hint = if e.contains("Access denied") {
+                    "。平台托管的密码与实际不符时，可在「连接配置」中修正"
+                } else {
+                    ""
+                };
+                Some(format!("{e}{hint}"))
+            }
         };
         (v, dbs, err)
     })
@@ -910,5 +973,174 @@ pub async fn set_variable(State(state): State<Arc<AppState>>, Json(req): Json<Se
             Json(json!({ "ok": true, "message": format!("{} 已调整为 {}（运行时生效；重启后恢复 my.ini 配置值）", name, value) }))
         }
         Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+// ===== 测试连接 =====
+
+#[derive(Debug, Deserialize)]
+pub struct TestConnectionReq {
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
+    pub port: u16,
+}
+
+/// POST /api/mysql/test-connection —— 用请求给出的参数实测连接（SELECT VERSION()），
+/// 不读写托管凭据文件。连接配置对话框「测试连接」用：先验证再保存。
+pub async fn test_connection(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TestConnectionReq>,
+) -> Json<serde_json::Value> {
+    if req.user.trim().is_empty() {
+        return Json(json!({ "ok": false, "error": "用户名不能为空" }));
+    }
+    if !(1..=65535).contains(&req.port) {
+        return Json(json!({ "ok": false, "error": "端口范围 1-65535" }));
+    }
+    let client = match mysql_client(&state) {
+        Ok(c) => c,
+        Err(e) => return Json(json!({ "ok": false, "error": e })),
+    };
+    let res = blocking(move || {
+        run_sql_with(&client, req.port, req.user.trim(), &req.password, "SELECT VERSION()", None)
+    })
+    .await;
+    match res {
+        Ok((_, rows)) => {
+            let version = rows
+                .first()
+                .and_then(|r| r.first().cloned())
+                .unwrap_or_default();
+            Json(json!({ "ok": true, "version": version }))
+        }
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+// ===== my.ini 配置文件（在线查看 / 编辑） =====
+
+/// my.ini 候选路径（与客户端定位同口径）：平台目录顶层 → 一层嵌套 →
+/// ProgramData（MySQL Installer 默认数据位）。
+fn ini_candidates(registry_dir: &str) -> Vec<String> {
+    let root = std::path::Path::new(registry_dir);
+    let mut out = vec![root.join("my.ini").to_string_lossy().to_string()];
+    if let Ok(entries) = std::fs::read_dir(root) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                out.push(p.join("my.ini").to_string_lossy().to_string());
+            }
+        }
+    }
+    for v in ["8.4", "8.0", "5.7"] {
+        out.push(format!(r"C:\ProgramData\MySQL\MySQL Server {v}\my.ini"));
+    }
+    out
+}
+
+fn locate_ini(registry_dir: &str) -> Result<String, String> {
+    ini_candidates(registry_dir)
+        .into_iter()
+        .find(|p| std::path::Path::new(p).is_file())
+        .ok_or_else(|| {
+            format!(
+                "未找到 my.ini（已尝试平台安装目录 {registry_dir} 及其嵌套子目录、ProgramData 常见位置）。\
+                 请确认 MySQL 已由平台安装"
+            )
+        })
+}
+
+/// GET /api/mysql/config-file —— 读取 my.ini 内容（服务器页配置文件编辑器）。
+pub async fn get_config_file(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let dir = registry_install_dir(&state, "mysql");
+    let res = blocking(move || {
+        let path = locate_ini(&dir)?;
+        std::fs::read_to_string(&path)
+            .map(|content| (path, content))
+            .map_err(|e| format!("读取 my.ini 失败：{e}"))
+    })
+    .await;
+    match res {
+        Ok((path, content)) => Json(json!({ "ok": true, "path": path, "content": content })),
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SaveConfigFileReq {
+    pub content: String,
+}
+
+/// POST /api/mysql/config-file —— 保存 my.ini：先自动备份为 my.ini.bak-时间戳，
+/// 备份失败则中止保存。修改需重启 MySQL 服务生效；格式错误会导致服务启动失败，
+/// 可用备份文件随时还原。
+pub async fn save_config_file(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SaveConfigFileReq>,
+) -> Json<serde_json::Value> {
+    let content = req.content;
+    if content.trim().is_empty() {
+        return Json(json!({ "ok": false, "error": "配置内容不能为空" }));
+    }
+    // 基本合法性：至少要有 [mysqld] 段（覆盖 [mysqld] 与 [mysqld-8.0] 写法），
+    // 防止误粘贴无关内容导致服务起不来
+    if !content.contains("[mysqld") {
+        return Json(json!({ "ok": false, "error": "内容缺少 [mysqld] 段，疑似不是 MySQL 配置文件，已拒绝保存" }));
+    }
+    let dir = registry_install_dir(&state, "mysql");
+    let res: Result<String, String> = blocking(move || {
+        let path = locate_ini(&dir)?;
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let backup = format!("{path}.bak-{ts}");
+        std::fs::copy(&path, &backup).map_err(|e| format!("备份失败，已中止保存：{e}"))?;
+        std::fs::write(&path, &content).map_err(|e| format!("写入失败（备份在 {backup}）：{e}"))?;
+        Ok(backup)
+    })
+    .await;
+    match res {
+        Ok(backup) => {
+            state.repair.log("MySQL my.ini 已修改（已自动备份），重启服务后生效");
+            Json(json!({
+                "ok": true,
+                "message": format!("已保存，原文件备份为 {backup}。重启 MySQL 服务后生效"),
+                "backup": backup,
+            }))
+        }
+        Err(e) => Json(json!({ "ok": false, "error": e })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tool_candidates;
+
+    /// 候选顺序：平台目录顶层 bin → 一层嵌套 bin（zip 带顶层目录时主目录在
+    /// 嵌套层，与安装管线 locate_home 同口径）→ MSI 常见位 → PATH 兜底。
+    #[test]
+    fn tool_candidates_covers_nested_layout() {
+        let tmp = std::env::temp_dir().join(format!("dfy-mysql-cand-{}", std::process::id()));
+        let nested = tmp.join("mysql-8.0.46-winx64");
+        std::fs::create_dir_all(nested.join("bin")).unwrap();
+        let dir = tmp.to_string_lossy().to_string();
+        let cands = tool_candidates(&dir, "mysql.exe");
+        assert!(
+            cands[0].ends_with("bin/mysql.exe") || cands[0].ends_with(r"bin\mysql.exe"),
+            "首位必须是平台目录顶层 bin: {:?}",
+            cands[0]
+        );
+        assert!(
+            cands.iter().any(|c| c.contains("mysql-8.0.46-winx64")),
+            "嵌套层 bin 必须在候选里: {cands:?}"
+        );
+        assert!(
+            cands.iter().any(|c| c.contains("Program Files")),
+            "MSI 常见安装位必须覆盖"
+        );
+        assert_eq!(cands.last().unwrap(), "mysql.exe", "PATH 兜底必须最后");
+        std::fs::remove_dir_all(&tmp).ok();
     }
 }

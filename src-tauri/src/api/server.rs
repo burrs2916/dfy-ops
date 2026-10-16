@@ -258,6 +258,18 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::post(handlers_mysql::set_variable),
         )
         .route(
+            "/api/mysql/test-connection",
+            axum::routing::post(handlers_mysql::test_connection),
+        )
+        .route(
+            "/api/mysql/config-file",
+            axum::routing::get(handlers_mysql::get_config_file),
+        )
+        .route(
+            "/api/mysql/config-file",
+            axum::routing::post(handlers_mysql::save_config_file),
+        )
+        .route(
             "/api/settings/app",
             axum::routing::get(handlers::get_app_settings),
         )
