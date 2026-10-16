@@ -11,6 +11,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 
 use crate::api::handlers;
 use crate::api::handlers_ai;
+use crate::api::handlers_mysql;
 use crate::api::handlers_repair;
 use crate::ops::aimodels::AiModelConfig;
 use crate::ops::env_repair::{EnvCache, RepairState};
@@ -203,6 +204,28 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/api/env/repair/mysql/import",
             axum::routing::post(handlers_repair::mysql_import),
+        )
+        // JDK 环境变量一键修复（JAVA_HOME + PATH，幂等）
+        .route(
+            "/api/env/repair/java-env",
+            axum::routing::post(handlers_repair::java_env_fix),
+        )
+        // 数据库运维中心（MySQL）：SQL 控制台 / 库表浏览 / 用户权限 / 密码托管
+        .route("/api/mysql/overview", axum::routing::get(handlers_mysql::overview))
+        .route("/api/mysql/exec", axum::routing::post(handlers_mysql::exec))
+        .route("/api/mysql/tables", axum::routing::get(handlers_mysql::tables))
+        .route("/api/mysql/users", axum::routing::get(handlers_mysql::users))
+        .route(
+            "/api/mysql/create-user",
+            axum::routing::post(handlers_mysql::create_user),
+        )
+        .route(
+            "/api/mysql/password",
+            axum::routing::post(handlers_mysql::change_password),
+        )
+        .route(
+            "/api/mysql/credential",
+            axum::routing::get(handlers_mysql::credential),
         )
         .route(
             "/api/settings/app",

@@ -19,6 +19,11 @@ import type {
   ServiceEnvReport,
   ServiceStatus,
   GenericUninstallStart,
+  MysqlCreateUserInput,
+  MysqlOverview,
+  MysqlTableInfo,
+  MysqlUserInfo,
+  SqlResult,
   UninstallTargetStatus,
 } from "./types";
 
@@ -141,6 +146,34 @@ export const api = {
     request<{ ok: boolean; message?: string; error?: string }>("/api/env/repair/mysql/import", {
       method: "POST",
       body: JSON.stringify({ file }),
+    }),
+  // JDK 环境变量一键修复（JAVA_HOME + PATH，幂等；已装旧机不用重装）
+  javaEnvFix: () =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/env/repair/java-env", {
+      method: "POST",
+    }),
+  // ===== 数据库运维中心（MySQL）：托管凭据 + SQL 控制台 + 库表 + 用户权限 =====
+  mysqlOverview: () => request<MysqlOverview>("/api/mysql/overview"),
+  mysqlExec: (sql: string, database?: string) =>
+    request<SqlResult>("/api/mysql/exec", {
+      method: "POST",
+      body: JSON.stringify({ sql, database }),
+    }),
+  mysqlTables: (db: string) =>
+    request<{ ok: boolean; tables?: MysqlTableInfo[]; error?: string }>(
+      `/api/mysql/tables?db=${encodeURIComponent(db)}`,
+    ),
+  mysqlUsers: () =>
+    request<{ ok: boolean; users?: MysqlUserInfo[]; error?: string }>("/api/mysql/users"),
+  mysqlCreateUser: (body: MysqlCreateUserInput) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/create-user", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  mysqlChangePassword: (current: string, next: string) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/mysql/password", {
+      method: "POST",
+      body: JSON.stringify({ current, next }),
     }),
   startAll: () =>
     request<ActionResult[]>("/api/services/start-all", { method: "POST" }),

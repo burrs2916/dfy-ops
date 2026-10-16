@@ -232,6 +232,8 @@ export interface UninstallTargetStatus {
   version: string | null;
   /** JAVA_HOME 是否已在系统配置（注册表核实：用户级/系统级任一）；java 用 */
   javaHomeConfigured: boolean;
+  /** 用户级 PATH 是否已包含 {home}\bin（cmd 里 java 可用的前提）；java 用 */
+  javaPathConfigured: boolean;
   serviceInstalled: boolean;
   dirExists: boolean;
   /** 服务运行态（MySQL/Redis 有服务；java 恒 false）——运维面板启停按钮依据 */
@@ -244,5 +246,54 @@ export interface GenericUninstallStart {
   ok: boolean;
   action?: "uninstall";
   message?: string;
+  error?: string;
+}
+
+// ===== 数据库运维中心（MySQL） =====
+
+/** GET /api/mysql/overview：连接信息 + 版本 + 库列表（服务未运行时降级） */
+export interface MysqlOverview {
+  running: boolean;
+  host: string;
+  port: number;
+  user: string;
+  hasPassword: boolean;
+  version: string | null;
+  databases: string[];
+  /** 已连接但查询失败时给出原因（如托管密码与实际不符） */
+  error?: string | null;
+}
+
+/** GET /api/mysql/tables 的一个表条目（行数为 information_schema 估算值） */
+export interface MysqlTableInfo {
+  name: string;
+  rows: string;
+  sizeKb: string;
+  comment: string;
+}
+
+/** GET /api/mysql/users 的一个用户条目（grants 为 SHOW GRANTS 语句列表） */
+export interface MysqlUserInfo {
+  user: string;
+  host: string;
+  grants: string[];
+}
+
+/** POST /api/mysql/create-user 入参：权限档 ro 只读 / rw 读写 / all 全部 */
+export interface MysqlCreateUserInput {
+  user: string;
+  host: string;
+  password: string;
+  privilege: "ro" | "rw" | "all";
+  /** "*" 全部库，或具体库名 */
+  database: string;
+}
+
+/** POST /api/mysql/exec 结果：查询语句返回结果集，非查询语句列为空 */
+export interface SqlResult {
+  ok: boolean;
+  columns?: string[];
+  rows?: string[][];
+  rowCount?: number;
   error?: string;
 }

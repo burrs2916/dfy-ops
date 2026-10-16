@@ -45,11 +45,13 @@ import {
   SettingsInputAntenna,
   SmartToy,
   Storage,
+  StorageOutlined,
   UploadFile,
   Widgets,
 } from "@mui/icons-material";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
+import MySQLOps from "./MySQLOps";
 import { useAppSettingsStore, useOpsStore } from "../store";
 import type {
   CheckStatus,
@@ -447,7 +449,7 @@ function RepairCenter({
   // 探测请求本身失败（后端未启动等）：与「未安装」区分开，避免误导一键安装
   const [probeFailed, setProbeFailed] = useState(false);
   // 子导航：「安装与维护」= 装软件主流程；「环境问题与 AI 方案」= 检测问题跟进
-  const [subTab, setSubTab] = useState<"install" | "issues">("install");
+  const [subTab, setSubTab] = useState<"install" | "issues" | "mysql">("install");
 
   // 进入修复中心 / 目录配置变化 / 任务结束时：扫资源目录 + 探测安装痕迹
   useEffect(() => {
@@ -542,6 +544,24 @@ function RepairCenter({
       setBusyOps(null);
     }
   }, []);
+
+  /** JDK 环境变量一键修复（JAVA_HOME + PATH，幂等）：装完 cmd 仍不识别 java 时用 */
+  const onJavaEnvFix = useCallback(async () => {
+    setBusyOps("java:env");
+    try {
+      const r = await api.javaEnvFix();
+      if (r.ok) {
+        setSnack({ open: true, msg: r.message || "环境变量已修复", severity: "success" });
+      } else {
+        setSnack({ open: true, msg: r.error || "修复失败", severity: "error" });
+      }
+    } catch (e) {
+      setSnack({ open: true, msg: e instanceof Error ? e.message : String(e), severity: "error" });
+    } finally {
+      setBusyOps(null);
+      probeStatus();
+    }
+  }, [probeStatus]);
 
   /** AI 方案：首次用当前问题项；追问时携带上一轮方案文本。 */
   const generatePlan = useCallback(
@@ -713,9 +733,19 @@ function RepairCenter({
           )}
           <Typography variant="body2" sx={{ fontWeight: 600, wordBreak: "break-all" }}>
             {t === "java"
-              ? `JDK ${st.version ?? "版本未知"} · ${st.javaHomeConfigured ? "JAVA_HOME 已配置" : "JAVA_HOME 未配置"}`
+              ? `JDK ${st.version ?? "版本未知"} · ${
+                  st.javaHomeConfigured && st.javaPathConfigured
+                    ? "环境变量已配置"
+                    : "环境变量待修复"
+                }`
               : st.installDir || "由 Windows Installer 管理"}
           </Typography>
+          {t === "java" && !st.javaHomeConfigured && (
+            <Chip size="small" color="warning" label="JAVA_HOME 缺失" />
+          )}
+          {t === "java" && st.javaHomeConfigured && !st.javaPathConfigured && (
+            <Chip size="small" color="warning" label="PATH 缺失" />
+          )}
           {t === "java" && st.installDir && (
             <Typography variant="caption" sx={{ fontFamily: "monospace", color: "text.secondary", wordBreak: "break-all", width: "100%" }}>
               {st.installDir}
@@ -761,6 +791,23 @@ function RepairCenter({
                   sx={{ textTransform: "none", whiteSpace: "nowrap" }}
                 >
                   导入 SQL
+                </Button>
+              </span>
+            </Tooltip>
+          )}
+          {t === "java" && (!st.javaHomeConfigured || !st.javaPathConfigured) && (
+            <Tooltip title="写入 JAVA_HOME 并把 JDK bin 加入用户 PATH（重开命令行窗口生效）">
+              <span>
+                <Button
+                  size="small"
+                  variant="contained"
+                  color="warning"
+                  startIcon={busyOps === "java:env" ? <CircularProgress size={14} color="inherit" /> : <Bolt />}
+                  disabled={repairDisabled || busyOps === "java:env"}
+                  onClick={() => void onJavaEnvFix()}
+                  sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+                >
+                  修复环境变量
                 </Button>
               </span>
             </Tooltip>
@@ -930,7 +977,7 @@ function RepairCenter({
 
   return (
     <Stack spacing={2}>
-      <Tabs value={subTab} onChange={(_, v: "install" | "issues") => setSubTab(v)}>
+      <Tabs value={subTab} onChange={(_, v: "install" | "issues" | "mysql") => setSubTab(v)}>
         <Tab value="install" label="安装与维护" />
         <Tab
           value="issues"
@@ -939,6 +986,12 @@ function RepairCenter({
               环境问题与 AI 方案
             </Badge>
           }
+        />
+        <Tab
+          value="mysql"
+          icon={<StorageOutlined fontSize="small" />}
+          iconPosition="start"
+          label="数据库运维"
         />
       </Tabs>
 
@@ -1076,6 +1129,11 @@ function RepairCenter({
               </>
             );
           })()}
+      </Box>
+
+      {/* ===== 数据库运维（MySQL）：CSS 隐藏挂载，独立功能域 ===== */}
+      <Box sx={{ display: subTab === "mysql" ? undefined : "none" }}>
+        <MySQLOps />
       </Box>
 
       {/* ===== 环境问题与 AI 方案（CSS 隐藏挂载：切页不丢 AI 方案卡与追问输入） ===== */}

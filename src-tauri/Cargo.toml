@@ -36,6 +36,8 @@ objc2-foundation = { version = "0.3", features = ["NSString"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 # WebView2 Runtime 注册表检测（环境检查：Tauri 桌面客户端运行时依赖）
 winreg = "0.52"
+# 环境变量变更广播（SendMessageTimeoutW / WM_SETTINGCHANGE）
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 panic = "abort"

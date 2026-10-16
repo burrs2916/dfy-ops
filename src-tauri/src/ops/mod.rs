@@ -12,3 +12,4 @@ pub mod ai;
 pub mod aimodels;
 pub mod appsettings;
 pub mod resource;
+pub mod mysql_credential;

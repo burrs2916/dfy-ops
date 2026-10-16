@@ -132,6 +132,213 @@ pub fn java_home_configured(managed: Option<&str>) -> bool {
     }
 }
 
+// ===== 用户级环境变量注册表操作（HKCU\Environment） =====
+//
+// 为什么不用 setx 改 PATH：setx 对超过 1024 字符的值会静默截断，而用户 PATH
+// 常年累积很长，一旦截断就是破坏性事故。因此 PATH 一律走注册表原始读写
+// （保持 REG_EXPAND_SZ 原类型，%VAR% 引用原样保留），写完主动广播
+// WM_SETTINGCHANGE 让 Explorer/新开终端立即拿到新环境。
+
+#[cfg(target_os = "windows")]
+fn utf16le_bytes(s: &str) -> Vec<u8> {
+    s.encode_utf16()
+        .chain(std::iter::once(0))
+        .flat_map(|w| w.to_le_bytes())
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn utf16le_to_string(b: &[u8]) -> String {
+    let words: Vec<u16> = b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+    String::from_utf16_lossy(&words).trim_end_matches('\0').to_string()
+}
+
+/// 广播环境变量变更（新开终端/Explorer 无需重启即可读到）。
+#[cfg(target_os = "windows")]
+fn broadcast_env_change() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        SendMessageTimeoutW, HWND_BROADCAST, SMTO_ABORTIFHUNG, WM_SETTINGCHANGE,
+    };
+    let param: Vec<u16> = "Environment\0".encode_utf16().collect();
+    let mut result: usize = 0;
+    unsafe {
+        SendMessageTimeoutW(
+            HWND_BROADCAST,
+            WM_SETTINGCHANGE,
+            0,
+            param.as_ptr() as isize,
+            SMTO_ABORTIFHUNG,
+            2000,
+            &mut result,
+        );
+    }
+}
+
+/// 规范化 PATH 条目用于比较：去首尾空白、去结尾反斜杠、忽略大小写。
+#[cfg(target_os = "windows")]
+fn norm_path_entry(s: &str) -> String {
+    s.trim().trim_end_matches('\\').to_ascii_lowercase()
+}
+
+/// 读取用户级 PATH 原始值（未展开 %VAR%）与注册表类型；不存在返回空串 + EXPAND_SZ。
+#[cfg(target_os = "windows")]
+fn read_user_path_raw() -> Result<(String, winreg::enums::RegType), String> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_QUERY_VALUE};
+    use winreg::{RegKey, RegValue};
+    let root = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags("Environment", KEY_QUERY_VALUE)
+        .map_err(|e| format!("无法打开注册表环境键：{e}"))?;
+    match root.get_raw_value("Path") {
+        Ok(RegValue { bytes, vtype }) => Ok((utf16le_to_string(&bytes), vtype)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Ok((String::new(), winreg::enums::RegType::REG_EXPAND_SZ))
+        }
+        Err(e) => Err(format!("读取用户 PATH 失败：{e}")),
+    }
+}
+
+/// 写回用户级 PATH（保持原注册表类型）并广播。
+#[cfg(target_os = "windows")]
+fn write_user_path_raw(value: &str, vtype: winreg::enums::RegType) -> Result<(), String> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE};
+    use winreg::{RegKey, RegValue};
+    let root = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags("Environment", KEY_SET_VALUE)
+        .map_err(|e| format!("无法打开注册表环境键：{e}"))?;
+    root.set_raw_value(
+        "Path",
+        &RegValue {
+            bytes: utf16le_bytes(value),
+            vtype,
+        },
+    )
+    .map_err(|e| format!("写入用户 PATH 失败：{e}"))?;
+    broadcast_env_change();
+    Ok(())
+}
+
+/// 用户级 PATH 是否已包含某条目（探测卡片「PATH 已配置」用）。非 Windows 恒 false。
+pub fn user_path_has(entry: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        read_user_path_raw()
+            .map(|(raw, _)| {
+                raw.split(';')
+                    .any(|p: &str| norm_path_entry(p) == norm_path_entry(entry))
+            })
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = entry;
+        false
+    }
+}
+
+/// 向用户级 PATH 追加条目（已存在则不动，返回 false）。非 Windows Err。
+pub fn ensure_user_path_entry(entry: &str) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let (raw, vtype) = read_user_path_raw()?;
+        if raw
+            .split(';')
+            .any(|p: &str| norm_path_entry(p) == norm_path_entry(entry))
+        {
+            return Ok(false);
+        }
+        let mut parts: Vec<&str> = raw
+            .split(';')
+            .filter(|p: &str| !p.trim().is_empty())
+            .collect();
+        parts.push(entry);
+        write_user_path_raw(&parts.join(";"), vtype)?;
+        Ok(true)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = entry;
+        Err("仅支持 Windows".into())
+    }
+}
+
+/// 从用户级 PATH 移除条目（不存在返回 false；卸载 java 清理用）。非 Windows Err。
+pub fn remove_user_path_entry(entry: &str) -> Result<bool, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let (raw, vtype) = read_user_path_raw()?;
+        let target = norm_path_entry(entry);
+        let all: Vec<&str> = raw
+            .split(';')
+            .filter(|p: &str| !p.trim().is_empty())
+            .collect();
+        let kept: Vec<&str> = all
+            .iter()
+            .copied()
+            .filter(|p| norm_path_entry(p) != target)
+            .collect();
+        if kept.len() == all.len() {
+            return Ok(false);
+        }
+        write_user_path_raw(&kept.join(";"), vtype)?;
+        Ok(true)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = entry;
+        Err("仅支持 Windows".into())
+    }
+}
+
+/// 写用户级 JAVA_HOME（REG_SZ）并广播。
+#[cfg(target_os = "windows")]
+fn set_user_java_home(home: &str) -> Result<(), String> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_SET_VALUE, RegType};
+    use winreg::{RegKey, RegValue};
+    let root = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags("Environment", KEY_SET_VALUE)
+        .map_err(|e| format!("无法打开注册表环境键：{e}"))?;
+    root.set_raw_value(
+        "JAVA_HOME",
+        &RegValue {
+            bytes: utf16le_bytes(home),
+            vtype: RegType::REG_SZ,
+        },
+    )
+    .map_err(|e| format!("写入 JAVA_HOME 失败：{e}"))?;
+    broadcast_env_change();
+    Ok(())
+}
+
+/// 一键修复/接管 java 用户级环境变量（幂等）：JAVA_HOME 指向平台托管主目录 +
+/// PATH 追加 {home}\bin，使 cmd 里 `java -version` 直接可用。
+/// 返回（JAVA_HOME 是否重写，PATH 是否新增）。需在 blocking 上下文调用。
+pub fn java_env_ensure() -> Result<(bool, bool), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
+        let Some(home) = managed_java_home() else {
+            return Err("未检测到平台托管的 JDK 目录，请先安装 JDK".into());
+        };
+        let current = RegKey::predef(HKEY_CURRENT_USER)
+            .open_subkey("Environment")
+            .ok()
+            .and_then(|k| k.get_value::<String, _>("JAVA_HOME").ok());
+        let matches = current
+            .as_deref()
+            .map(|v| v.trim().trim_end_matches('\\').eq_ignore_ascii_case(&home))
+            .unwrap_or(false);
+        let jh_written = if matches { false } else { set_user_java_home(&home)?; true };
+        let bin = format!("{home}\\bin");
+        let path_added = ensure_user_path_entry(&bin)?;
+        Ok((jh_written, path_added))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("仅支持 Windows".into())
+    }
+}
+
 /// 列出本机全部 Java 运行时（去重、逐个探测版本；探测失败的目录剔除）。
 #[cfg(target_os = "windows")]
 pub fn installed_jdks() -> Vec<JavaInstall> {
@@ -791,19 +998,31 @@ fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
             }
         }
         "java" => {
-            // 平台直接指向：写用户级 JAVA_HOME（setx 自动广播生效通知）。PATH 不动——
-            // 平台内 java 调用全走绝对路径（{java} 占位符 / installed_jdks 探测），
-            // 卸载时删除该变量即可完全清理，系统零残留
-            let out = std::process::Command::new("setx")
-                .args(["JAVA_HOME", home])
-                .output()
-                .map_err(|e| format!("无法执行 setx：{e}"))?;
-            if !out.status.success() {
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                let err = stderr.trim();
-                return Err(format!("写入用户级 JAVA_HOME 失败：{err}"));
+            // 平台直接指向：写用户级 JAVA_HOME + 把 {home}\bin 追加进用户 PATH。
+            // PATH 必须配——否则 cmd 里 `java -version` 无法识别；注册表原始读写
+            // 而非 setx（避免长 PATH 被截断），写完自动广播。
+            // 卸载时删除该变量并从 PATH 移除条目即可完全清理，系统零残留
+            #[cfg(target_os = "windows")]
+            {
+                set_user_java_home(home).map_err(|e| format!("配置 JAVA_HOME 失败：{e}"))?;
+                let bin = format!("{home}\\bin");
+                match ensure_user_path_entry(&bin) {
+                    Ok(true) => {
+                        return Ok(format!(
+                            "已写入用户级 JAVA_HOME={home}，并把 {bin} 加入用户 PATH（重开命令行窗口生效）"
+                        ));
+                    }
+                    Ok(false) => {
+                        return Ok(format!("已写入用户级 JAVA_HOME={home}（PATH 中已存在 {bin}，未重复添加）"));
+                    }
+                    Err(e) => return Err(format!("PATH 追加失败：{e}")),
+                }
             }
-            Ok(format!("已写入用户级 JAVA_HOME={home}（免安装版：无 MSI 产品、无注册表残留；平台内调用直接使用绝对路径）"))
+            #[cfg(not(target_os = "windows"))]
+            {
+                let _ = home;
+                Ok("非 Windows 平台无需配置".into())
+            }
         }
         _ => Err("该目标没有配置步骤".into()),
     }
@@ -1342,7 +1561,9 @@ async fn run_java_uninstall(state: Arc<RepairState>, env_cache: EnvCache) {
     if managed {
         state.log(format!("待删除（免安装）：平台 JDK 目录 {JDK_MANAGED_HOME}"));
     }
-    state.log("将清除用户级 JAVA_HOME… 请在 UAC 弹窗中点击「是」…");
+    state.log("将清除用户级 JAVA_HOME 并从用户 PATH 移除平台 JDK… 请在 UAC 弹窗中点击「是」…");
+    // 记录卸载前的托管主目录（删除后 managed_java_home 探测不到，PATH 清理要用）
+    let managed_home_before = if managed { managed_java_home() } else { None };
     // 一次 UAC 内完成全部清理：MSI 静默逐条卸载 + 删平台目录 + 删用户级 JAVA_HOME
     // （reg delete 在变量不存在时报错，无碍；成败以复核为准）
     let mut parts: Vec<String> = entries
@@ -1361,13 +1582,23 @@ async fn run_java_uninstall(state: Arc<RepairState>, env_cache: EnvCache) {
             return;
         }
     }
+    // 用户 PATH 里的 {home}\bin 条目：注册表操作无需提权，在 Rust 侧清理
+    if let Some(home) = managed_home_before {
+        let bin = format!("{home}\\bin");
+        match tokio::task::spawn_blocking(move || remove_user_path_entry(&bin)).await {
+            Ok(Ok(true)) => state.log("已从用户 PATH 移除平台 JDK bin 条目"),
+            Ok(Ok(false)) => {}
+            Ok(Err(e)) => state.log(format!("PATH 条目清理失败：{e}")),
+            Err(e) => state.log(format!("PATH 条目清理任务异常：{e}")),
+        }
+    }
 
     // ===== 复核 =====
     state.patch(|j| j.stage = "verify".into());
     let after = tokio::task::spawn_blocking(java_msi_entries).await.unwrap_or_default();
     let dir_gone = managed_java_home().is_none();
     if after.is_empty() && dir_gone {
-        state.log("卸载完成：MSI 条目已清空，平台免安装目录已删除，用户级 JAVA_HOME 已清除");
+        state.log("卸载完成：MSI 条目已清空，平台免安装目录已删除，JAVA_HOME 与 PATH 条目已清理");
         state.log("提示：已开终端里的 JAVA_HOME/PATH 是旧值，重开终端或重新登录后生效");
         finish(state, env_cache, true, String::new()).await;
     } else {

@@ -16,7 +16,7 @@ use crate::ops::ai;
 use crate::ops::resource;
 
 /// 与 handlers.rs 的 blocking 语义一致：同步阻塞段移交 tokio blocking 池。
-async fn blocking<T, F>(f: F) -> T
+pub(crate) async fn blocking<T, F>(f: F) -> T
 where
     F: FnOnce() -> T + Send + 'static,
     T: Send + 'static,
@@ -152,7 +152,7 @@ pub async fn start_generic_repair(
 /// （MSI 注册表条目静默卸载）。其余目标建议 AI 方案或控制面板手动卸载。
 pub const UNINSTALLABLE: [&str; 3] = ["mysql", "redis", "java"];
 
-fn registry_install_dir(state: &AppState, target: &str) -> String {
+pub(crate) fn registry_install_dir(state: &AppState, target: &str) -> String {
     state
         .registry
         .iter()
@@ -201,7 +201,7 @@ pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_
         // java 补充实测信息：平台托管主目录 + 实跑 java -version 的版本号
         // （MSI 装的从卸载条目名提取主版本）+ 注册表核实的 JAVA_HOME 配置态，
         // 让「装好了没、什么版本、环境变量配了没」在卡片上一眼可见
-        let (java_dir, java_version, java_home_ok) = if t == "java" {
+        let (java_dir, java_version, java_home_ok, java_path_ok) = if t == "java" {
             blocking(|| {
                 let dir = crate::ops::env_repair::managed_java_home();
                 let ver = dir
@@ -210,11 +210,15 @@ pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_
                     .map(|(a, b, c)| format!("{a}.{b}.{c}"))
                     .or_else(crate::ops::env_repair::java_msi_version_label);
                 let ok = crate::ops::env_repair::java_home_configured(dir.as_deref());
-                (dir, ver, ok)
+                let path_ok = dir
+                    .as_ref()
+                    .map(|d| crate::ops::env_repair::user_path_has(&format!("{d}\\bin")))
+                    .unwrap_or(false);
+                (dir, ver, ok, path_ok)
             })
             .await
         } else {
-            (None, None, false)
+            (None, None, false, false)
         };
         targets.push(serde_json::json!({
             "target": t,
@@ -227,6 +231,7 @@ pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_
             },
             "version": java_version,
             "javaHomeConfigured": java_home_ok,
+            "javaPathConfigured": java_path_ok,
             "serviceInstalled": service_installed,
             "dirExists": dir_exists,
             "serviceRunning": service_running,
@@ -296,12 +301,14 @@ pub struct MysqlImportReq {
 
 /// POST /api/env/repair/mysql/import —— 导入 SQL 到本机 MySQL。
 /// mysql 客户端从平台安装目录定位；文件内容经 stdin 直灌（无 shell 重定向，
-/// 路径含空格/中文均安全）。初始化默认 root 空密码，与安装口径一致。
+/// 路径含空格/中文均安全）；凭据取平台托管（config/mysql_credential.json）。
 pub async fn mysql_import(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MysqlImportReq>,
 ) -> Json<serde_json::Value> {
     let dir = registry_install_dir(&state, "mysql");
+    // 凭据走平台托管（数据库运维页设置过 root 密码则带密码导入）
+    let cred = crate::ops::mysql_credential::load(&state.config_dir);
     let file = req.file;
     let file_for_log = file.clone();
     let res = blocking(move || {
@@ -315,11 +322,21 @@ pub async fn mysql_import(
             return Err(format!("SQL 文件不存在：{file}"));
         }
         let f = std::fs::File::open(&file).map_err(|e| format!("无法读取 SQL 文件：{e}"))?;
-        let out = std::process::Command::new(&client)
-            .args(["-h", "127.0.0.1", "-P", "3306", "-u", "root", "--default-character-set=utf8mb4"])
-            .stdin(std::process::Stdio::from(f))
-            .output()
-            .map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
+        let mut cmd = std::process::Command::new(&client);
+        cmd.args([
+            "-h",
+            "127.0.0.1",
+            "-P",
+            &cred.port.to_string(),
+            "-u",
+            &cred.user,
+            "--default-character-set=utf8mb4",
+        ]);
+        if !cred.password.is_empty() {
+            cmd.arg(format!("-p{}", cred.password));
+        }
+        cmd.stdin(std::process::Stdio::from(f));
+        let out = cmd.output().map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
         if out.status.success() {
             Ok(())
         } else {
@@ -334,7 +351,7 @@ pub async fn mysql_import(
                 .rev()
                 .collect::<Vec<_>>()
                 .join(" | ");
-            Err(format!("导入失败（服务运行中且 root 密码为初始空密码时才可免密导入）：{tail}"))
+            Err(format!("导入失败：{tail}"))
         }
     })
     .await;
@@ -342,6 +359,31 @@ pub async fn mysql_import(
         Ok(()) => {
             state.repair.log(format!("MySQL 导入完成：{}", file_for_log));
             Json(serde_json::json!({ "ok": true, "message": "导入完成" }))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+/// POST /api/env/repair/java-env —— 一键修复/接管 java 用户级环境变量（幂等）：
+/// JAVA_HOME 指向平台托管目录 + PATH 追加 {home}\bin（注册表原始读写 + 广播）。
+/// 供「已安装但 PATH/JAVA_HOME 缺失」的旧装机直接修复，无需重装。
+pub async fn java_env_fix(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let res = blocking(crate::ops::env_repair::java_env_ensure).await;
+    match res {
+        Ok((jh, pa)) => {
+            state.repair.log(format!(
+                "环境变量修复完成：JAVA_HOME {}，PATH {}（请重开命令行窗口后执行 java -version 验证）",
+                if jh { "已指向平台目录" } else { "本已正确，未改动" },
+                if pa { "已追加 JDK bin" } else { "本已包含，未改动" }
+            ));
+            Json(serde_json::json!({
+                "ok": true,
+                "message": format!(
+                    "环境变量已就绪：JAVA_HOME {}，PATH {}。请重新打开命令行窗口执行 java -version 验证",
+                    if jh { "已写入" } else { "本已正确" },
+                    if pa { "已加入 JDK bin" } else { "本已包含" }
+                )
+            }))
         }
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
