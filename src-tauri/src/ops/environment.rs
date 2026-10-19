@@ -889,17 +889,18 @@ mod tests {
     #[test]
     fn java_placeholder_prefers_env_then_bundled() {
         let resolved = crate::ops::process::resolve_java_placeholder("{java} -jar x.jar");
+        let exe = if cfg!(target_os = "windows") { "java.exe" } else { "java" };
         let has_env_java = std::env::var("JAVA_HOME")
             .map(|h| {
                 let bin = std::path::Path::new(&h)
                     .join("bin")
-                    .join("java");
+                    .join(exe);
                 bin.exists()
             })
             .unwrap_or(false);
         if has_env_java {
             assert!(
-                resolved.contains("bin/java"),
+                resolved.ends_with(exe),
                 "有 JAVA_HOME 的机器应解析到安装版 java: {resolved}"
             );
         } else {
