@@ -267,8 +267,8 @@ function ServiceEnvSection({
         <Table size="small" sx={{ tableLayout: "fixed" }}>
           <TableHead>
             <TableRow sx={{ bgcolor: "rgba(0,0,0,0.03)" }}>
-              <TableCell sx={{ width: 86 }}>状态</TableCell>
-              <TableCell sx={{ width: 150 }}>检查项</TableCell>
+              <TableCell sx={{ width: 108 }}>状态</TableCell>
+              <TableCell sx={{ width: 190 }}>检查项</TableCell>
               <TableCell>期望</TableCell>
               <TableCell>检测值</TableCell>
               <TableCell>修复建议</TableCell>
