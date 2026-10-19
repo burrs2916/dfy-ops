@@ -210,6 +210,40 @@ fn fix_hint_for(id: &str) -> String {
     }
 }
 
+/// 探测本机是否已有 MySQL 安装痕迹（Windows 服务 / 安装目录 / MSI 条目），
+/// 返回给用户看的来源描述。用于「未运行」时区分建议：启动现有安装 vs 安装新的。
+#[cfg(target_os = "windows")]
+fn detect_mysql_install() -> Option<String> {
+    for svc in ["MySQL80", "MySQL84", "MySQL57", "MySQL"] {
+        if crate::ops::env_repair::service_exists(svc) {
+            return Some(format!("Windows 服务 {svc}"));
+        }
+    }
+    // 平台 zip 安装目录（含嵌套布局：bin 在顶层或一层子目录）
+    if let Ok(rd) = std::fs::read_dir("C:\\services\\mysql") {
+        for e in rd.flatten() {
+            let p = e.path();
+            let bin = if p.is_dir() && p.join("bin").is_dir() {
+                p.join("bin")
+            } else {
+                p.clone()
+            };
+            if bin.join("mysqld.exe").is_file() {
+                return Some(format!("安装目录 {}", p.display()));
+            }
+        }
+    }
+    if !crate::ops::env_repair::mysql_msi_entries().is_empty() {
+        return Some("MSI 安装条目（MySQL Installer）".to_string());
+    }
+    None
+}
+
+#[cfg(not(target_os = "windows"))]
+fn detect_mysql_install() -> Option<String> {
+    None
+}
+
 /// 组装一条检查项：pass 时清空 hint，非 pass 按平台生成。
 fn item(
     id: &str,
@@ -500,14 +534,24 @@ pub fn check_service_env_with(
                     CheckStatus::Pass,
                 ));
             } else {
-                items.push(item(
+                let mut it = item(
                     &format!("service-{}", def.id),
                     "服务状态",
                     "外部依赖",
                     "已安装并处于运行状态",
                     "未检测到运行",
                     CheckStatus::Warn,
-                ));
+                );
+                // 手动安装过的机器（服务已注册/目录存在）建议是「启动」，不是重装——
+                // 引导去装第二份 MySQL 反而制造冲突
+                if def.id == "mysql" {
+                    if let Some(src) = detect_mysql_install() {
+                        it.fix_hint = format!(
+                            "本机已安装 MySQL（{src}），但服务未运行——请在 Windows 服务管理器启动 MySQL 服务，或到「安装与维护」页签操作后重新检查"
+                        );
+                    }
+                }
+                items.push(it);
             }
         }
         ServiceKind::TauriApp => {

@@ -345,7 +345,7 @@ pub fn java_env_ensure() -> Result<(bool, bool), String> {
 #[cfg(target_os = "windows")]
 pub fn installed_jdks() -> Vec<JavaInstall> {
     use std::collections::BTreeSet;
-    use winreg::enums::HKEY_LOCAL_MACHINE;
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
     use winreg::RegKey;
 
     let mut homes: BTreeSet<String> = BTreeSet::new();
@@ -353,9 +353,48 @@ pub fn installed_jdks() -> Vec<JavaInstall> {
     if let Some(home) = managed_java_home() {
         homes.insert(home);
     }
-    // JAVA_HOME 兜底：zip 解压安装的 JDK 往往无注册表条目、不在常见目录、
-    // 也不进 PATH（如 CI runner 的 hostedtoolcache），只设了 JAVA_HOME——
-    // 环境变量是最后一道可靠的归属线索
+    // 注册表实时读 JAVA_HOME/PATH：用户手动安装 JDK 后配置的环境变量写在注册表里，
+    // 而本进程的环境变量是启动时快照——不重启平台 env::var 永远看不见。注册表
+    // 是配置的事实源，必须实时读，否则「手动装 + 手动配」的机器检测不符。
+    for (hive, sub) in [
+        (
+            HKEY_CURRENT_USER,
+            r"Environment",
+        ),
+        (
+            HKEY_LOCAL_MACHINE,
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+        ),
+    ] {
+        let Ok(k) = RegKey::predef(hive).open_subkey(sub) else {
+            continue;
+        };
+        if let Ok(h) = k.get_value::<String, _>("JAVA_HOME") {
+            let h = h.trim().trim_matches('"').to_string();
+            if !h.is_empty() {
+                homes.insert(h);
+            }
+        }
+        if let Ok(p) = k.get_value::<String, _>("Path") {
+            for seg in p.split(';') {
+                let s = seg.trim().trim_matches('"');
+                if s.is_empty() || !std::path::Path::new(s).join("java.exe").is_file() {
+                    continue;
+                }
+                // probe_home_version 需要 {home}\bin\java.exe；PATH 段常是 ...\bin，归一化到父目录
+                let home = if s.rsplit('\\').next().map(|x| x.eq_ignore_ascii_case("bin")).unwrap_or(false) {
+                    std::path::Path::new(s)
+                        .parent()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_else(|| s.to_string())
+                } else {
+                    s.to_string()
+                };
+                homes.insert(home);
+            }
+        }
+    }
+    // JAVA_HOME 兜底（进程快照；平台重启后本进程能看到新配置，注册表读失败时兜底）：
     if let Ok(h) = std::env::var("JAVA_HOME") {
         let h = h.trim().trim_matches('"').to_string();
         if !h.is_empty() && std::path::Path::new(&h).join("bin").exists() {

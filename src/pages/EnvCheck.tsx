@@ -359,7 +359,11 @@ function ServiceEnvSection({
                         </Stack>
                       ) : (
                         <Typography variant="caption" color="text.secondary">
-                          {it.status === "pass" ? "—" : isAcked ? "已确认，无需处理" : "—"}
+                          {it.status === "pass"
+                            ? "无需处理"
+                            : isAcked
+                              ? "已确认，无需处理"
+                              : "暂无自动修复命令——请参照「检测值」处理，或使用 AI 方案生成修复步骤"}
                         </Typography>
                       )}
                     </TableCell>
