@@ -447,6 +447,9 @@ pub struct RepairJob {
     pub running: bool,
     /// download → install → verify → done
     pub stage: String,
+    /// 任务类别（install/uninstall）：stage 完成时会被置为 done，
+    /// 区分安装/卸载要用这个字段
+    pub op: String,
     /// 修复目标软件（java/mysql/redis/vernemq/…；None = 旧接口未标注）
     pub target: Option<String>,
     pub logs: Vec<String>,
@@ -522,6 +525,7 @@ pub fn start_jdk_install(
         }
         job.running = true;
         job.target = Some("java".into());
+        job.op = "install".into();
         job.stage = "download".into();
         job.ok = None;
         job.error = None;
@@ -557,6 +561,7 @@ pub fn start_resource_install(
         }
         job.running = true;
         job.target = Some(target.into());
+        job.op = "install".into();
         job.stage = "install".into();
         job.ok = None;
         job.error = None;
@@ -852,6 +857,7 @@ pub fn start_zip_install(
         }
         job.running = true;
         job.target = Some(target.into());
+        job.op = "install".into();
         job.stage = "extract".into();
         job.ok = None;
         job.error = None;
@@ -1363,6 +1369,7 @@ pub fn start_uninstall(
         }
         job.running = true;
         job.target = Some(target.into());
+        job.op = "uninstall".into();
         job.stage = "uninstall".into();
         job.ok = None;
         job.error = None;

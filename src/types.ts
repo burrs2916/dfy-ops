@@ -85,8 +85,10 @@ export interface ServiceEnvReport {
 /** 修复任务状态（GET /api/env/repair/status，前端轮询） */
 export interface EnvRepairJob {
   running: boolean;
-  /** download → install → verify → done */
+  /** download → install → verify → done（完成时固定为 done） */
   stage: string;
+  /** 任务类别（install/uninstall）：区分完成提示用 */
+  op: string;
   /** 修复目标软件（java/mysql/redis/vernemq/…；null = 旧接口未标注） */
   target: string | null;
   logs: string[];

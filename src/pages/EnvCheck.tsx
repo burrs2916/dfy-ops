@@ -1530,7 +1530,7 @@ export default function EnvCheck() {
           if (job.ok) {
             const label = job.target ? TARGET_LABEL[job.target] ?? job.target : "环境";
             // 任务结束已自动 refreshEnvAll()，如实告知用户结果已刷新
-            setRepairNotice(`${label} ${job.stage === "uninstall" ? "卸载" : "安装"}完成，环境已自动重新检查`);
+            setRepairNotice(`${label} ${job.op === "uninstall" ? "卸载" : "安装"}完成，环境已自动重新检查`);
           } else {
             setRepairError(job.error || "修复未成功，请查看日志或按修复建议手动处理");
           }
