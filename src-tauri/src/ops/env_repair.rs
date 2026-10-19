@@ -1429,7 +1429,7 @@ async fn run_uninstall(
             Ok(Ok(Some(path))) => {
                 let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 state.log(format!(
-                    "备份完成：{path}（{} KB）。删除后可用 mysql < 该文件恢复全部业务数据",
+                    "备份完成：{path}（{} KB）。删除后可在「数据库运维 → 服务器 → 备份与恢复」用该文件一键恢复业务数据",
                     size / 1024
                 ));
             }

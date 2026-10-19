@@ -207,8 +207,8 @@ const REPAIR_STAGE_LABEL: Record<string, string> = {
   install: "静默安装中（请在 UAC 弹窗确认管理员权限）…",
   extract: "解压安装包…",
   configure: "写配置并初始化…",
-  backup: "备份 MySQL 数据（全库导出为 SQL 文件）…",
-  uninstall: "卸载中（停止并注销服务）…",
+  backup: "备份 MySQL 业务数据（非系统库导出为 SQL 文件，删数据前自动执行）…",
+  uninstall: "卸载中（停服 → 清理残留进程 → 注销服务）…",
   verify: "验证结果…",
   done: "已完成",
 };
@@ -1475,6 +1475,24 @@ export default function EnvCheck() {
     void bootstrap();
   }, [bootstrap]);
 
+  // 切走再回来：轮询随组件卸载被清掉，必须接上后台仍在跑的任务，
+  // 否则任务状态丢失、完成提示也收不到
+  useEffect(() => {
+    let alive = true;
+    api
+      .envRepairStatus()
+      .then((job) => {
+        if (!alive) return;
+        setRepairJob(job);
+        if (job.running) pollRepair();
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // 实时刷新（默认关闭）：按「设置 → 通用」配置的间隔强制复探（force 跳过
   // 后端 60s 缓存），使修复后状态自动反映。间隔 0 时不轮询。
   const envRefreshMs = useAppSettingsStore((s) => s.settings.envRefreshSecs) * 1000;
@@ -1714,8 +1732,16 @@ export default function EnvCheck() {
       )}
 
       {/* 修复结果提示（无需修复 / 配置指引 / 安装完成） */}
-      {!repairJob?.running && repairNotice && <Alert severity="success">{repairNotice}</Alert>}
-      {!repairJob?.running && repairError && <Alert severity="error">{repairError}</Alert>}
+      {!repairJob?.running && repairNotice && (
+        <Alert severity="success" onClose={() => setRepairNotice(null)}>
+          {repairNotice}
+        </Alert>
+      )}
+      {!repairJob?.running && repairError && (
+        <Alert severity="error" onClose={() => setRepairError(null)}>
+          {repairError}
+        </Alert>
+      )}
 
       <Tabs value={tab} onChange={(_, v: "check" | "repair") => setTab(v)}>
         <Tab value="check" label="检测结果" />
