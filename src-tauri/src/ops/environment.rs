@@ -899,8 +899,9 @@ mod tests {
             })
             .unwrap_or(false);
         if has_env_java {
+            let frag = format!("bin{}{exe} ", std::path::MAIN_SEPARATOR);
             assert!(
-                resolved.ends_with(exe),
+                resolved.contains(&frag),
                 "有 JAVA_HOME 的机器应解析到安装版 java: {resolved}"
             );
         } else {
