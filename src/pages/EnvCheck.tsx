@@ -360,10 +360,10 @@ function ServiceEnvSection({
                       ) : (
                         <Typography variant="caption" color="text.secondary">
                           {it.status === "pass"
-                            ? "无需处理"
+                            ? "符合要求"
                             : isAcked
-                              ? "已确认，无需处理"
-                              : "暂无自动修复命令——请参照「检测值」处理，或使用 AI 方案生成修复步骤"}
+                              ? "已人工确认"
+                              : "人工处理，或使用 AI 方案"}
                         </Typography>
                       )}
                     </TableCell>
