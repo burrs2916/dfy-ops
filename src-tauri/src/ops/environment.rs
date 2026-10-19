@@ -410,88 +410,134 @@ pub fn check_service_env_with(
     match def.kind {
         ServiceKind::Vertx => {
             // Java 运行时：期望版本声明驱动（ServiceDef.javaMajor，缺省 8）。
-            // 分流（绿色交付模型）：
-            // - 声明了 javaHome（预置 JRE，exe 同级 resource 目录）→ 检测预置：
-            //   检测与启动（{java} 占位符）同源，免安装、不依赖系统环境；
-            //   预置缺失 = 交付不完整 → Fail，修复 = 恢复目录（离线可用）。
-            // - 未声明（dev 机）→ 检测 PATH java，不达标时盘点本机已装 JDK，
-            //   区分「配置修复」与「需要安装」（/api/env/repair 自动安装兜底）。
+            // 部署形态自动适配（安装版优先）：环境变量（PATH java → 注册表实时盘点）
+            // 达标即按安装版检测通过；环境变量不可用才回退预置 JRE（免安装交付），
+            // 预置缺失 = 交付不完整 → Fail。与启动占位符解析顺序保持同源。
             let expected_major = def.java_major.unwrap_or(8);
             if let Some(rel) = &def.java_home {
-                let home = crate::ops::process::bundled_java_home(rel);
-                let it = match &home {
-                    Some(home) => {
-                        let bin = if cfg!(target_os = "windows") {
-                            home.join("bin").join("java.exe")
-                        } else {
-                            home.join("bin").join("java")
-                        };
-                        let version = probe_cached(
-                            cache,
-                            bin.to_string_lossy().as_ref(),
-                            &["-version"],
-                        )
-                        .as_deref()
-                        .and_then(java_version_tuple);
-                        match version {
-                            Some((major, minor, patch)) if major >= expected_major => item(
-                                "java",
-                                "Java 运行时（预置 JRE）",
-                                "运行时",
-                                &format!("JDK {expected_major}+"),
-                                &format!(
-                                    "内置 JRE {}.{}.{}（{}）随程序交付，免安装",
-                                    major, minor, patch,
-                                    home.display()
-                                ),
-                                CheckStatus::Pass,
-                            ),
-                            Some((major, _, _)) => {
-                                let mut it = item(
+                let bundled = crate::ops::process::bundled_java_home(rel);
+                // 部署形态可切换（安装版优先）：机器上用 JAVA_HOME/PATH 配置的 JDK 是
+                // 用户实际在用的运行时，优先按环境变量检测（PATH → 注册表实时盘点）；
+                // 环境变量都不可用才认交付包内置 JRE（免安装交付形态）。
+                // 顺序与 resolve_java_placeholder（启动占位符）保持同源。
+                let path_ver = probe_cached(cache, "java", &["-version"])
+                    .as_deref()
+                    .and_then(java_version_tuple);
+                if let Some((major, minor, patch)) =
+                    path_ver.filter(|(m, _, _)| *m >= expected_major)
+                {
+                    items.push(item(
+                        "java",
+                        "Java 运行时",
+                        "运行时",
+                        &format!("JDK {expected_major}+"),
+                        &format!(
+                            "安装版 JDK {}.{}.{}（环境变量配置），满足 JDK {expected_major}+",
+                            major, minor, patch
+                        ),
+                        CheckStatus::Pass,
+                    ));
+                } else if let Some(j) = crate::ops::env_repair::installed_jdks()
+                    .into_iter()
+                    .filter(|j| j.major() >= expected_major)
+                    .max_by_key(|j| j.major())
+                {
+                    // 注册表 JAVA_HOME/PATH 实时可达，但本进程快照里 PATH 未生效
+                    let ver = j
+                        .version
+                        .map(|(a, b, c)| format!("{}.{}.{}", a, b, c))
+                        .unwrap_or_else(|| "未知版本".to_string());
+                    items.push(item(
+                        "java",
+                        "Java 运行时",
+                        "运行时",
+                        &format!("JDK {expected_major}+"),
+                        &format!(
+                            "本机已安装 JDK {ver}（{}），环境变量已配置，满足 JDK {expected_major}+",
+                            j.home
+                        ),
+                        CheckStatus::Pass,
+                    ));
+                } else {
+                    // 内置 JRE 兜底（纯免安装交付机：无环境变量、依赖 resource/jre）
+                    let home = bundled;
+                    let it = match &home {
+                        Some(home) => {
+                            let bin = if cfg!(target_os = "windows") {
+                                home.join("bin").join("java.exe")
+                            } else {
+                                home.join("bin").join("java")
+                            };
+                            let version = probe_cached(
+                                cache,
+                                bin.to_string_lossy().as_ref(),
+                                &["-version"],
+                            )
+                            .as_deref()
+                            .and_then(java_version_tuple);
+                            match version {
+                                Some((major, minor, patch)) if major >= expected_major => item(
                                     "java",
-                                    "Java 运行时（预置 JRE）",
+                                    "Java 运行时（内置 JRE）",
                                     "运行时",
                                     &format!("JDK {expected_major}+"),
                                     &format!(
-                                        "内置 JRE 版本 {} 低于期望 JDK {expected_major}+（交付包错误）",
-                                        major
+                                        "内置 JRE {}.{}.{}（{}）随程序交付，免安装",
+                                        major, minor, patch,
+                                        home.display()
                                     ),
-                                    CheckStatus::Fail,
-                                );
-                                it.fix_hint =
-                                    "交付包内置 JRE 版本不符，请更换交付包中的 resource/jre 目录".into();
-                                it
-                            }
-                            None => {
-                                let mut it = item(
-                                    "java",
-                                    "Java 运行时（预置 JRE）",
-                                    "运行时",
-                                    &format!("JDK {expected_major}+"),
-                                    &format!("内置 java 无法执行（{}）", home.display()),
-                                    CheckStatus::Fail,
-                                );
-                                it.fix_hint = "内置 JRE 损坏，请恢复交付包中的 resource/jre 目录".into();
-                                it
+                                    CheckStatus::Pass,
+                                ),
+                                Some((major, _, _)) => {
+                                    let mut it = item(
+                                        "java",
+                                        "Java 运行时（内置 JRE）",
+                                        "运行时",
+                                        &format!("JDK {expected_major}+"),
+                                        &format!(
+                                            "内置 JRE 版本 {} 低于期望 JDK {expected_major}+（交付包错误）",
+                                            major
+                                        ),
+                                        CheckStatus::Fail,
+                                    );
+                                    it.fix_hint =
+                                        "交付包内置 JRE 版本不符，请更换交付包中的 resource/jre 目录".into();
+                                    it
+                                }
+                                None => {
+                                    let mut it = item(
+                                        "java",
+                                        "Java 运行时（内置 JRE）",
+                                        "运行时",
+                                        &format!("JDK {expected_major}+"),
+                                        &format!("内置 java 无法执行（{}）", home.display()),
+                                        CheckStatus::Fail,
+                                    );
+                                    it.fix_hint = "内置 JRE 损坏，请恢复交付包中的 resource/jre 目录".into();
+                                    it
+                                }
                             }
                         }
-                    }
-                    None => {
-                        let mut it = item(
-                            "java",
-                            "Java 运行时（预置 JRE）",
-                            "运行时",
-                            &format!("JDK {expected_major}+"),
-                            &format!("预置 JRE 缺失（程序同级 {} 目录不存在）", rel),
-                            CheckStatus::Fail,
-                        );
-                        it.fix_hint = format!(
-                            "免安装部署：将交付包中的 {rel} 目录（含内置 JRE）恢复到程序同级目录即可，无需安装"
-                        );
-                        it
-                    }
-                };
-                items.push(it);
+                        None => {
+                            let mut it = item(
+                                "java",
+                                "Java 运行时",
+                                "运行时",
+                                &format!("JDK {expected_major}+"),
+                                &format!(
+                                    "未检测到可用的 JDK：环境变量（JAVA_HOME/PATH）未配置，且预置 JRE 缺失（程序同级 {} 目录不存在）",
+                                    rel
+                                ),
+                                CheckStatus::Fail,
+                            );
+                            it.fix_hint = format!(
+                                "安装 JDK 并配置 JAVA_HOME/PATH 环境变量（或到「安装与维护」页签一键安装）；或将交付包中的 {rel} 目录（含内置 JRE）恢复到程序同级目录"
+                            );
+                            it
+                        }
+                    };
+                    items.push(it);
+                }
             } else {
                 push_path_java_check(&mut items, expected_major, cache);
             }
@@ -811,11 +857,10 @@ mod tests {
         );
     }
 
-    /// 绿色交付模式：声明 javaHome 后，Java 检测走预置 JRE。
-    /// 测试机（dev/CI）的 exe 同级没有 resource/jre → 必然 Fail，
-    /// 修复提示必须是「恢复交付包目录」（免安装），而非在线安装。
+    /// 部署形态自适应：有环境变量 JDK 的机器（JAVA_HOME/PATH/注册表盘点可达）
+    /// 按安装版报 Pass；都没有的机器才 Fail 并提示装 JDK 或恢复预置目录。
     #[test]
-    fn bundled_java_missing_fails_with_restore_hint() {
+    fn bundled_java_missing_adapts_to_deploy_mode() {
         let def = def_of("dfy-backend");
         let st = states(&[("mysql", true, true, &[3306]), ("redis", true, true, &[6379])]);
         let report = check_service_env_with(&def, &st, None);
@@ -824,22 +869,45 @@ mod tests {
             .iter()
             .find(|i| i.id == "java")
             .expect("必须包含 java 检查项");
-        assert_eq!(java.status, CheckStatus::Fail, "测试机无预置 JRE，应 Fail: {}", java.actual);
-        assert!(
-            java.fix_hint.contains("恢复") && java.fix_hint.contains("无需安装"),
-            "修复提示应指引恢复目录且免安装: {}",
-            java.fix_hint
-        );
+        if java.status == CheckStatus::Pass {
+            assert!(
+                java.actual.contains("安装版") || java.actual.contains("本机已安装"),
+                "环境变量可达的机器应按安装版检测通过: {}",
+                java.actual
+            );
+        } else {
+            assert!(
+                java.fix_hint.contains("JAVA_HOME"),
+                "无环境变量机器的修复提示应指向环境变量或恢复预置目录: {}",
+                java.fix_hint
+            );
+        }
     }
 
-    /// {java} 占位符解析：无预置 JRE 的机器回退 PATH java；无占位符原样返回。
+    /// {java} 占位符解析（安装版优先）：有 JAVA_HOME 的机器解析到安装版 java
+    /// 绝对路径，否则回退 PATH java；无占位符原样返回。
     #[test]
-    fn java_placeholder_falls_back_to_path_java() {
-        assert_eq!(
-            crate::ops::process::resolve_java_placeholder("{java} -jar x.jar"),
-            "java -jar x.jar",
-            "dev/CI 机器没有预置 JRE，应回退 PATH java"
-        );
+    fn java_placeholder_prefers_env_then_bundled() {
+        let resolved = crate::ops::process::resolve_java_placeholder("{java} -jar x.jar");
+        let has_env_java = std::env::var("JAVA_HOME")
+            .map(|h| {
+                let bin = std::path::Path::new(&h)
+                    .join("bin")
+                    .join("java");
+                bin.exists()
+            })
+            .unwrap_or(false);
+        if has_env_java {
+            assert!(
+                resolved.contains("bin/java"),
+                "有 JAVA_HOME 的机器应解析到安装版 java: {resolved}"
+            );
+        } else {
+            assert_eq!(
+                resolved, "java -jar x.jar",
+                "无 JAVA_HOME 且无预置 JRE 的机器应回退 PATH java"
+            );
+        }
         assert_eq!(
             crate::ops::process::resolve_java_placeholder("nginx -c x.conf"),
             "nginx -c x.conf",

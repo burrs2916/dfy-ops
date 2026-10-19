@@ -16,21 +16,35 @@ pub fn bundled_java_home(relative: &str) -> Option<PathBuf> {
     home.is_dir().then_some(home)
 }
 
-/// run_cmd 中 `{java}` 占位符解析：优先预置 JRE 的 java 绝对路径，
-/// 预置缺失回退 `java`（PATH 语义，dev 机开发不受影响）。
-/// 检测（environment.rs）与启动（这里）使用同一解析，保证同源。
+/// run_cmd 中 `{java}` 占位符解析：安装版优先（JAVA_HOME 指向的 java），
+/// 无环境变量回退预置 JRE 的绝对路径，再回退 `java`（PATH 语义）。
+/// 与 environment.rs 的 Java 检测同序：用户切到安装版 JDK 后，启动与检测
+/// 都认环境变量；纯免安装交付机（无 JAVA_HOME）仍用预置 JRE。
+/// 注：JAVA_HOME 读本进程快照，配完变量未重启平台时此处可能仍取预置，
+/// 重启平台后与检测完全一致。
 pub fn resolve_java_placeholder(cmd: &str) -> String {
     if !cmd.contains("{java}") {
         return cmd.to_string();
     }
-    let java = bundled_java_home("resource/jre")
-        .and_then(|home| {
-            let bin = if cfg!(target_os = "windows") {
-                home.join("bin").join("java.exe")
-            } else {
-                home.join("bin").join("java")
-            };
-            bin.exists().then(|| bin.to_string_lossy().to_string())
+    let java_home = std::env::var("JAVA_HOME").ok().map(std::path::PathBuf::from);
+    let env_java = java_home.and_then(|home| {
+        let bin = if cfg!(target_os = "windows") {
+            home.join("bin").join("java.exe")
+        } else {
+            home.join("bin").join("java")
+        };
+        bin.exists().then(|| bin.to_string_lossy().to_string())
+    });
+    let java = env_java
+        .or_else(|| {
+            bundled_java_home("resource/jre").and_then(|home| {
+                let bin = if cfg!(target_os = "windows") {
+                    home.join("bin").join("java.exe")
+                } else {
+                    home.join("bin").join("java")
+                };
+                bin.exists().then(|| bin.to_string_lossy().to_string())
+            })
         })
         .unwrap_or_else(|| "java".to_string());
     cmd.replace("{java}", &java)
