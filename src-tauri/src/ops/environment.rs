@@ -683,24 +683,17 @@ mod tests {
     /// dfy-backend 声明了 JAR 产物检查与 JDK 8 期望（pom.xml java.version=1.8）。
     /// jar 项按 requires 路径探测：内置 install_dir 是 Windows 部署路径，测试机上
     /// 必然找不到 → 该项 Warn（带修复提示），但其余项（Java/依赖）必须全 Pass。
-    /// （mutate 掉 javaHome 声明 → 走 PATH 检测分支，dev/CI 机的 java 均 >= 8。）
+    /// （Java 检测走环境变量口径，dev/CI 机的 java 均 >= 8。）
     #[test]
     fn dfy_backend_checks_jar_artifact_and_java8() {
-        let mut def = def_of("dfy-backend");
+        let def = def_of("dfy-backend");
         assert_eq!(def.java_major, Some(8), "dfy-backend 按 JDK 8 编译，期望值必须声明为 8");
         assert!(def.requires.iter().any(|r| r.check_id() == "jar"), "必须声明 JAR 产物检查");
-        assert_eq!(
-            def.java_home.as_deref(),
-            Some("resource/jre"),
-            "Windows 交付必须声明预置 JRE（exe 同级 resource 目录）"
-        );
         assert!(
             def.run_cmd.contains("{{java}}") || def.run_cmd.contains("{java}"),
             "run_cmd 必须用 java 占位符（检测与启动同源）"
         );
 
-        // dev/测试机走 PATH 分支：mutate 掉 javaHome 声明
-        def.java_home = None;
         let st = states(&[
             ("dfy-backend", false, false, &[]),
             ("mysql", true, true, &[3306]),
@@ -803,10 +796,8 @@ mod tests {
     /// 运行但端口不可达 → Warn；未注册 → Warn。全部由声明驱动，无硬编码端口。
     #[test]
     fn dependency_checks_driven_by_depends_on() {
-        let mut def = def_of("dfy-backend");
+        let def = def_of("dfy-backend");
         assert_eq!(def.depends_on, vec!["mysql", "redis"]);
-        // 本测试只关注依赖语义：mutate 掉 javaHome 声明，排除预置 JRE 缺失项的干扰
-        def.java_home = None;
 
         // MySQL 挂了 → fail；Redis 健康 → pass
         let st = states(&[

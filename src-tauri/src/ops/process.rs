@@ -5,17 +5,6 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
-/// 预置 JRE 的 home 目录：**启动 exe 同级**下的相对路径（绿色交付，
-/// 免安装、不改系统环境变量）。在哪里启动，对应的目录就是哪里。
-/// `relative` 来自 ServiceDef.javaHome 声明（如 "resource/jre"）。
-/// 找不到返回 None（dev 机没有预置 → 调用方回退 PATH java）。
-pub fn bundled_java_home(relative: &str) -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    let dir = exe.parent()?;
-    let home = dir.join(relative);
-    home.is_dir().then_some(home)
-}
-
 /// run_cmd 中 `{java}` 占位符解析：只认环境变量——JAVA_HOME 指向的 java
 /// 优先，否则 `java`（PATH 语义）。与检测同口径：平台只支持安装版 JDK，
 /// 不再解析交付包内置 JRE。
