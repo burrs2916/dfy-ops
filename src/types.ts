@@ -353,10 +353,11 @@ export interface RedisOverview {
   totalExpires: number;
 }
 
-/** GET /api/redis/keys：Key 条目（kind：string/hash/list/set/zset/stream） */
+/** GET /api/redis/keys：Key 条目（kind：string/hash/list/set/zset/stream；ttl：-1 永久） */
 export interface RedisKeyItem {
   name: string;
   kind: string;
+  ttl: number;
 }
 
 /** GET /api/redis/key：Key 详情（rows 统一为 [标签, 值] 二元组） */

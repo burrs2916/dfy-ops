@@ -231,13 +231,17 @@ pub async fn overview(State(state): State<Arc<AppState>>) -> Json<serde_json::Va
 pub struct KeysQuery {
     #[serde(default = "default_pattern")]
     pub pattern: String,
+    /// 类型过滤（SCAN 的 TYPE 参数，Redis 6+）：空 = 全部类型
+    #[serde(default)]
+    pub kind: String,
 }
 
 fn default_pattern() -> String {
     "*".into()
 }
 
-/// SCAN 游标遍历（不用 KEYS）：按模式筛选，首见去重，全量计数 + 截断返回。
+/// SCAN 游标遍历（不用 KEYS）：按模式 + 类型筛选，首见去重，全量计数 + 截断返回；
+/// 对展示的 key 批量 pipeline TYPE/TTL（两次往返），列表行直接带类型徽标与 TTL 提示。
 pub async fn keys(
     State(state): State<Arc<AppState>>,
     Query(q): Query<KeysQuery>,
@@ -245,20 +249,19 @@ pub async fn keys(
     let cred = redis_credential::load(&state_dir(&state));
     let pattern = q.pattern.trim().to_string();
     let pattern = if pattern.is_empty() { "*".to_string() } else { pattern };
+    let kind = q.kind.trim().to_lowercase();
     let res = blocking(move || -> Result<serde_json::Value, String> {
         let mut conn = open_conn(&cred)?;
         let mut cursor: u64 = 0;
         let mut seen: HashSet<String> = HashSet::new();
         let mut all: Vec<String> = Vec::new();
         loop {
-            let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(500)
-                .query(&mut conn)
-                .map_err(conn_err)?;
+            let mut cmd = redis::cmd("SCAN");
+            cmd.arg(cursor).arg("MATCH").arg(&pattern).arg("COUNT").arg(500);
+            if !kind.is_empty() {
+                cmd.arg("TYPE").arg(&kind);
+            }
+            let (next, batch): (u64, Vec<String>) = cmd.query(&mut conn).map_err(conn_err)?;
             for k in batch {
                 // SCAN 扩容期可能重复返回同一 key：首见去重，total 更真实
                 if seen.insert(k.clone()) {
@@ -272,22 +275,30 @@ pub async fn keys(
         }
         let total = all.len();
         let truncated = total > MAX_KEYS_RETURNED;
-        // 对展示的 key 批量 pipeline TYPE（一次网络往返）：列表行直接带类型徽标，
-        // 用户不必逐个点开才知道类型
+        // 对展示的 key 批量 pipeline TYPE + TTL：类型徽标在列表直接可见，
+        // 有过期时间的 key hover 可见剩余生存时间
         let shown_len = total.min(MAX_KEYS_RETURNED);
-        let mut pipe = redis::pipe();
+        let mut pipe_type = redis::pipe();
         for k in &all[..shown_len] {
-            pipe.cmd("TYPE").arg(k);
+            pipe_type.cmd("TYPE").arg(k);
         }
-        let kinds: Vec<String> = if shown_len > 0 {
-            pipe.query(&mut conn).map_err(conn_err)?
+        let mut pipe_ttl = redis::pipe();
+        for k in &all[..shown_len] {
+            pipe_ttl.cmd("TTL").arg(k);
+        }
+        let (kinds, ttls): (Vec<String>, Vec<i64>) = if shown_len > 0 {
+            (
+                pipe_type.query(&mut conn).map_err(conn_err)?,
+                pipe_ttl.query(&mut conn).map_err(conn_err)?,
+            )
         } else {
-            vec![]
+            (vec![], vec![])
         };
         let items: Vec<serde_json::Value> = all[..shown_len]
             .iter()
             .zip(kinds)
-            .map(|(name, kind)| json!({ "name": name, "kind": kind }))
+            .zip(ttls)
+            .map(|((name, kind), ttl)| json!({ "name": name, "kind": kind, "ttl": ttl }))
             .collect();
         Ok(json!({
             "keys": items,

@@ -317,9 +317,9 @@ export const api = {
       body: JSON.stringify(body),
     }),
   redisOverview: () => request<RedisOverview>("/api/redis/overview"),
-  redisKeys: (pattern: string) =>
+  redisKeys: (pattern: string, kind = "") =>
     request<{ keys: RedisKeyItem[]; total: number; truncated: boolean; error?: string }>(
-      `/api/redis/keys?pattern=${encodeURIComponent(pattern)}`,
+      `/api/redis/keys?pattern=${encodeURIComponent(pattern)}&kind=${encodeURIComponent(kind)}`,
     ),
   redisKey: (name: string) =>
     request<RedisKeyDetail>(`/api/redis/key?name=${encodeURIComponent(name)}`),

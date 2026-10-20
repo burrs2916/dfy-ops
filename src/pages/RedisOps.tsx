@@ -12,6 +12,7 @@ import {
   DialogTitle,
   Grid,
   InputAdornment,
+  IconButton,
   LinearProgress,
   MenuItem,
   Paper,
@@ -42,6 +43,10 @@ import WarningAmberIcon from "@mui/icons-material/WarningAmber";
 import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
 import ErrorOutlineRoundedIcon from "@mui/icons-material/ErrorOutlineRounded";
 import VpnKeyOutlinedIcon from "@mui/icons-material/VpnKeyOutlined";
+import ChevronLeftRoundedIcon from "@mui/icons-material/ChevronLeftRounded";
+import ChevronRightRoundedIcon from "@mui/icons-material/ChevronRightRounded";
+import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
+import CircularProgress from "@mui/material/CircularProgress";
 import { api } from "../api";
 import type { RedisKeyDetail, RedisKeyItem, RedisOverview } from "../types";
 
@@ -57,6 +62,20 @@ const KIND_META: Record<string, { label: string; short: string }> = {
   stream: { label: "流", short: "STREAM" },
   none: { label: "不存在", short: "NONE" },
 };
+
+/** 类型过滤下拉（SCAN 的 TYPE 参数）：选择即重扫 */
+const KIND_FILTERS = [
+  { value: "", label: "全部类型" },
+  { value: "string", label: "字符串" },
+  { value: "hash", label: "哈希" },
+  { value: "list", label: "列表" },
+  { value: "set", label: "集合" },
+  { value: "zset", label: "有序集合" },
+  { value: "stream", label: "流" },
+];
+
+/** Key 列表本地分页大小（后端一次 SCAN 全量计数，前端分页展示） */
+const PAGE_SIZE = 100;
 
 function formatBytes(n: number | null): string {
   if (n === null || Number.isNaN(n)) return "—";
@@ -174,10 +193,12 @@ export default function RedisOps({
   const [overviewErr, setOverviewErr] = useState("");
 
   const [pattern, setPattern] = useState("*");
+  const [keyKind, setKeyKind] = useState("");
   const [keys, setKeys] = useState<RedisKeyItem[]>([]);
   const [keysTotal, setKeysTotal] = useState(0);
   const [keysTruncated, setKeysTruncated] = useState(false);
   const [keysLoading, setKeysLoading] = useState(false);
+  const [page, setPage] = useState(0);
 
   const [selected, setSelected] = useState("");
   const [detail, setDetail] = useState<RedisKeyDetail | null>(null);
@@ -220,25 +241,42 @@ export default function RedisOps({
     }
   }, []);
 
-  const loadKeys = useCallback(async (pat: string) => {
-    setKeysLoading(true);
-    try {
-      const r = await api.redisKeys(pat || "*");
-      if (r.error) {
-        showFlash("error", r.error);
-        setKeys([]);
-        setKeysTotal(0);
-      } else {
-        setKeys(r.keys);
-        setKeysTotal(r.total);
-        setKeysTruncated(r.truncated);
+  const loadKeys = useCallback(
+    async (pat: string, kind: string) => {
+      setKeysLoading(true);
+      setPage(0);
+      try {
+        const r = await api.redisKeys(pat || "*", kind);
+        if (r.error) {
+          showFlash("error", r.error);
+          setKeys([]);
+          setKeysTotal(0);
+        } else {
+          setKeys(r.keys);
+          setKeysTotal(r.total);
+          setKeysTruncated(r.truncated);
+        }
+      } catch (e) {
+        showFlash("error", String(e));
+      } finally {
+        setKeysLoading(false);
       }
-    } catch (e) {
-      showFlash("error", String(e));
-    } finally {
-      setKeysLoading(false);
-    }
-  }, [showFlash]);
+    },
+    [showFlash],
+  );
+
+  /** 复制到剪贴板（Key 名 / 值）——数据排查场景的高频操作 */
+  const copyText = useCallback(
+    async (text: string, label: string) => {
+      try {
+        await navigator.clipboard.writeText(text);
+        showFlash("success", `${label}已复制到剪贴板`);
+      } catch {
+        showFlash("error", "复制失败");
+      }
+    },
+    [showFlash],
+  );
 
   const loadDetail = useCallback(async (name: string) => {
     setSelected(name);
@@ -252,8 +290,8 @@ export default function RedisOps({
   }, []);
 
   const loadAll = useCallback(async () => {
-    await Promise.all([loadOverview(), loadKeys(pattern)]);
-  }, [loadOverview, loadKeys, pattern]);
+    await Promise.all([loadOverview(), loadKeys(pattern, keyKind)]);
+  }, [loadOverview, loadKeys, pattern, keyKind]);
 
   // 首次激活：拉凭据展示 + 全量加载（CSS 隐藏挂载，仅首次）
   const bootedRef = useRef(false);
@@ -276,6 +314,11 @@ export default function RedisOps({
     setCredForm(cred);
     setCredOpen(true);
   };
+
+  // 本地分页：后端一次 SCAN 全量计数，前端按页展示
+  const pageStart = page * PAGE_SIZE;
+  const pageItems = keys.slice(pageStart, pageStart + PAGE_SIZE);
+  const pageCount = Math.max(1, Math.ceil(keys.length / PAGE_SIZE));
 
   // 外部引导（修复中心问题项「去连接配置」）：页面激活后自动弹出连接配置，一次性消费。
   // 自行拉取凭据填表——boot 的异步加载可能尚未完成。
@@ -477,24 +520,58 @@ export default function RedisOps({
       <Box sx={{ flex: 1, minHeight: 0, display: "flex", gap: 1.5 }}>
         {/* 左：Key 列表 */}
         <Paper sx={{ width: 340, flexShrink: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-          <Box sx={{ p: 1.25, pb: 1, flexShrink: 0 }}>
+          <Box sx={{ p: 1.25, pb: 1, flexShrink: 0, display: "flex", gap: 0.75 }}>
             <TextField
               size="small"
-              fullWidth
-              placeholder="按模式过滤，如 user:*（回车扫描）"
+              placeholder="按模式过滤，如 user:*"
               value={pattern}
               onChange={(e) => setPattern(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") void loadKeys(pattern);
+                if (e.key === "Enter") void loadKeys(pattern, keyKind);
               }}
+              sx={{ flex: 1, minWidth: 0 }}
               InputProps={{
                 startAdornment: (
                   <InputAdornment position="start">
                     <SearchIcon fontSize="small" sx={{ color: "text.secondary" }} />
                   </InputAdornment>
                 ),
+                endAdornment: (
+                  <InputAdornment position="end">
+                    <Tooltip title="扫描（回车）">
+                      <IconButton
+                        size="small"
+                        edge="end"
+                        disabled={keysLoading}
+                        onClick={() => void loadKeys(pattern, keyKind)}
+                      >
+                        {keysLoading ? (
+                          <CircularProgress size={13} />
+                        ) : (
+                          <RefreshIcon sx={{ fontSize: 16 }} />
+                        )}
+                      </IconButton>
+                    </Tooltip>
+                  </InputAdornment>
+                ),
               }}
             />
+            <TextField
+              select
+              size="small"
+              value={keyKind}
+              onChange={(e) => {
+                setKeyKind(e.target.value);
+                void loadKeys(pattern, e.target.value);
+              }}
+              sx={{ width: 106, flexShrink: 0 }}
+            >
+              {KIND_FILTERS.map((k) => (
+                <MenuItem key={k.value} value={k.value}>
+                  {k.label}
+                </MenuItem>
+              ))}
+            </TextField>
           </Box>
           <LinearProgress
             sx={{ height: 2, visibility: keysLoading ? "visible" : "hidden", flexShrink: 0 }}
@@ -511,10 +588,11 @@ export default function RedisOps({
             )}
           </Box>
           <Box sx={{ flex: 1, overflow: "auto", px: 1, pb: 1 }}>
-            {keys.map((item) => (
+            {pageItems.map((item) => (
               <Box
                 key={item.name}
                 onClick={() => void loadDetail(item.name)}
+                title={item.ttl > 0 ? `${item.name} — ${fmtTtl(item.ttl)}后过期` : item.name}
                 sx={{
                   px: 1,
                   py: 0.7,
@@ -536,9 +614,12 @@ export default function RedisOps({
                 }}
               >
                 <KindBadge kind={item.kind} />
-                <Typography variant="body2" noWrap title={item.name} sx={{ fontFamily: "monospace" }}>
+                <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0, fontFamily: "monospace" }}>
                   {item.name}
                 </Typography>
+                {item.ttl > 0 && (
+                  <ScheduleIcon sx={{ fontSize: 13, color: "text.disabled", flexShrink: 0 }} />
+                )}
               </Box>
             ))}
             {keys.length === 0 && !keysLoading && (
@@ -547,6 +628,33 @@ export default function RedisOps({
               </Typography>
             )}
           </Box>
+          {pageCount > 1 && (
+            <Stack
+              direction="row"
+              alignItems="center"
+              justifyContent="space-between"
+              sx={{ px: 1.5, py: 0.5, borderTop: "1px solid", borderColor: "divider", flexShrink: 0 }}
+            >
+              <Typography variant="caption" color="text.secondary">
+                第 {pageStart + 1}-{Math.min(pageStart + PAGE_SIZE, keys.length)} 个 / 共 {keys.length}
+              </Typography>
+              <Stack direction="row" alignItems="center">
+                <IconButton size="small" disabled={page === 0} onClick={() => setPage((p) => p - 1)}>
+                  <ChevronLeftRoundedIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+                <Typography variant="caption" sx={{ px: 0.5, minWidth: 42, textAlign: "center" }}>
+                  {page + 1} / {pageCount}
+                </Typography>
+                <IconButton
+                  size="small"
+                  disabled={page >= pageCount - 1}
+                  onClick={() => setPage((p) => p + 1)}
+                >
+                  <ChevronRightRoundedIcon sx={{ fontSize: 18 }} />
+                </IconButton>
+              </Stack>
+            </Stack>
+          )}
         </Paper>
 
         {/* 右：Key 详情 */}
@@ -599,6 +707,11 @@ export default function RedisOps({
                   >
                     {detail.name}
                   </Typography>
+                  <Tooltip title="复制 Key 名">
+                    <IconButton size="small" onClick={() => void copyText(detail.name, "Key 名")}>
+                      <ContentCopyRoundedIcon sx={{ fontSize: 15 }} />
+                    </IconButton>
+                  </Tooltip>
                   <KindBadge kind={detail.kind} />
                   <Button
                     size="small"
@@ -674,10 +787,39 @@ export default function RedisOps({
                             <span>{k}</span>
                           </Tooltip>
                         </TableCell>
-                        <TableCell
-                          sx={{ fontFamily: "monospace", whiteSpace: "pre-wrap", wordBreak: "break-all" }}
-                        >
-                          {v || <span style={{ color: "#9e9e9e" }}>（空）</span>}
+                        <TableCell sx={{ padding: 0 }}>
+                          <Box
+                            sx={{
+                              display: "flex",
+                              alignItems: "flex-start",
+                              gap: 0.5,
+                              px: "14px",
+                              py: "7px",
+                              "& .copy-btn": { opacity: 0, transition: "opacity .15s ease" },
+                              "&:hover .copy-btn": { opacity: 1 },
+                            }}
+                          >
+                            <Typography
+                              sx={{
+                                flex: 1,
+                                minWidth: 0,
+                                fontFamily: "monospace",
+                                fontSize: "0.8125rem",
+                                whiteSpace: "pre-wrap",
+                                wordBreak: "break-all",
+                              }}
+                            >
+                              {v || <span style={{ color: "#9e9e9e" }}>（空）</span>}
+                            </Typography>
+                            <IconButton
+                              className="copy-btn"
+                              size="small"
+                              title="复制值"
+                              onClick={() => void copyText(v, "值")}
+                            >
+                              <ContentCopyRoundedIcon sx={{ fontSize: 14 }} />
+                            </IconButton>
+                          </Box>
                         </TableCell>
                       </TableRow>
                     ))}
