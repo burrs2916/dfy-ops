@@ -240,7 +240,7 @@ export default function Dashboard() {
               startIcon={<ScienceOutlined />}
               onClick={() => navigate("/env")}
             >
-              环境检查
+              修复中心
             </Button>
             <Button
               variant="contained"
@@ -275,7 +275,7 @@ export default function Dashboard() {
 
       {Object.values(envMap).some((r) => r.overall !== "pass") && (
         <Alert severity="warning">
-          部分服务的运行环境存在缺失，启动 / 构建可能失败。请进入「环境检查」按修复建议在运维中心自行补齐依赖。
+          部分服务的运行环境存在缺失，启动 / 构建可能失败。请进入「修复中心」按修复建议自行补齐依赖。
         </Alert>
       )}
 

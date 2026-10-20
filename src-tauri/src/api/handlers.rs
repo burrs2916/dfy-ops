@@ -100,9 +100,34 @@ pub struct ServiceStatus {
     pub log_paths: Vec<String>,
 }
 
-fn to_status(def: &ServiceDef, managed: bool, snap: &ProcSnapshot) -> ServiceStatus {
-    // 受管 = 平台从安装目录拉起过，安装维度不适用；外部检测才判「装没装」
-    let (run_state, ports, healthy, installed) = if managed {
+/// 纯远程第三方服务（remoteOnly，Redis）的检测目标：托管连接配置指向的端点。
+/// 本机不安装也不检测本地进程/端口——凭据文件读取失败时回退默认值
+/// （192.168.56.101:6379），与服务详情页「Redis 管理 → 连接配置」同一可信源。
+fn remote_of(state: &AppState, def: &ServiceDef) -> Option<(String, u16)> {
+    if !def.remote_only {
+        return None;
+    }
+    let cred = crate::ops::redis_credential::load(&state.config_dir);
+    Some((cred.host, cred.port))
+}
+
+fn to_status(
+    def: &ServiceDef,
+    managed: bool,
+    snap: &ProcSnapshot,
+    remote: Option<&(String, u16)>,
+) -> ServiceStatus {
+    // 受管 = 平台从安装目录拉起过，安装维度不适用；外部检测才判「装没装」；
+    // 纯远程服务（remoteOnly）跳过本机进程/端口检测，检测 = 托管端点 TCP 可达。
+    let (run_state, ports, healthy, installed) = if let Some((host, port)) = remote {
+        let ok = health::check_tcp(host, *port, PROBE_TIMEOUT_MS);
+        (
+            if ok { RunState::Detected } else { RunState::Down },
+            vec![*port],
+            ok,
+            true,
+        )
+    } else if managed {
         (
             RunState::Managed,
             def.ports.clone(),
@@ -327,7 +352,10 @@ fn statuses(state: &AppState, snap: &ProcSnapshot) -> Vec<ServiceStatus> {
         let handles: Vec<_> = state
             .registry
             .iter()
-            .map(|d| s.spawn(move || to_status(d, state.procs.is_running(&d.id), snap)))
+            .map(|d| {
+                let remote = remote_of(state, d);
+                s.spawn(move || to_status(d, state.procs.is_running(&d.id), snap, remote.as_ref()))
+            })
             .collect();
         handles
             .into_iter()
@@ -353,7 +381,8 @@ pub async fn get_service(
     let st = state.clone();
     let status = blocking(move || {
         let snap = ProcSnapshot::capture();
-        to_status(&def, st.procs.is_running(&id), &snap)
+        let remote = remote_of(&st, &def);
+        to_status(&def, st.procs.is_running(&id), &snap, remote.as_ref())
     })
     .await;
     Ok(Json(status))
@@ -538,30 +567,40 @@ pub async fn diagnosis(State(state): State<Arc<AppState>>) -> Json<serde_json::V
     }))
 }
 
-/// 构建依赖检查视图：遍历注册表，把每个服务的实时状态（进程级检测，事实来源）
-/// 汇总为 DepState 映射，供环境检查的 dependsOn 段消费。
-/// 依赖端口沿用声明值（DepState.ports 仅作展示），实际端口已包含在 statuses 的检测里。
+/// 构建依赖检查视图：遍历注册表，把每个服务的实时状态（进程级检测，事实来源；
+/// remoteOnly 服务 = 托管端点可达性）汇总为 DepState 映射，供环境检查的
+/// dependsOn 段消费。依赖端口沿用声明值（DepState.ports 仅作展示），
+/// 实际端口已包含在 statuses 的检测里。
 fn dep_states(state: &AppState, snap: &ProcSnapshot) -> environment::DepStates {
-    statuses(state, snap)
-        .into_iter()
-        .map(|s| {
-            let ports = state
-                .registry
-                .iter()
-                .find(|d| d.id == s.id)
-                .map(|d| d.ports.clone())
-                .unwrap_or_default();
-            (
-                s.id.clone(),
-                environment::DepState {
-                    name: s.name.clone(),
-                    running: s.running,
-                    healthy: s.healthy,
-                    ports,
-                },
-            )
-        })
-        .collect()
+    std::thread::scope(|s| {
+        let handles: Vec<_> = state
+            .registry
+            .iter()
+            .map(|d| {
+                let remote = remote_of(state, d);
+                s.spawn(move || {
+                    let st = to_status(d, state.procs.is_running(&d.id), snap, remote.as_ref());
+                    (d.id.clone(), st, d.ports.clone(), remote)
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                let (id, st, ports, remote) = h.join().expect("服务状态探测线程 panic");
+                (
+                    id,
+                    environment::DepState {
+                        name: st.name,
+                        running: st.running,
+                        healthy: st.healthy,
+                        ports,
+                        remote,
+                    },
+                )
+            })
+            .collect()
+    })
 }
 
 /// 只构建环境检查所需服务子集的状态视图：自身 + 直接 dependsOn。
@@ -578,16 +617,16 @@ fn dep_states_for(
         .iter()
         .filter(|d| ids.contains(&d.id))
         .map(|d| {
-            let st = to_status(d, state.procs.is_running(&d.id), snap);
-            (
-                st.id.clone(),
-                environment::DepState {
-                    name: st.name.clone(),
-                    running: st.running,
-                    healthy: st.healthy,
-                    ports: d.ports.clone(),
-                },
-            )
+            let remote = remote_of(state, d);
+            let st = to_status(d, state.procs.is_running(&d.id), snap, remote.as_ref());
+            let dep = environment::DepState {
+                name: st.name,
+                running: st.running,
+                healthy: st.healthy,
+                ports: d.ports.clone(),
+                remote,
+            };
+            (d.id.clone(), dep)
         })
         .collect()
 }
@@ -702,7 +741,8 @@ pub async fn service_refresh(
     let st = state.clone();
     let (status, report) = blocking(move || {
         let snap = ProcSnapshot::capture();
-        let status = to_status(&def, st.procs.is_running(&id), &snap);
+        let remote = remote_of(&st, &def);
+        let status = to_status(&def, st.procs.is_running(&id), &snap, remote.as_ref());
         let mut ids = def.depends_on.clone();
         ids.push(def.id.clone());
         let deps = dep_states_for(&st, &snap, &ids);

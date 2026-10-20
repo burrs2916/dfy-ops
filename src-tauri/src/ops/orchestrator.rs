@@ -261,6 +261,7 @@ mod tests {
             requires: vec![],
             is_daemon,
             third_party: false,
+            remote_only: false,
             description: String::new(),
         }
     }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { alpha } from "@mui/material/styles";
 import {
   Alert,
   Box,
@@ -11,6 +12,7 @@ import {
   DialogTitle,
   Grid,
   InputAdornment,
+  LinearProgress,
   MenuItem,
   Paper,
   Snackbar,
@@ -35,20 +37,25 @@ import ScheduleIcon from "@mui/icons-material/Schedule";
 import SearchIcon from "@mui/icons-material/Search";
 import DeleteOutlineIcon from "@mui/icons-material/DeleteOutline";
 import TimerIcon from "@mui/icons-material/Timer";
+import DataObjectIcon from "@mui/icons-material/DataObject";
 import WarningAmberIcon from "@mui/icons-material/WarningAmber";
+import CheckCircleRoundedIcon from "@mui/icons-material/CheckCircleRounded";
+import ErrorOutlineRoundedIcon from "@mui/icons-material/ErrorOutlineRounded";
+import VpnKeyOutlinedIcon from "@mui/icons-material/VpnKeyOutlined";
 import { api } from "../api";
-import type { RedisKeyDetail, RedisOverview } from "../types";
+import type { RedisKeyDetail, RedisKeyItem, RedisOverview } from "../types";
 
 const btnSx = { textTransform: "none" as const, whiteSpace: "nowrap" as const };
 
-const KIND_LABEL: Record<string, string> = {
-  string: "字符串",
-  hash: "哈希",
-  list: "列表",
-  set: "集合",
-  zset: "有序集合",
-  stream: "流",
-  none: "不存在",
+/** 类型徽章文案（short 为列表/详情里的紧凑标记，统一主题色） */
+const KIND_META: Record<string, { label: string; short: string }> = {
+  string: { label: "字符串", short: "STR" },
+  hash: { label: "哈希", short: "HASH" },
+  list: { label: "列表", short: "LIST" },
+  set: { label: "集合", short: "SET" },
+  zset: { label: "有序集合", short: "ZSET" },
+  stream: { label: "流", short: "STREAM" },
+  none: { label: "不存在", short: "NONE" },
 };
 
 function formatBytes(n: number | null): string {
@@ -69,16 +76,66 @@ function fmtTtl(ttl: number): string {
   return `${Math.floor(ttl / 86400)} 天 ${Math.floor((ttl % 86400) / 3600)} 时`;
 }
 
-/** 概览指标卡 */
+/** 类型徽章：紧凑等宽小标记，统一主题青蓝 */
+function KindBadge({ kind }: { kind: string }) {
+  const meta = KIND_META[kind] ?? { label: kind, short: kind.slice(0, 4).toUpperCase() };
+  return (
+    <Tooltip title={meta.label} enterDelay={400}>
+      <Box
+        sx={{
+          px: 0.75,
+          py: "1px",
+          borderRadius: 0.75,
+          bgcolor: (t) => alpha(t.palette.primary.main, 0.1),
+          color: "primary.main",
+          fontSize: 10,
+          fontWeight: 700,
+          fontFamily: "monospace",
+          letterSpacing: 0.3,
+          lineHeight: 1.6,
+          flexShrink: 0,
+        }}
+      >
+        {meta.short}
+      </Box>
+    </Tooltip>
+  );
+}
+
+/** 概览指标卡：主题色图标块 + 加粗大数值，悬停轻微浮起 */
 function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
   return (
-    <Paper sx={{ p: 1.5, display: "flex", alignItems: "center", gap: 1.5, minWidth: 0 }}>
-      <Box sx={{ color: "primary.main", display: "flex" }}>{icon}</Box>
+    <Paper
+      sx={{
+        p: 1.5,
+        display: "flex",
+        alignItems: "center",
+        gap: 1.25,
+        minWidth: 0,
+        transition: "transform .18s ease, box-shadow .18s ease",
+        "&:hover": { transform: "translateY(-2px)", boxShadow: 4 },
+      }}
+    >
+      <Box
+        sx={{
+          width: 38,
+          height: 38,
+          borderRadius: 1.5,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          bgcolor: (t) => alpha(t.palette.primary.main, 0.12),
+          color: "primary.main",
+          flexShrink: 0,
+        }}
+      >
+        {icon}
+      </Box>
       <Box sx={{ minWidth: 0 }}>
-        <Typography variant="caption" color="text.secondary" noWrap>
+        <Typography variant="caption" color="text.secondary" noWrap sx={{ display: "block" }}>
           {label}
         </Typography>
-        <Typography variant="subtitle1" sx={{ fontWeight: 700 }} noWrap>
+        <Typography variant="h6" sx={{ fontWeight: 700, lineHeight: 1.25 }} noWrap>
           {value}
         </Typography>
       </Box>
@@ -86,7 +143,28 @@ function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string
   );
 }
 
-export default function RedisOps({ active }: { active: boolean }) {
+/** 详情元信息（图标 + 文字的紧凑行，替代一排 Chip 减少视觉噪音） */
+function MetaItem({ icon, text }: { icon: React.ReactNode; text: string }) {
+  return (
+    <Stack direction="row" spacing={0.5} alignItems="center">
+      <Box sx={{ display: "flex", color: "primary.main" }}>{icon}</Box>
+      <Typography variant="caption" sx={{ whiteSpace: "nowrap" }}>
+        {text}
+      </Typography>
+    </Stack>
+  );
+}
+
+export default function RedisOps({
+  active,
+  autoOpenConfig = false,
+  onAutoOpenConsumed,
+}: {
+  active: boolean;
+  /** 外部（修复中心问题项）请求落地后自动打开连接配置：检测不连通时的引导闭环 */
+  autoOpenConfig?: boolean;
+  onAutoOpenConsumed?: () => void;
+}) {
   const [cred, setCred] = useState({ host: "…", port: 6379, password: "" });
   const [connected, setConnected] = useState(false);
   const [flash, setFlash] = useState<{ kind: "success" | "error"; msg: string } | null>(null);
@@ -96,7 +174,7 @@ export default function RedisOps({ active }: { active: boolean }) {
   const [overviewErr, setOverviewErr] = useState("");
 
   const [pattern, setPattern] = useState("*");
-  const [keys, setKeys] = useState<string[]>([]);
+  const [keys, setKeys] = useState<RedisKeyItem[]>([]);
   const [keysTotal, setKeysTotal] = useState(0);
   const [keysTruncated, setKeysTruncated] = useState(false);
   const [keysLoading, setKeysLoading] = useState(false);
@@ -199,6 +277,22 @@ export default function RedisOps({ active }: { active: boolean }) {
     setCredOpen(true);
   };
 
+  // 外部引导（修复中心问题项「去连接配置」）：页面激活后自动弹出连接配置，一次性消费。
+  // 自行拉取凭据填表——boot 的异步加载可能尚未完成。
+  useEffect(() => {
+    if (!active || !autoOpenConfig) return;
+    onAutoOpenConsumed?.();
+    (async () => {
+      try {
+        setCredForm(await api.redisCredential());
+      } catch {
+        /* 凭据读取失败保持当前表单值 */
+      }
+      setCredOpen(true);
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active, autoOpenConfig]);
+
   const testConnection = async () => {
     setTesting(true);
     try {
@@ -276,43 +370,73 @@ export default function RedisOps({ active }: { active: boolean }) {
     }
   };
 
+  const connChip = connected ? (
+    <Chip
+      size="small"
+      color="primary"
+      variant="filled"
+      icon={<CheckCircleRoundedIcon />}
+      label="已连接"
+      sx={{ "& .MuiChip-icon": { color: "inherit" } }}
+    />
+  ) : overviewErr ? (
+    <Chip
+      size="small"
+      color="error"
+      variant="outlined"
+      icon={<ErrorOutlineRoundedIcon />}
+      label="连接失败"
+      sx={{ "& .MuiChip-icon": { color: "error.main" } }}
+    />
+  ) : (
+    <Chip size="small" variant="outlined" label="未连接" />
+  );
+
   return (
-    <Box sx={{ p: 2, height: "100%", overflow: "auto" }}>
-      {/* ===== 连接信息栏 ===== */}
-      <Paper sx={{ p: 1.5, mb: 2, display: "flex", alignItems: "center", gap: 1.5, flexWrap: "wrap" }}>
-        <StorageIcon sx={{ color: "primary.main" }} />
-        <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
-          Redis 管理
-        </Typography>
-        <Chip
-          size="small"
-          label={connected ? "已连接" : overviewErr ? "连接失败" : "未连接"}
-          color={connected ? "success" : "default"}
-          variant={connected ? "filled" : "outlined"}
-        />
-        <Chip size="small" variant="outlined" label={`${cred.host}:${cred.port}`} />
+    <Box sx={{ height: "100%", display: "flex", flexDirection: "column", gap: 1.5, overflow: "hidden" }}>
+      {/* ===== 连接信息栏（固定） ===== */}
+      <Paper sx={{ px: 1.5, py: 1, display: "flex", alignItems: "center", gap: 1.25, flexShrink: 0 }}>
+        <Box sx={{ color: "primary.main", display: "flex" }}>
+          <StorageIcon fontSize="small" />
+        </Box>
+        {connChip}
+        <Tooltip title="平台托管的 Redis 连接端点（在连接配置中修改）">
+          <Typography variant="body2" sx={{ fontFamily: "monospace", color: "text.secondary" }}>
+            {cred.host}:{cred.port}
+          </Typography>
+        </Tooltip>
         <Box sx={{ flex: 1 }} />
         <Button size="small" startIcon={<SettingsIcon />} onClick={openCredDialog} sx={btnSx}>
           连接配置
         </Button>
-        <Button
-          size="small"
-          startIcon={<RefreshIcon />}
-          onClick={() => void loadAll()}
-          sx={btnSx}
-        >
+        <Button size="small" startIcon={<RefreshIcon />} onClick={() => void loadAll()} sx={btnSx}>
           刷新
         </Button>
       </Paper>
 
+      {/* ===== 连接失败引导（与检测引导闭环：直接去连接配置） ===== */}
       {overviewErr && (
-        <Alert severity="error" sx={{ mb: 2 }}>
+        <Alert
+          severity="error"
+          icon={<WarningAmberIcon fontSize="inherit" />}
+          sx={{ flexShrink: 0, "& .MuiAlert-message": { alignItems: "center" } }}
+          action={
+            <Stack direction="row" spacing={1}>
+              <Button color="inherit" size="small" variant="outlined" onClick={openCredDialog} sx={btnSx}>
+                去连接配置
+              </Button>
+              <Button color="inherit" size="small" onClick={() => void loadOverview()} sx={btnSx}>
+                重试
+              </Button>
+            </Stack>
+          }
+        >
           {overviewErr}
         </Alert>
       )}
 
-      {/* ===== 总览指标 ===== */}
-      <Grid container spacing={1.5} sx={{ mb: 2 }}>
+      {/* ===== 总览指标（固定） ===== */}
+      <Grid container spacing={1.5} sx={{ flexShrink: 0 }}>
         <Grid item xs={6} sm={4} md={2}>
           <StatCard icon={<StorageIcon fontSize="small" />} label="Redis 版本" value={overview?.version || "—"} />
         </Grid>
@@ -320,13 +444,25 @@ export default function RedisOps({ active }: { active: boolean }) {
           <StatCard icon={<MemoryIcon fontSize="small" />} label="内存使用" value={overview?.usedMemory || "—"} />
         </Grid>
         <Grid item xs={6} sm={4} md={2}>
-          <StatCard icon={<KeyIcon fontSize="small" />} label="Key 总数" value={overview ? String(overview.totalKeys) : "—"} />
+          <StatCard
+            icon={<KeyIcon fontSize="small" />}
+            label="Key 总数"
+            value={overview ? String(overview.totalKeys) : "—"}
+          />
         </Grid>
         <Grid item xs={6} sm={4} md={2}>
-          <StatCard icon={<GroupIcon fontSize="small" />} label="客户端连接" value={overview?.connectedClients || "—"} />
+          <StatCard
+            icon={<GroupIcon fontSize="small" />}
+            label="客户端连接"
+            value={overview?.connectedClients || "—"}
+          />
         </Grid>
         <Grid item xs={6} sm={4} md={2}>
-          <StatCard icon={<ScheduleIcon fontSize="small" />} label="运行天数" value={overview?.uptimeDays ? `${overview.uptimeDays} 天` : "—"} />
+          <StatCard
+            icon={<ScheduleIcon fontSize="small" />}
+            label="运行天数"
+            value={overview?.uptimeDays ? `${overview.uptimeDays} 天` : "—"}
+          />
         </Grid>
         <Grid item xs={6} sm={4} md={2}>
           <StatCard
@@ -337,15 +473,15 @@ export default function RedisOps({ active }: { active: boolean }) {
         </Grid>
       </Grid>
 
-      {/* ===== Key 浏览：左列表 + 右详情 ===== */}
-      <Box sx={{ display: "flex", gap: 2, alignItems: "flex-start" }}>
-        <Paper sx={{ width: 340, flexShrink: 0, p: 1.5 }}>
-          <Stack direction="row" spacing={1} sx={{ mb: 1.5 }}>
+      {/* ===== Key 工作台：占满剩余高度，左右面板独立滚动 ===== */}
+      <Box sx={{ flex: 1, minHeight: 0, display: "flex", gap: 1.5 }}>
+        {/* 左：Key 列表 */}
+        <Paper sx={{ width: 340, flexShrink: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          <Box sx={{ p: 1.25, pb: 1, flexShrink: 0 }}>
             <TextField
               size="small"
               fullWidth
-              label="Key 模式（支持 * 通配）"
-              placeholder="例如 user:* 或 *"
+              placeholder="按模式过滤，如 user:*（回车扫描）"
               value={pattern}
               onChange={(e) => setPattern(e.target.value)}
               onKeyDown={(e) => {
@@ -354,43 +490,54 @@ export default function RedisOps({ active }: { active: boolean }) {
               InputProps={{
                 startAdornment: (
                   <InputAdornment position="start">
-                    <SearchIcon fontSize="small" />
+                    <SearchIcon fontSize="small" sx={{ color: "text.secondary" }} />
                   </InputAdornment>
                 ),
               }}
             />
-            <Button variant="contained" size="small" sx={btnSx} disabled={keysLoading} onClick={() => void loadKeys(pattern)}>
-              {keysLoading ? "扫描中…" : "扫描"}
-            </Button>
-          </Stack>
-          <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 0.5 }}>
-            {keysTruncated
-              ? `共匹配 ${keysTotal} 个，仅显示前 ${keys.length} 个——请细化模式`
-              : `匹配 ${keysTotal} 个 Key`}
-          </Typography>
-          <Box sx={{ maxHeight: 480, overflow: "auto" }}>
-            {keys.map((k) => (
+          </Box>
+          <LinearProgress
+            sx={{ height: 2, visibility: keysLoading ? "visible" : "hidden", flexShrink: 0 }}
+          />
+          <Box sx={{ px: 1.5, py: 0.75, flexShrink: 0 }}>
+            {keysTruncated ? (
+              <Typography variant="caption" color="warning.main">
+                共匹配 {keysTotal} 个，仅显示前 {keys.length} 个——请细化模式
+              </Typography>
+            ) : (
+              <Typography variant="caption" color="text.secondary">
+                匹配 {keysTotal} 个 Key
+              </Typography>
+            )}
+          </Box>
+          <Box sx={{ flex: 1, overflow: "auto", px: 1, pb: 1 }}>
+            {keys.map((item) => (
               <Box
-                key={k}
-                onClick={() => void loadDetail(k)}
+                key={item.name}
+                onClick={() => void loadDetail(item.name)}
                 sx={{
-                  px: 1.25,
-                  py: 0.75,
+                  px: 1,
+                  py: 0.7,
+                  mb: 0.25,
                   borderRadius: 1,
                   cursor: "pointer",
                   display: "flex",
                   alignItems: "center",
                   gap: 1,
-                  bgcolor: selected === k ? "rgba(13,148,136,0.12)" : "transparent",
-                  borderLeft: selected === k ? "3px solid" : "3px solid transparent",
-                  borderColor: "primary.main",
-                  "&:hover": { bgcolor: "rgba(13,148,136,0.06)" },
+                  bgcolor:
+                    selected === item.name
+                      ? (t) => alpha(t.palette.primary.main, 0.12)
+                      : "transparent",
+                  borderLeft: "3px solid",
+                  borderColor: selected === item.name ? "primary.main" : "transparent",
+                  transition: "background-color .15s ease",
+                  "&:hover": { bgcolor: (t) => alpha(t.palette.primary.main, 0.06) },
                   overflow: "hidden",
                 }}
               >
-                <KeyIcon sx={{ fontSize: 16, color: "text.secondary", flexShrink: 0 }} />
-                <Typography variant="body2" noWrap title={k} sx={{ fontFamily: "monospace" }}>
-                  {k}
+                <KindBadge kind={item.kind} />
+                <Typography variant="body2" noWrap title={item.name} sx={{ fontFamily: "monospace" }}>
+                  {item.name}
                 </Typography>
               </Box>
             ))}
@@ -402,65 +549,120 @@ export default function RedisOps({ active }: { active: boolean }) {
           </Box>
         </Paper>
 
-        <Paper sx={{ flex: 1, minWidth: 0, p: 1.5 }}>
+        {/* 右：Key 详情 */}
+        <Paper sx={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
           {!selected && (
-            <Typography variant="body2" color="text.secondary" sx={{ p: 4, textAlign: "center" }}>
-              点击左侧 Key 查看内容详情
-            </Typography>
+            <Box
+              sx={{
+                flex: 1,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 1,
+                color: "text.disabled",
+              }}
+            >
+              <VpnKeyOutlinedIcon sx={{ fontSize: 44 }} />
+              <Typography variant="body2" color="text.secondary">
+                从左侧选择一个 Key 查看内容
+              </Typography>
+            </Box>
           )}
           {selected && detailErr && <Alert severity="error">{detailErr}</Alert>}
           {selected && !detail && !detailErr && (
-            <Typography variant="body2" color="text.secondary" sx={{ p: 4, textAlign: "center" }}>
-              加载中…
-            </Typography>
+            <Box
+              sx={{
+                flex: 1,
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                gap: 1,
+                color: "text.secondary",
+              }}
+            >
+              <LinearProgress sx={{ width: 180 }} />
+              <Typography variant="body2">加载中…</Typography>
+            </Box>
           )}
           {selected && detail && (
             <>
-              <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5, flexWrap: "wrap" }}>
-                <Typography variant="subtitle1" sx={{ fontWeight: 700, fontFamily: "monospace", wordBreak: "break-all" }}>
-                  {detail.name}
-                </Typography>
-                <Chip size="small" label={KIND_LABEL[detail.kind] || detail.kind} variant="outlined" />
-                <Chip size="small" label={`TTL ${fmtTtl(detail.ttl)}`} variant="outlined" />
-                <Chip size="small" label={`占用 ${formatBytes(detail.memory)}`} variant="outlined" />
-                {detail.total > detail.rows.length && (
-                  <Chip size="small" color="warning" label={`共 ${detail.total} 条，仅显示前 ${detail.rows.length} 条`} />
-                )}
-                <Box sx={{ flex: 1 }} />
-                <Button size="small" color="error" startIcon={<DeleteOutlineIcon />} sx={btnSx} onClick={() => { setConfirmTarget({ name: detail.name }); setConfirmText(""); }}>
-                  删除
-                </Button>
-              </Stack>
-
-              <Stack direction="row" spacing={1} alignItems="center" sx={{ mb: 1.5, flexWrap: "wrap" }}>
-                <Typography variant="caption" color="text.secondary">
-                  过期设置：
-                </Typography>
-                <TextField select size="small" value={ttlMode} onChange={(e) => setTtlMode(e.target.value)} sx={{ width: 130 }} label="方式">
-                  <MenuItem value="expire">N 秒后过期</MenuItem>
-                  <MenuItem value="persist">永久保留</MenuItem>
-                </TextField>
-                {ttlMode === "expire" && (
-                  <TextField
+              <Box sx={{ p: 1.5, pb: 1, flexShrink: 0, borderBottom: 1, borderColor: "divider" }}>
+                {/* 标题行：key 名 + 类型徽章 + 删除 */}
+                <Stack direction="row" spacing={1} alignItems="center">
+                  <Typography
+                    variant="subtitle1"
+                    noWrap
+                    title={detail.name}
+                    sx={{ fontWeight: 700, fontFamily: "monospace", flex: 1, minWidth: 0 }}
+                  >
+                    {detail.name}
+                  </Typography>
+                  <KindBadge kind={detail.kind} />
+                  <Button
                     size="small"
-                    type="number"
-                    label="秒数"
-                    value={ttlEdit}
-                    onChange={(e) => setTtlEdit(e.target.value)}
-                    sx={{ width: 140 }}
-                    placeholder="如 3600"
-                  />
-                )}
-                <Button size="small" variant="outlined" sx={btnSx} onClick={() => void applyTtl()}>
-                  应用
-                </Button>
-              </Stack>
+                    color="error"
+                    startIcon={<DeleteOutlineIcon />}
+                    sx={btnSx}
+                    onClick={() => {
+                      setConfirmTarget({ name: detail.name });
+                      setConfirmText("");
+                    }}
+                  >
+                    删除
+                  </Button>
+                </Stack>
+                {/* 元信息行：TTL / 内存 / 条数 */}
+                <Stack direction="row" spacing={2.5} alignItems="center" sx={{ mt: 1, flexWrap: "wrap" }}>
+                  <MetaItem icon={<ScheduleIcon sx={{ fontSize: 15 }} />} text={`TTL ${fmtTtl(detail.ttl)}`} />
+                  <MetaItem icon={<MemoryIcon sx={{ fontSize: 15 }} />} text={`占用 ${formatBytes(detail.memory)}`} />
+                  <MetaItem icon={<DataObjectIcon sx={{ fontSize: 15 }} />} text={`共 ${detail.total} 条`} />
+                  {detail.total > detail.rows.length && (
+                    <Typography variant="caption" color="warning.main">
+                      仅显示前 {detail.rows.length} 条
+                    </Typography>
+                  )}
+                </Stack>
+                {/* 过期设置（紧凑行内编辑） */}
+                <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.25, flexWrap: "wrap" }}>
+                  <Typography variant="caption" color="text.secondary">
+                    过期设置
+                  </Typography>
+                  <TextField
+                    select
+                    size="small"
+                    value={ttlMode}
+                    onChange={(e) => setTtlMode(e.target.value)}
+                    sx={{ width: 120 }}
+                    SelectProps={{ MenuProps: { disableScrollLock: true } }}
+                  >
+                    <MenuItem value="expire">N 秒后过期</MenuItem>
+                    <MenuItem value="persist">永久保留</MenuItem>
+                  </TextField>
+                  {ttlMode === "expire" && (
+                    <TextField
+                      size="small"
+                      type="number"
+                      value={ttlEdit}
+                      onChange={(e) => setTtlEdit(e.target.value)}
+                      sx={{ width: 130 }}
+                      placeholder="秒数，如 3600"
+                    />
+                  )}
+                  <Button size="small" variant="outlined" sx={btnSx} onClick={() => void applyTtl()}>
+                    应用
+                  </Button>
+                </Stack>
+              </Box>
 
-              <TableContainer sx={{ maxHeight: 460, border: 1, borderColor: "divider", borderRadius: 1 }}>
+              <TableContainer sx={{ flex: 1, minHeight: 0 }}>
                 <Table size="small" stickyHeader>
                   <TableHead>
                     <TableRow>
-                      <TableCell sx={{ width: 180, fontWeight: 700 }}>{detail.kind === "zset" ? "成员" : "标签"}</TableCell>
+                      <TableCell sx={{ width: 180, fontWeight: 700 }}>
+                        {detail.kind === "zset" ? "成员" : "标签"}
+                      </TableCell>
                       <TableCell sx={{ fontWeight: 700 }}>值</TableCell>
                     </TableRow>
                   </TableHead>
@@ -472,7 +674,9 @@ export default function RedisOps({ active }: { active: boolean }) {
                             <span>{k}</span>
                           </Tooltip>
                         </TableCell>
-                        <TableCell sx={{ fontFamily: "monospace", whiteSpace: "pre-wrap", wordBreak: "break-all" }}>
+                        <TableCell
+                          sx={{ fontFamily: "monospace", whiteSpace: "pre-wrap", wordBreak: "break-all" }}
+                        >
                           {v || <span style={{ color: "#9e9e9e" }}>（空）</span>}
                         </TableCell>
                       </TableRow>
@@ -487,7 +691,10 @@ export default function RedisOps({ active }: { active: boolean }) {
 
       {/* ===== 连接配置 ===== */}
       <Dialog open={credOpen} onClose={() => setCredOpen(false)} maxWidth="xs" fullWidth>
-        <DialogTitle sx={{ fontWeight: 700 }}>连接配置</DialogTitle>
+        <DialogTitle sx={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 1 }}>
+          <SettingsIcon color="primary" />
+          连接配置
+        </DialogTitle>
         <DialogContent>
           <DialogContentText sx={{ mb: 2 }}>
             平台通过远程连接管理 Redis，连接凭据由平台托管。生产环境请修改为实际地址。
@@ -553,7 +760,13 @@ export default function RedisOps({ active }: { active: boolean }) {
           <Button onClick={() => setConfirmTarget(null)} sx={btnSx}>
             取消
           </Button>
-          <Button variant="contained" color="error" disabled={deleting || confirmText !== "删除"} onClick={() => void doDelete()} sx={btnSx}>
+          <Button
+            variant="contained"
+            color="error"
+            disabled={deleting || confirmText !== "删除"}
+            onClick={() => void doDelete()}
+            sx={btnSx}
+          >
             {deleting ? "删除中…" : "确认删除"}
           </Button>
         </DialogActions>

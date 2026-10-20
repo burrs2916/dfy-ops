@@ -28,6 +28,7 @@ import type {
   MysqlUserInfo,
   MysqlVariableItem,
   RedisKeyDetail,
+  RedisKeyItem,
   RedisOverview,
   SqlResult,
   UninstallTargetStatus,
@@ -158,7 +159,7 @@ export const api = {
     request<{ ok: boolean; message?: string; error?: string }>("/api/env/repair/java-env", {
       method: "POST",
     }),
-  // ===== 数据库运维中心（MySQL）：托管凭据 + SQL 控制台 + 库表 + 用户权限 =====
+  // ===== MySQL 管理（运维中心）：托管凭据 + SQL 控制台 + 库表 + 用户权限 =====
   mysqlOverview: () => request<MysqlOverview>("/api/mysql/overview"),
   mysqlExec: (sql: string, database?: string) =>
     request<SqlResult>("/api/mysql/exec", {
@@ -317,7 +318,7 @@ export const api = {
     }),
   redisOverview: () => request<RedisOverview>("/api/redis/overview"),
   redisKeys: (pattern: string) =>
-    request<{ keys: string[]; total: number; truncated: boolean; error?: string }>(
+    request<{ keys: RedisKeyItem[]; total: number; truncated: boolean; error?: string }>(
       `/api/redis/keys?pattern=${encodeURIComponent(pattern)}`,
     ),
   redisKey: (name: string) =>

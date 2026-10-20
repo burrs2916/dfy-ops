@@ -11,6 +11,8 @@ interface OpsState {
   loading: boolean;
   error: string | null;
   lastUpdate: Date | null;
+  /** 修复中心问题项「去连接配置」→ 运维中心 Redis 管理：落地后自动弹出连接配置（一次性） */
+  redisConfigPending: boolean;
   /** 应用启动时检测一次；已检测过则直接复用缓存（页面切换零开销） */
   bootstrap: () => Promise<void>;
   /** 手动「刷新全部」：状态 + 环境 + 时间戳（状态与环境并行探测） */
@@ -19,6 +21,8 @@ interface OpsState {
   refreshEnvAll: () => Promise<boolean>;
   /** 单服务刷新：状态 + 该服务环境，局部替换，不触发全量探测 */
   refreshServices: (ids: string[]) => Promise<void>;
+  /** 标记「去连接配置」引导；运维中心消费后由页面回调清除 */
+  setRedisConfigPending: (v: boolean) => void;
 }
 
 export const useOpsStore = create<OpsState>((set, get) => ({
@@ -28,6 +32,8 @@ export const useOpsStore = create<OpsState>((set, get) => ({
   loading: false,
   error: null,
   lastUpdate: null,
+  redisConfigPending: false,
+  setRedisConfigPending: (v) => set({ redisConfigPending: v }),
   bootstrap: async () => {
     // 已检测过（应用启动后首次进入任意页面时完成）：直接复用缓存，
     // 切换页面 / 返回总览不再触发全量探测（此前每次 mount 都全量重探，

@@ -251,7 +251,7 @@ export interface GenericUninstallStart {
   error?: string;
 }
 
-// ===== 数据库运维中心（MySQL） =====
+// ===== MySQL 管理（运维中心） =====
 
 /** GET /api/mysql/overview：连接信息 + 版本 + 库列表（服务未运行时降级） */
 export interface MysqlOverview {
@@ -351,6 +351,12 @@ export interface RedisOverview {
   rdbLastStatus: string;
   totalKeys: number;
   totalExpires: number;
+}
+
+/** GET /api/redis/keys：Key 条目（kind：string/hash/list/set/zset/stream） */
+export interface RedisKeyItem {
+  name: string;
+  kind: string;
 }
 
 /** GET /api/redis/key：Key 详情（rows 统一为 [标签, 值] 二元组） */

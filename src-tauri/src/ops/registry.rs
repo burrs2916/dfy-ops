@@ -93,6 +93,11 @@ pub struct ServiceDef {
     /// Windows 服务管理器或容器运行时负责。
     #[serde(rename = "thirdParty", default)]
     pub third_party: bool,
+    /// 纯远程第三方（Redis）：本机不安装、不检测本地进程/端口，检测 =
+    /// 托管连接配置（redis_credential.json）指向的远程端点可达性。
+    /// 安装与维护不再提供该服务的本地安装/卸载入口。
+    #[serde(rename = "remoteOnly", default)]
+    pub remote_only: bool,
     /// 声明式依赖检查（环境检查按此探测，不在代码里硬编码路径/端口）
     #[serde(default)]
     pub requires: Vec<RequiresCheck>,
@@ -123,6 +128,7 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec!["mysql".into(), "redis".into()],
             is_daemon: true,
             third_party: false,
+            remote_only: false,
             requires: vec![RequiresCheck {
                 id: "jar".into(),
                 label: "后端 JAR 产物".into(),
@@ -147,6 +153,7 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec!["dfy-backend".into()],
             is_daemon: true,
             third_party: false,
+            remote_only: false,
             requires: vec![],
             description: "Vue3 管理后台，由 nginx 托管于 80 端口，反代 /api 到后端 48085。".into(),
         },
@@ -166,6 +173,7 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec![],
             is_daemon: true,
             third_party: false,
+            remote_only: false,
             requires: vec![],
             description: "Angular 19 网关控制台，静态托管。".into(),
         },
@@ -186,6 +194,7 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec!["dfy-backend".into(), "vernemq".into(), "minio".into()],
             is_daemon: true,
             third_party: false,
+            remote_only: false,
             requires: vec![RequiresCheck {
                 id: "greptime".into(),
                 label: "GreptimeDB 二进制".into(),
@@ -213,6 +222,7 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec![],
             is_daemon: false,
             third_party: false,
+            remote_only: false,
             requires: vec![],
             description: "空间数据驱动程序桌面客户端；无端口，按镜像名判「跑没跑」、卸载注册表判「装没装」（非常驻，不参与批量启动）。".into(),
         },
@@ -235,6 +245,7 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec![],
             is_daemon: true,
             third_party: true,
+            remote_only: false,
             requires: vec![],
             description: "第三方 MQTT broker（Erlang/OTP），平台只检测不托管；实际监听端口由进程反查（MQTT 18830 / 状态页 8888 如实显示）。".into(),
         },
@@ -254,6 +265,7 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec![],
             is_daemon: true,
             third_party: true,
+            remote_only: false,
             requires: vec![],
             description: "第三方 S3 兼容对象存储，平台只检测不托管；minio.exe 进程反查实际端口（API 9000 + console 端口如实显示）。".into(),
         },
@@ -273,6 +285,7 @@ fn builtin() -> Vec<ServiceDef> {
             depends_on: vec![],
             is_daemon: true,
             third_party: true,
+            remote_only: false,
             requires: vec![],
             description: "第三方业务数据库，平台只检测不托管；实际监听端口由进程反查（本机由 OrbStack 容器提供，走端口兜底探测）。".into(),
         },
@@ -281,19 +294,21 @@ fn builtin() -> Vec<ServiceDef> {
             name: "Redis (缓存)".into(),
             kind: ServiceKind::Database,
             java_major: None,
-            install_dir: "C:/services/redis".into(),
+            install_dir: String::new(),
             build_cmd: None,
             run_cmd: String::new(),
             ports: vec![6379],
-            process_names: vec!["redis-server".into(), "redis-server.exe".into()],
+            // 纯远程模式：本机无进程/端口可查，processNames 不适用
+            process_names: vec![],
             product_names: vec![],
             health_url: None,
             log_paths: vec![],
             depends_on: vec![],
             is_daemon: true,
             third_party: true,
+            remote_only: true,
             requires: vec![],
-            description: "第三方缓存服务，平台只检测不托管；实际监听端口由进程反查（本机由 OrbStack 容器提供，走端口兜底探测）。".into(),
+            description: "纯远程部署模式的缓存服务：本机不安装，检测目标为「运维中心 → Redis 管理 → 连接配置」托管的远程端点（默认 192.168.56.101:6379）；连接不可达时请在连接配置中检查主机/端口/密码。".into(),
         },
     ]
 }
@@ -408,8 +423,9 @@ mod tests {
         assert!(d.ports.is_empty() && !d.process_names.is_empty());
     }
 
-    /// 回归：内置注册表必须包含第三方依赖 vernemq/minio（thirdParty=true），
-    /// 且自研服务 thirdParty=false。
+    /// 回归：内置注册表必须包含第三方依赖 vernemq/minio/mysql/redis（thirdParty=true），
+    /// 且自研服务 thirdParty=false。Redis 额外声明 remoteOnly（纯远程部署模式：
+    /// 本机不安装，检测 = 托管连接配置指向的远程端点可达性）。
     #[test]
     fn builtin_contains_third_party_dependencies() {
         let defs = builtin();
@@ -421,7 +437,14 @@ mod tests {
         for id in ["dfy-backend", "dfy-ui", "gateway-console", "edge-conductor"] {
             let d = defs.iter().find(|d| d.id == id).unwrap();
             assert!(!d.third_party, "{id} 是自研服务");
+            assert!(!d.remote_only, "{id} 不是纯远程服务");
         }
+        let redis = defs.iter().find(|d| d.id == "redis").unwrap();
+        assert!(redis.remote_only, "Redis 必须声明为 remoteOnly（安装与维护不再提供本地安装）");
+        assert!(
+            redis.process_names.is_empty(),
+            "纯远程模式不再按本机进程判定 Redis"
+        );
     }
 
     /// 回归：覆盖配置按 id 合并——同 id 替换、新 id 追加、内置定义不丢。

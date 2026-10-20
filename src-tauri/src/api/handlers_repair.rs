@@ -75,6 +75,14 @@ pub async fn start_generic_repair(
             "error": "该检查项不支持自动安装修复，请使用 AI 方案或按修复建议手动处理"
         }));
     };
+    // Redis 为纯远程部署模式：本机不安装，检测/使用全部走「运维中心 → Redis 管理 → 连接配置」
+    // 托管的远程端点。防止 API 直调触发本地安装流水线。
+    if target == "redis" {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "Redis 为远程部署模式（本机不安装）：请到「运维中心 → Redis 管理 → 连接配置」设置主机/端口/密码后重新检测"
+        }));
+    }
     let label = resource::target_label(target);
 
     let dir = state.app_settings.lock().unwrap().resource_dir.clone();

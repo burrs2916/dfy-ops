@@ -275,7 +275,7 @@ export default function ServiceDetail() {
           </Stack>
           {fatalMissing && (
             <Alert severity="error" sx={{ mt: 2 }}>
-              运行环境存在致命缺失，无法启动 / 构建。请先按下方「运行环境检查」中的修复建议在运维中心补齐依赖。
+              运行环境存在致命缺失，无法启动 / 构建。请先按下方「运行环境检查」中的修复建议在「修复中心」补齐依赖。
             </Alert>
           )}
           {warnOnly && (

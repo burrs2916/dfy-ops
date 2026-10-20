@@ -68,7 +68,18 @@ export default function Layout() {
                 "&.active": { bgcolor: "rgba(255,255,255,0.16)" },
               }}
             >
-              环境检查
+              修复中心
+            </Button>
+            <Button
+              component={NavLink}
+              to="/ops"
+              color="inherit"
+              sx={{
+                textTransform: "none",
+                "&.active": { bgcolor: "rgba(255,255,255,0.16)" },
+              }}
+            >
+              运维中心
             </Button>
             <Button
               component={NavLink}

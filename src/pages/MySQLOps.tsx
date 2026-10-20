@@ -210,7 +210,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     }
   }, [flash]);
 
-  // 页面可见（子页签切到「数据库运维」）即刷新连接信息——面板是 CSS 隐藏挂载，
+  // 页面可见（子页签切到「MySQL 管理」）即刷新连接信息——面板是 CSS 隐藏挂载，
   // mount 一次后不重走 useEffect，切页刷新才能反映安装页里刚做的启停
   useEffect(() => {
     if (active) void refreshOverview();
@@ -540,7 +540,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
       {/* MySQL 未安装：显示引导，隐藏全部操作（启停/密码/导入都无从谈起） */}
       {!mysqlInstalled && (
         <Alert severity="info">
-          MySQL 尚未安装——请先切到「安装与维护」页签安装 MySQL，安装完成后回到本页进行数据库运维。
+          MySQL 尚未安装——请先切到「安装与维护」页签安装 MySQL，安装完成后回到本页即可使用。
         </Alert>
       )}
 
@@ -640,7 +640,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
         )}
         {!ovLoading && mysqlInstalled && !running && (
           <Alert severity="info" sx={{ mt: 1.5 }}>
-            MySQL 服务未运行——启动服务后即可使用数据库运维功能。
+            MySQL 服务未运行——启动服务后即可使用本页管理功能。
           </Alert>
         )}
       </Paper>

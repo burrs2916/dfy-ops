@@ -4,6 +4,7 @@ import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
 import ServiceDetail from "./pages/ServiceDetail";
 import EnvCheck from "./pages/EnvCheck";
+import OpsCenter from "./pages/OpsCenter";
 import Settings from "./pages/Settings";
 import AiAssistant from "./pages/AiAssistant";
 import Topology from "./pages/Topology";
@@ -23,6 +24,7 @@ export default function App() {
       <Route path="/" element={<Layout />}>
         <Route index element={<Dashboard />} />
         <Route path="env" element={<EnvCheck />} />
+        <Route path="ops" element={<OpsCenter />} />
         <Route path="topology" element={<Topology />} />
         <Route path="ai" element={<AiAssistant />} />
         <Route path="settings" element={<Settings />} />

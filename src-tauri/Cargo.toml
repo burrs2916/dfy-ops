@@ -24,6 +24,9 @@ axum = "0.7"
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Redis 原生客户端：RESP 协议 TCP 直连（纯 Rust，零外部依赖），
+# Redis 管理不再依赖 redis-cli.exe 子进程
+redis = "1.7"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 

@@ -62,6 +62,10 @@ pub struct DepState {
     pub running: bool,
     pub healthy: bool,
     pub ports: Vec<u16>,
+    /// 纯远程第三方（remoteOnly，如 Redis）的托管端点：本机无进程/端口可查，
+    /// running/healthy 已是「托管端点 TCP 可达」的探测结果，端点值用于生成
+    /// 面向用户的提示文案（不可达时引导去连接配置）。
+    pub remote: Option<(String, u16)>,
 }
 
 /// 服务 id -> 实时状态。
@@ -201,10 +205,9 @@ fn fix_hint_for(id: &str) -> String {
             "winget install -e --id Oracle.MySQL   # 或访问 https://dev.mysql.com/downloads/ 安装 MySQL Server",
             "brew install mysql   # 或用 OrbStack/Docker 容器提供",
         ),
-        "service-redis" | "dep-redis" => by_platform(
-            "winget install -e --id Redis.Redis   # 或：choco install redis-64",
-            "brew install redis   # 或用 OrbStack/Docker 容器提供",
-        ),
+        "service-redis" | "dep-redis" => {
+            "Redis 为远程部署模式（本机不安装）：请到「运维中心 → Redis 管理 → 连接配置」检查主机/端口/密码设置后重新检测".into()
+        }
         "dep-dfy-backend" => "在服务总览启动 DFY 后端（受管），或确认其已在外部运行".into(),
         _ => "请在运维中心根据上方“实际”信息排查并安装对应依赖".into(),
     }
@@ -443,7 +446,29 @@ pub fn check_service_env_with(
         }
         ServiceKind::MqttBroker | ServiceKind::ObjectStorage | ServiceKind::Database => {
             // 第三方中间件（VerneMQ/MinIO/MySQL/Redis）：本身就是外部依赖，平台只检测不托管。
-            if running {
+            // 纯远程形态（remoteOnly，Redis）：检测 = 托管端点 TCP 可达；不可达时
+            // 明确引导用户去「Redis 管理 → 连接配置」完成设置（不再提示本地安装）。
+            if let Some((host, port)) = states.get(&def.id).and_then(|s| s.remote.as_ref()) {
+                let ok = health::check_tcp(host, *port, 800);
+                let ep = format!("{host}:{port}");
+                let actual = if ok {
+                    format!("远程端点 {ep} 可达（TCP 连通）")
+                } else {
+                    format!("远程端点 {ep} 不可达——请先在「运维中心 → Redis 管理 → 连接配置」完成设置")
+                };
+                items.push(item(
+                    &format!("service-{}", def.id),
+                    "服务状态",
+                    "外部依赖",
+                    &format!("远程端点 {ep} 可达"),
+                    &actual,
+                    if ok {
+                        CheckStatus::Pass
+                    } else {
+                        CheckStatus::Fail
+                    },
+                ));
+            } else if running {
                 items.push(item(
                     "service-state",
                     "服务状态",
@@ -559,32 +584,57 @@ pub fn check_service_env_with(
     for dep_id in &def.depends_on {
         let it = match states.get(dep_id) {
             Some(dep) => {
-                let ports_txt = if dep.ports.is_empty() {
-                    "无监听端口".to_string()
+                // 纯远程依赖（remoteOnly，Redis）：状态即托管端点可达性，
+                // 提示引导到连接配置而非本地启动/安装。
+                if let Some((host, port)) = &dep.remote {
+                    let ep = format!("{host}:{port}");
+                    let (status, actual) = if dep.running && dep.healthy {
+                        (
+                            CheckStatus::Pass,
+                            format!("远程端点 {ep} 可达（TCP 连通）"),
+                        )
+                    } else {
+                        (
+                            CheckStatus::Fail,
+                            format!("远程端点 {ep} 不可达——请先在「运维中心 → Redis 管理 → 连接配置」完成设置"),
+                        )
+                    };
+                    item(
+                        &format!("dep-{dep_id}"),
+                        &format!("依赖：{}", dep.name),
+                        "外部依赖",
+                        &format!("远程端点 {ep} 可达"),
+                        &actual,
+                        status,
+                    )
                 } else {
-                    dep.ports
-                        .iter()
-                        .map(|p| p.to_string())
-                        .collect::<Vec<_>>()
-                        .join("/")
-                };
-                let (status, actual) = if dep.running && dep.healthy {
-                    (CheckStatus::Pass, format!("运行中，端口 {ports_txt}"))
-                } else if dep.running {
-                    // 依赖在跑但端口不可达：非致命，但功能可能受限
-                    (CheckStatus::Warn, format!("运行中但端口不可达（{ports_txt}）"))
-                } else {
-                    // 依赖没跑：致命——先把它拉起来，启动本服务没有意义
-                    (CheckStatus::Fail, "未运行".to_string())
-                };
-                item(
-                    &format!("dep-{dep_id}"),
-                    &format!("依赖：{}", dep.name),
-                    "外部依赖",
-                    "依赖服务运行且健康",
-                    &actual,
-                    status,
-                )
+                    let ports_txt = if dep.ports.is_empty() {
+                        "无监听端口".to_string()
+                    } else {
+                        dep.ports
+                            .iter()
+                            .map(|p| p.to_string())
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    };
+                    let (status, actual) = if dep.running && dep.healthy {
+                        (CheckStatus::Pass, format!("运行中，端口 {ports_txt}"))
+                    } else if dep.running {
+                        // 依赖在跑但端口不可达：非致命，但功能可能受限
+                        (CheckStatus::Warn, format!("运行中但端口不可达（{ports_txt}）"))
+                    } else {
+                        // 依赖没跑：致命——先把它拉起来，启动本服务没有意义
+                        (CheckStatus::Fail, "未运行".to_string())
+                    };
+                    item(
+                        &format!("dep-{dep_id}"),
+                        &format!("依赖：{}", dep.name),
+                        "外部依赖",
+                        "依赖服务运行且健康",
+                        &actual,
+                        status,
+                    )
+                }
             }
             None => item(
                 &format!("dep-{dep_id}"),
@@ -629,6 +679,27 @@ mod tests {
                         running: *running,
                         healthy: *healthy,
                         ports: ports.to_vec(),
+                        remote: None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    /// 带托管远程端点的状态视图（remoteOnly 服务专用）。
+    fn states_with_remote(
+        list: &[(&str, bool, bool, &[u16], Option<(&str, u16)>)],
+    ) -> DepStates {
+        list.iter()
+            .map(|(id, running, healthy, ports, remote)| {
+                (
+                    id.to_string(),
+                    DepState {
+                        name: id.to_string(),
+                        running: *running,
+                        healthy: *healthy,
+                        ports: ports.to_vec(),
+                        remote: remote.map(|(h, p)| (h.to_string(), p)),
                     },
                 )
             })
@@ -861,5 +932,71 @@ mod tests {
         let def = def_of("biosphere-spatial");
         let report = check_service_env_with(&def, &states(&[]), None);
         assert_eq!(report.overall, CheckStatus::Pass);
+    }
+
+    /// 纯远程模式（Redis）：检测 = 托管端点 TCP 可达。端点连通 → service 项与
+    /// dep-redis 项均 Pass；不可达 → Fail 且修复提示引导去「Redis 管理 → 连接配置」，
+    /// 绝不再提示本地安装（winget/brew）。
+    #[test]
+    fn redis_remote_endpoint_drives_checks() {
+        let def = def_of("redis");
+        assert!(def.remote_only, "Redis 必须声明为 remoteOnly（纯远程模式）");
+
+        // 可达端点：本机起临时 TCP 监听模拟远程 Redis
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("绑定临时端口");
+        let port = listener.local_addr().unwrap().port();
+        let st = states_with_remote(&[
+            ("redis", true, true, &[port], Some(("127.0.0.1", port))),
+            (
+                "dfy-backend",
+                false,
+                false,
+                &[],
+                None,
+            ),
+        ]);
+        let report = check_service_env_with(&def, &st, None);
+        let svc = report
+            .items
+            .iter()
+            .find(|i| i.id == "service-redis")
+            .expect("必须包含 service-redis 检查项");
+        assert_eq!(svc.status, CheckStatus::Pass, "端点连通应 Pass: {:?}", svc);
+        assert!(svc.actual.contains(&port.to_string()), "实际值应显示端点: {}", svc.actual);
+
+        // dfy-backend 视角：dep-redis 走远程端点判定
+        let be = def_of("dfy-backend");
+        let report = check_service_env_with(&be, &st, None);
+        let dep = report.items.iter().find(|i| i.id == "dep-redis").unwrap();
+        assert_eq!(dep.status, CheckStatus::Pass, "远程端点连通时依赖应 Pass: {:?}", dep);
+
+        // 不可达端点（空闲端口）：Fail + 引导去连接配置，不提示本地安装
+        let free = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let down = states_with_remote(&[
+            ("redis", false, false, &[6379], Some(("127.0.0.1", free))),
+            ("dfy-backend", false, false, &[], None),
+        ]);
+        let report = check_service_env_with(&def, &down, None);
+        let svc = report.items.iter().find(|i| i.id == "service-redis").unwrap();
+        assert_eq!(svc.status, CheckStatus::Fail, "端点不可达应 Fail: {:?}", svc);
+        assert!(
+            svc.fix_hint.contains("连接配置"),
+            "修复提示应引导去连接配置: {}",
+            svc.fix_hint
+        );
+        assert!(
+            !svc.fix_hint.contains("winget") && !svc.fix_hint.contains("brew"),
+            "修复提示不得再引导本地安装: {}",
+            svc.fix_hint
+        );
+
+        let report = check_service_env_with(&be, &down, None);
+        let dep = report.items.iter().find(|i| i.id == "dep-redis").unwrap();
+        assert_eq!(dep.status, CheckStatus::Fail, "远程端点不可达时依赖应 Fail");
+        assert!(dep.fix_hint.contains("连接配置"), "依赖修复提示应引导去连接配置: {}", dep.fix_hint);
     }
 }

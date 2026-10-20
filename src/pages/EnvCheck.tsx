@@ -38,22 +38,20 @@ import {
   ContentCopy,
   DeleteOutline,
   Inventory2,
-  BoltOutlined,
   Pause,
   PlayArrow,
   QueryStats,
   Refresh,
+  SettingsEthernet,
   SettingsInputAntenna,
   SmartToy,
   Storage,
-  StorageOutlined,
   UploadFile,
   Widgets,
 } from "@mui/icons-material";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api";
-import MySQLOps from "./MySQLOps";
-import RedisOps from "./RedisOps";
 import { useAppSettingsStore, useOpsStore } from "../store";
 import type {
   CheckStatus,
@@ -103,11 +101,21 @@ function ackId(reportId: string, itemId: string) {
   return `${reportId}::${itemId}`;
 }
 
-/** 与后端 ops/resource.rs 的 repair_target 口径一致：dep- 与 service- 前缀折叠后匹配。 */
-const REPAIR_TARGETS = new Set(["java", "mysql", "redis", "vernemq", "minio", "greptime"]);
+/** 与后端 ops/resource.rs 的 repair_target 口径一致：dep- 与 service- 前缀折叠后匹配。
+ *  Redis 不在其中：纯远程部署模式不支持本地「一键修复」，问题项走「去连接配置」。 */
+const REPAIR_TARGETS = new Set(["java", "mysql", "vernemq", "minio", "greptime"]);
+/** 纯远程部署的软件（本机不安装，检测 = 托管连接配置指向的远程端点可达）。
+ *  与后端 ServiceDef.remoteOnly 同口径：待安装/已安装列表不再出现，
+ *  问题项的操作入口是「去连接配置」而非一键修复。 */
+const FIXED_REMOTE = new Set(["redis"]);
 function repairTarget(checkId: string): string | null {
   const c = checkId.replace(/^dep-/, "").replace(/^service-/, "");
   return REPAIR_TARGETS.has(c) ? c : null;
+}
+/** 折叠后命中的检查项 → 引导去对应配置页（Redis → 连接配置）。 */
+function configTarget(checkId: string): string | null {
+  const c = checkId.replace(/^dep-/, "").replace(/^service-/, "");
+  return FIXED_REMOTE.has(c) ? c : null;
 }
 
 const TARGET_LABEL: Record<string, string> = {
@@ -454,8 +462,9 @@ function RepairCenter({
   const [probing, setProbing] = useState(true);
   // 探测请求本身失败（后端未启动等）：与「未安装」区分开，避免误导一键安装
   const [probeFailed, setProbeFailed] = useState(false);
-  // 子导航：「安装与维护」= 装软件主流程；「环境问题与 AI 方案」= 检测问题跟进
-  const [subTab, setSubTab] = useState<"install" | "issues" | "mysql" | "redis">("install");
+  // 子导航：「安装与维护」= 装软件主流程；「环境问题与 AI 方案」= 检测问题跟进。
+  // MySQL 管理 / Redis 管理已独立为顶级「运维中心」（/ops），本页专注环境安装与修复。
+  const [subTab, setSubTab] = useState<"install" | "issues">("install");
 
   // 进入修复中心 / 目录配置变化 / 任务结束时：扫资源目录 + 探测安装痕迹
   useEffect(() => {
@@ -676,6 +685,31 @@ function RepairCenter({
 
   // 安装与维护的子页签（待安装/已安装/远程部署）
   const [instTab, setInstTab] = useState<"toInstall" | "installed" | "remote">("toInstall");
+
+  // 纯远程软件（Redis）的托管连接端点：远程部署卡片上直接展示检测目标，
+  // 与「Redis 管理 → 连接配置」同一可信源（后端 redis_credential.json）。
+  const [redisEndpoint, setRedisEndpoint] = useState<{ host: string; port: number } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api
+      .redisCredential()
+      .then((c) => {
+        if (alive) setRedisEndpoint({ host: c.host, port: c.port });
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /** 问题项「去连接配置」→ 跳转顶级「运维中心」的 Redis 管理，落地自动弹出连接配置
+   *  （跨页导向：pending 标记放全局 store，OpsCenter 消费后回调清除） */
+  const setRedisConfigPending = useOpsStore((s) => s.setRedisConfigPending);
+  const navigate = useNavigate();
+  const gotoRedisConfig = useCallback(() => {
+    setRedisConfigPending(true);
+    navigate("/ops");
+  }, [setRedisConfigPending, navigate]);
 
   /** 软件卡片：状态机（执行中 > 检测中/探测不可用 > 已安装 > 残留 > 有包 > 无包）。
    *  探测（probing）不阻塞渲染——已装状态未知时如实显示「检测中」，结果回来自动归位，
@@ -940,50 +974,79 @@ function RepairCenter({
     );
   };
 
-  /** 远程部署卡片：灰色说明行 + 改回本地的入口。 */
-  const renderRemoteCard = (t: string) => (
-    <Paper key={t} variant="outlined" sx={{ px: 2, py: 1.25, bgcolor: "action.hover" }}>
-      <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: "wrap" }}>
-        <Box
-          sx={{
-            width: 42,
-            height: 42,
-            borderRadius: 2,
-            display: "grid",
-            placeItems: "center",
-            flexShrink: 0,
-            color: "text.secondary",
-            bgcolor: "grey.300",
-            "& svg": { fontSize: 22 },
-          }}
-        >
-          {TARGET_ICON[t] ?? <Widgets />}
-        </Box>
-        <Box sx={{ width: 150, flexShrink: 0 }}>
-          <Typography variant="subtitle2" sx={{ fontWeight: 700, lineHeight: 1.4, fontSize: "0.95rem", color: "text.secondary" }}>
-            {TARGET_LABEL[t] ?? t}
-          </Typography>
-          <Typography variant="caption" color="text.secondary">
-            {TARGET_DESC[t] ?? ""}
-          </Typography>
-        </Box>
-        <Box sx={{ flex: 1, minWidth: 260 }}>
-          <Typography variant="body2" color="text.secondary">
-            本机无需安装（按部署规划远程部署）
-          </Typography>
-        </Box>
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ flexShrink: 0 }}>
-          <Button size="small" variant="text" disabled={repairRunning} onClick={() => void toggleRemote(t, false)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
-            改回本地安装
-          </Button>
+  /** 远程部署卡片：灰色说明行。固定远程（Redis）= 托管端点说明 + 去配置入口；
+   *  用户声明的远程 = 说明 + 改回本地的入口。 */
+  const renderRemoteCard = (t: string) => {
+    const fixed = FIXED_REMOTE.has(t);
+    return (
+      <Paper key={t} variant="outlined" sx={{ px: 2, py: 1.25, bgcolor: "action.hover" }}>
+        <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: "wrap" }}>
+          <Box
+            sx={{
+              width: 42,
+              height: 42,
+              borderRadius: 2,
+              display: "grid",
+              placeItems: "center",
+              flexShrink: 0,
+              color: "text.secondary",
+              bgcolor: "grey.300",
+              "& svg": { fontSize: 22 },
+            }}
+          >
+            {TARGET_ICON[t] ?? <Widgets />}
+          </Box>
+          <Box sx={{ width: 150, flexShrink: 0 }}>
+            <Typography variant="subtitle2" sx={{ fontWeight: 700, lineHeight: 1.4, fontSize: "0.95rem", color: "text.secondary" }}>
+              {TARGET_LABEL[t] ?? t}
+            </Typography>
+            <Typography variant="caption" color="text.secondary">
+              {TARGET_DESC[t] ?? ""}
+            </Typography>
+          </Box>
+          <Box sx={{ flex: 1, minWidth: 260 }}>
+            {fixed ? (
+              <Typography variant="body2" color="text.secondary">
+                纯远程部署（本机不安装）：检测目标为托管连接端点
+                <Typography
+                  component="span"
+                  sx={{ fontFamily: "monospace", fontWeight: 700, color: "text.primary", mx: 0.5 }}
+                >
+                  {redisEndpoint ? `${redisEndpoint.host}:${redisEndpoint.port}` : "…"}
+                </Typography>
+                ；连接不可达时请在「运维中心 → Redis 管理 → 连接配置」检查设置
+              </Typography>
+            ) : (
+              <Typography variant="body2" color="text.secondary">
+                本机无需安装（按部署规划远程部署）
+              </Typography>
+            )}
+          </Box>
+          <Stack direction="row" spacing={1} alignItems="center" sx={{ flexShrink: 0 }}>
+            {fixed ? (
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={<SettingsEthernet />}
+                onClick={gotoRedisConfig}
+                sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+              >
+                去 Redis 管理
+              </Button>
+            ) : (
+              <Button size="small" variant="text" disabled={repairRunning} onClick={() => void toggleRemote(t, false)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+                改回本地安装
+              </Button>
+            )}
+          </Stack>
         </Stack>
-      </Stack>
-    </Paper>
-  );
+      </Paper>
+    );
+  };
 
   return (
     <Stack spacing={2}>
-      <Tabs value={subTab} onChange={(_, v: "install" | "issues" | "mysql" | "redis") => setSubTab(v)}>
+      <Tabs value={subTab} onChange={(_, v: "install" | "issues") => setSubTab(v)}>
         <Tab value="install" label="安装与维护" />
         <Tab
           value="issues"
@@ -993,13 +1056,6 @@ function RepairCenter({
             </Badge>
           }
         />
-        <Tab
-          value="mysql"
-          icon={<StorageOutlined fontSize="small" />}
-          iconPosition="start"
-          label="数据库运维"
-        />
-        <Tab value="redis" icon={<BoltOutlined fontSize="small" />} iconPosition="start" label="Redis 管理" />
       </Tabs>
 
       {/* ===== 安装与维护：页头 + 三个并列子 Tab（待安装/已安装/远程部署） =====
@@ -1016,13 +1072,18 @@ function RepairCenter({
           </Box>
 
           {(() => {
+            // 纯远程软件（FIXED_REMOTE）不进待安装/已安装——本机不安装、无安装包可识别；
+            // 用户声明的远程部署（remoteSet）仍可与固定远程共存展示。
+            const local = (t: string) => !remoteSet.has(t) && !FIXED_REMOTE.has(t);
             const toInstall = SOFTWARE_ORDER.filter(
-              (t) => !remoteSet.has(t) && !installedOf(t)?.serviceInstalled,
+              (t) => local(t) && !installedOf(t)?.serviceInstalled,
             );
             const installedList = SOFTWARE_ORDER.filter(
-              (t) => !remoteSet.has(t) && installedOf(t)?.serviceInstalled,
+              (t) => local(t) && installedOf(t)?.serviceInstalled,
             );
-            const remoteList = SOFTWARE_ORDER.filter((t) => remoteSet.has(t));
+            const remoteList = SOFTWARE_ORDER.filter(
+              (t) => remoteSet.has(t) || FIXED_REMOTE.has(t),
+            );
             const TabLabel = ({ text, count }: { text: string; count: number }) => (
               <Stack direction="row" spacing={0.75} alignItems="center">
                 <span>{text}</span>
@@ -1086,13 +1147,15 @@ function RepairCenter({
                     ) : (
                       toInstall.map((t) => renderCard(t))
                     )}
-                    {scan?.misplaced && scan.misplaced.length > 0 && (
+                    {scan?.misplaced && scan.misplaced.filter((m) => !FIXED_REMOTE.has(m.fileTarget)).length > 0 && (
                       <Alert severity="warning" icon={false}>
-                        {scan.misplaced.map((m) => (
-                          <Typography key={m.path} variant="body2" component="div">
-                            「{m.fileName}」放在了 {m.foundIn}/ 目录，但它属于 {m.fileTarget.toUpperCase()} ——建议移到对应的约定子目录（按软件名命名）
-                          </Typography>
-                        ))}
+                        {scan.misplaced
+                          .filter((m) => !FIXED_REMOTE.has(m.fileTarget))
+                          .map((m) => (
+                            <Typography key={m.path} variant="body2" component="div">
+                              「{m.fileName}」放在了 {m.foundIn}/ 目录，但它属于 {m.fileTarget.toUpperCase()} ——建议移到对应的约定子目录（按软件名命名）
+                            </Typography>
+                          ))}
                       </Alert>
                     )}
                   </Stack>
@@ -1138,19 +1201,6 @@ function RepairCenter({
           })()}
       </Box>
 
-      {/* ===== 数据库运维（MySQL）：CSS 隐藏挂载，独立功能域 ===== */}
-      <Box sx={{ display: subTab === "mysql" ? undefined : "none" }}>
-        <MySQLOps
-          active={subTab === "mysql"}
-          mysqlInstalled={installedOf("mysql")?.serviceInstalled ?? false}
-        />
-      </Box>
-
-      {/* ===== Redis 管理（远程连接模式）：CSS 隐藏挂载，独立功能域 ===== */}
-      <Box sx={{ display: subTab === "redis" ? undefined : "none" }}>
-        <RedisOps active={subTab === "redis"} />
-      </Box>
-
       {/* ===== 环境问题与 AI 方案（CSS 隐藏挂载：切页不丢 AI 方案卡与追问输入） ===== */}
       <Box sx={{ display: subTab === "issues" ? undefined : "none" }}>
           {planError && <Alert severity="error">{planError}</Alert>}
@@ -1194,6 +1244,7 @@ function RepairCenter({
               ) : (
                 pending.map(({ reportId, reportName, item }) => {
                   const target = repairTarget(item.id);
+                  const cfg = configTarget(item.id);
                   return (
                     <TableRow key={`${reportId}::${item.id}`} sx={{ "& td": { verticalAlign: "top", py: 1 } }}>
                       <TableCell>
@@ -1228,6 +1279,17 @@ function RepairCenter({
                             sx={{ textTransform: "none", px: 1 }}
                           >
                             一键修复
+                          </Button>
+                        ) : cfg ? (
+                          <Button
+                            size="small"
+                            variant="outlined"
+                            onClick={() => {
+                              if (cfg === "redis") gotoRedisConfig();
+                            }}
+                            sx={{ textTransform: "none", px: 1, whiteSpace: "nowrap" }}
+                          >
+                            去连接配置
                           </Button>
                         ) : (
                           <Typography variant="caption" color="text.secondary">
