@@ -27,6 +27,8 @@ import type {
   MysqlTableInfo,
   MysqlUserInfo,
   MysqlVariableItem,
+  RedisKeyDetail,
+  RedisOverview,
   SqlResult,
   UninstallTargetStatus,
 } from "./types";
@@ -299,6 +301,36 @@ export const api = {
     request<{ ok: boolean; rows?: number; message?: string; error?: string }>("/api/mysql/export-csv", {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+  // ===== Redis 远程运维（类 Another Redis Desktop Manager） =====
+  redisCredential: () =>
+    request<{ host: string; port: number; password: string }>("/api/redis/credential"),
+  redisSaveCredential: (body: { host: string; port: number; password: string }) =>
+    request<{ ok: boolean; error?: string }>("/api/redis/credential", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  redisTest: (body: { host: string; port: number; password: string }) =>
+    request<{ ok: boolean; version?: string; error?: string }>("/api/redis/test", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  redisOverview: () => request<RedisOverview>("/api/redis/overview"),
+  redisKeys: (pattern: string) =>
+    request<{ keys: string[]; total: number; truncated: boolean; error?: string }>(
+      `/api/redis/keys?pattern=${encodeURIComponent(pattern)}`,
+    ),
+  redisKey: (name: string) =>
+    request<RedisKeyDetail>(`/api/redis/key?name=${encodeURIComponent(name)}`),
+  redisDelete: (name: string) =>
+    request<{ ok: boolean; deleted?: number; error?: string }>("/api/redis/delete", {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    }),
+  redisSetTtl: (name: string, seconds: number) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/redis/ttl", {
+      method: "POST",
+      body: JSON.stringify({ name, seconds }),
     }),
   startAll: () =>
     request<ActionResult[]>("/api/services/start-all", { method: "POST" }),

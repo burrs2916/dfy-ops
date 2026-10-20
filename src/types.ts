@@ -331,3 +331,35 @@ export interface MysqlBackupFile {
   /** 修改时间（Unix 秒） */
   modified: number;
 }
+
+/** GET /api/redis/overview：INFO 解析结果（字段为原始字符串，缺失为空串） */
+export interface RedisOverview {
+  ok?: boolean;
+  error?: string;
+  version: string;
+  mode: string;
+  os: string;
+  uptimeDays: string;
+  usedMemory: string;
+  usedMemoryPeak: string;
+  maxMemory: string;
+  connectedClients: string;
+  blockedClients: string;
+  totalConnections: string;
+  totalCommands: string;
+  aofEnabled: string;
+  rdbLastStatus: string;
+  totalKeys: number;
+  totalExpires: number;
+}
+
+/** GET /api/redis/key：Key 详情（rows 统一为 [标签, 值] 二元组） */
+export interface RedisKeyDetail {
+  name: string;
+  kind: string;
+  /** -1 永久、-2 不存在 */
+  ttl: number;
+  memory: number | null;
+  total: number;
+  rows: [string, string][];
+}

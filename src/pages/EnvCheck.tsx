@@ -38,6 +38,7 @@ import {
   ContentCopy,
   DeleteOutline,
   Inventory2,
+  BoltOutlined,
   Pause,
   PlayArrow,
   QueryStats,
@@ -52,6 +53,7 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import MySQLOps from "./MySQLOps";
+import RedisOps from "./RedisOps";
 import { useAppSettingsStore, useOpsStore } from "../store";
 import type {
   CheckStatus,
@@ -453,7 +455,7 @@ function RepairCenter({
   // 探测请求本身失败（后端未启动等）：与「未安装」区分开，避免误导一键安装
   const [probeFailed, setProbeFailed] = useState(false);
   // 子导航：「安装与维护」= 装软件主流程；「环境问题与 AI 方案」= 检测问题跟进
-  const [subTab, setSubTab] = useState<"install" | "issues" | "mysql">("install");
+  const [subTab, setSubTab] = useState<"install" | "issues" | "mysql" | "redis">("install");
 
   // 进入修复中心 / 目录配置变化 / 任务结束时：扫资源目录 + 探测安装痕迹
   useEffect(() => {
@@ -981,7 +983,7 @@ function RepairCenter({
 
   return (
     <Stack spacing={2}>
-      <Tabs value={subTab} onChange={(_, v: "install" | "issues" | "mysql") => setSubTab(v)}>
+      <Tabs value={subTab} onChange={(_, v: "install" | "issues" | "mysql" | "redis") => setSubTab(v)}>
         <Tab value="install" label="安装与维护" />
         <Tab
           value="issues"
@@ -997,6 +999,7 @@ function RepairCenter({
           iconPosition="start"
           label="数据库运维"
         />
+        <Tab value="redis" icon={<BoltOutlined fontSize="small" />} iconPosition="start" label="Redis 管理" />
       </Tabs>
 
       {/* ===== 安装与维护：页头 + 三个并列子 Tab（待安装/已安装/远程部署） =====
@@ -1141,6 +1144,11 @@ function RepairCenter({
           active={subTab === "mysql"}
           mysqlInstalled={installedOf("mysql")?.serviceInstalled ?? false}
         />
+      </Box>
+
+      {/* ===== Redis 管理（远程连接模式）：CSS 隐藏挂载，独立功能域 ===== */}
+      <Box sx={{ display: subTab === "redis" ? undefined : "none" }}>
+        <RedisOps active={subTab === "redis"} />
       </Box>
 
       {/* ===== 环境问题与 AI 方案（CSS 隐藏挂载：切页不丢 AI 方案卡与追问输入） ===== */}

@@ -12,6 +12,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use crate::api::handlers;
 use crate::api::handlers_ai;
 use crate::api::handlers_mysql;
+use crate::api::handlers_redis;
 use crate::api::handlers_repair;
 use crate::ops::aimodels::AiModelConfig;
 use crate::ops::env_repair::{EnvCache, RepairState};
@@ -289,6 +290,25 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/mysql/export-csv",
             axum::routing::post(handlers_mysql::export_csv),
         )
+        // Redis 远程运维（类 Another Redis Desktop Manager）：凭据托管 /
+        // 测试连接 / 总览 / SCAN 遍历 / Key 详情 / 删除 / TTL
+        .route("/api/redis/credential", axum::routing::get(handlers_redis::credential))
+        .route(
+            "/api/redis/credential",
+            axum::routing::post(handlers_redis::save_credential),
+        )
+        .route("/api/redis/test", axum::routing::post(handlers_redis::test))
+        .route("/api/redis/overview", axum::routing::get(handlers_redis::overview))
+        .route("/api/redis/keys", axum::routing::get(handlers_redis::keys))
+        .route(
+            "/api/redis/key",
+            axum::routing::get(handlers_redis::key_detail),
+        )
+        .route(
+            "/api/redis/delete",
+            axum::routing::post(handlers_redis::delete_key),
+        )
+        .route("/api/redis/ttl", axum::routing::post(handlers_redis::set_ttl))
         .route(
             "/api/settings/app",
             axum::routing::get(handlers::get_app_settings),
