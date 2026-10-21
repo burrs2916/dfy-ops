@@ -896,19 +896,32 @@ mod tests {
     }
 
     /// 未运行的前端：不预设部署形态 —— nginx 或 Node.js 任一可用即 pass。
+    /// 探测结果通过预填 ProbeCache 注入，与测试机是否真实安装 nginx/node 解耦
+    /// （CI runner 两样都没有，真实探测会让该测试必然失败）。
     #[test]
     fn stopped_frontend_env_accepts_node_or_nginx() {
         let def = def_of("gateway-console");
-        let report = check_service_env_with(&def, &states(&[]), None);
-        let has_runtime = report
-            .items
-            .iter()
-            .any(|i| i.id == "runtime-path" && i.status == CheckStatus::Pass);
-        assert!(
-            has_runtime || report.items.iter().all(|i| i.status == CheckStatus::Pass),
-            "未运行前端的环境检查应给出运行方式判定: {:?}",
-            report.items
-        );
+
+        // nginx 可用 → 运行方式 Pass（Node 缺失不影响）
+        let mut cache = ProbeCache::default();
+        cache
+            .map
+            .lock()
+            .unwrap()
+            .insert("nginx?-v".into(), Some("nginx/1.24.0".into()));
+        cache.map.lock().unwrap().insert("node?-v".into(), None);
+        let report = check_service_env_with(&def, &states(&[]), Some(&cache));
+        let runtime = report.items.iter().find(|i| i.id == "runtime-path").unwrap();
+        assert_eq!(runtime.status, CheckStatus::Pass, "nginx 可用即应判定可运行: {runtime:?}");
+
+        // 两者都不可用 → Warn（提示可行的运行方式，非致命）
+        let mut cache = ProbeCache::default();
+        cache.map.lock().unwrap().insert("nginx?-v".into(), None);
+        cache.map.lock().unwrap().insert("node?-v".into(), None);
+        let report = check_service_env_with(&def, &states(&[]), Some(&cache));
+        let runtime = report.items.iter().find(|i| i.id == "runtime-path").unwrap();
+        assert_eq!(runtime.status, CheckStatus::Warn, "两者均不可用应 Warn 引导安装: {runtime:?}");
+        assert!(runtime.fix_hint.contains("nginx") || runtime.fix_hint.contains("Node"), "Warn 提示应给出运行方式指引: {runtime:?}");
     }
 
     /// requires 声明检查：GreptimeDB 由 ServiceDef.requires 驱动（不再硬编码在代码里）。
