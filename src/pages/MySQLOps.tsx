@@ -4,6 +4,7 @@ import {
   Alert,
   Box,
   Button,
+  Checkbox,
   Chip,
   Dialog,
   DialogActions,
@@ -12,6 +13,7 @@ import {
   DialogTitle,
   Divider,
   FormControl,
+  FormControlLabel,
   IconButton,
   InputLabel,
   List,
@@ -200,6 +202,15 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
   const [importDb, setImportDb] = useState("");
   const [importNewDbName, setImportNewDbName] = useState("");
   const [importOnError, setImportOnError] = useState<"stop" | "continue">("stop");
+  // 冲突检测（选库后自动查询）：重名表 → 用户选策略；无冲突 → 直接导入不打扰
+  const [importConflicts, setImportConflicts] = useState<{
+    dbExists: boolean;
+    conflicts: string[];
+    scriptHasDrop: boolean;
+  } | null>(null);
+  const [importChecking, setImportChecking] = useState(false);
+  const [importStrategy, setImportStrategy] = useState<"direct" | "rebuild" | "append" | "recreate_db">("direct");
+  const [importConfirmDanger, setImportConfirmDanger] = useState(false);
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [confirm, setConfirm] = useState<{
@@ -459,6 +470,10 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     setImportDb("");
     setImportNewDbName("");
     setImportOnError("stop");
+    setImportConflicts(null);
+    setImportChecking(false);
+    setImportStrategy("direct");
+    setImportConfirmDanger(false);
     setImportResult(null);
     setImporting(false);
     setImportOpen(true);
@@ -480,6 +495,9 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     setImportFile(picked);
     setImportAnalyze(null);
     setImportResult(null);
+    setImportConflicts(null);
+    setImportStrategy("direct");
+    setImportConfirmDanger(false);
     setImportAnalyzing(true);
     try {
       setImportAnalyze(await api.mysqlImportAnalyze(picked));
@@ -490,16 +508,48 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     }
   }, []);
 
+  // 选库变化 → 自动查目标库冲突（新建库不查，永远无冲突）
+  const onImportDbChange = useCallback(
+    async (v: string) => {
+      setImportDb(v);
+      setImportConflicts(null);
+      setImportStrategy("direct");
+      setImportConfirmDanger(false);
+      if (!v || v === "__new__" || !importFile) return;
+      setImportChecking(true);
+      try {
+        const r = await api.mysqlImportConflicts(importFile, v);
+        if (r.ok) {
+          const conflicts = r.conflicts ?? [];
+          setImportConflicts({
+            dbExists: !!r.dbExists,
+            conflicts,
+            scriptHasDrop: !!r.scriptHasDrop,
+          });
+          // 有重名表 → 默认推荐"重建涉及的表"（幂等刷新这批表）
+          if (conflicts.length > 0) setImportStrategy("rebuild");
+        }
+      } catch {
+        setImportConflicts(null);
+      } finally {
+        setImportChecking(false);
+      }
+    },
+    [importFile],
+  );
+
   const doImport = useCallback(async () => {
     if (!importFile) return;
     const isNew = importDb === "__new__";
+    const hasConflicts = (importConflicts?.conflicts.length ?? 0) > 0;
     setImporting(true);
     setImportResult(null);
     try {
       const r = await api.mysqlImport(importFile, {
         database: isNew ? undefined : importDb || undefined,
         newDatabase: isNew ? importNewDbName.trim() : undefined,
-        onError: importOnError,
+        onError: hasConflicts ? (importStrategy === "append" ? "continue" : "stop") : importOnError,
+        conflictStrategy: isNew || !hasConflicts ? "direct" : importStrategy,
       });
       if (r.ok) {
         setImportResult({ ok: true, text: r.message ?? "导入完成" });
@@ -512,17 +562,20 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     } finally {
       setImporting(false);
     }
-  }, [importFile, importDb, importNewDbName, importOnError, refreshOverview]);
+  }, [importFile, importDb, importNewDbName, importOnError, importStrategy, importConflicts, refreshOverview]);
 
   const importNeedDb =
     !!importAnalyze?.ok && !importAnalyzing && !importAnalyze.hasCreateDb && !importAnalyze.useDb;
+  const hasConflicts = (importConflicts?.conflicts.length ?? 0) > 0;
   const importCanSubmit =
     !!importFile &&
     !!importAnalyze?.ok &&
     !importAnalyzing &&
+    !importChecking &&
     !importing &&
     (!importNeedDb ||
-      (importDb === "__new__" ? importNewDbName.trim().length > 0 : !!importDb));
+      (importDb === "__new__" ? importNewDbName.trim().length > 0 : !!importDb)) &&
+    (importStrategy !== "recreate_db" || importConfirmDanger);
 
   const tableAction = useCallback(
     (action: "optimize" | "analyze" | "truncate" | "drop") => {
@@ -1520,12 +1573,12 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
               </Alert>
             )}
             {importAnalyze?.ok && !importAnalyze.hasCreateDb && !importAnalyzing && (
-              <FormControl size="small" fullWidth disabled={importing}>
+              <FormControl size="small" fullWidth disabled={importing || importChecking}>
                 <InputLabel>{importNeedDb ? "目标数据库（必选）" : "目标数据库（可选）"}</InputLabel>
                 <Select
                   label={importNeedDb ? "目标数据库（必选）" : "目标数据库（可选）"}
                   value={importDb}
-                  onChange={(e) => setImportDb(e.target.value)}
+                  onChange={(e) => void onImportDbChange(e.target.value)}
                 >
                   {importAnalyze.useDb && <MenuItem value=""><em>跟随脚本（{importAnalyze.useDb}）</em></MenuItem>}
                   {(ov?.databases ?? [])
@@ -1551,17 +1604,103 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                 helperText="仅允许中文、字母、数字、下划线（1-64 字符）；建库时使用 utf8mb4 字符集"
               />
             )}
-            <FormControl size="small" fullWidth disabled={importing}>
-              <InputLabel>遇错策略</InputLabel>
-              <Select
-                label="遇错策略"
-                value={importOnError}
-                onChange={(e) => setImportOnError(e.target.value as "stop" | "continue")}
-              >
-                <MenuItem value="stop">遇错停止（推荐）</MenuItem>
-                <MenuItem value="continue">跳过错误继续（结束后统计被跳过的错误）</MenuItem>
-              </Select>
-            </FormControl>
+            {/* 冲突检测与处理：选库后自动查询；无冲突不打扰，有冲突让用户选策略 */}
+            {importChecking && <Alert severity="info">正在检查目标库的表冲突…</Alert>}
+            {importConflicts && !importChecking && importDb !== "__new__" && (
+              hasConflicts ? (
+                <>
+                  <Alert severity="warning">
+                    <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
+                      目标库已存在 {importConflicts.conflicts.length} 张同名表（重复导入），请选择处理方式：
+                    </Typography>
+                    <Typography variant="caption" sx={{ fontFamily: MONO_STACK, wordBreak: "break-all", display: "block" }}>
+                      {importConflicts.conflicts.join("、")}
+                    </Typography>
+                    {importConflicts.scriptHasDrop && (
+                      <Typography variant="caption" sx={{ display: "block", mt: 0.5, color: "text.secondary" }}>
+                        脚本自带 DROP TABLE IF EXISTS，本身即可安全重复导入
+                      </Typography>
+                    )}
+                  </Alert>
+                  <FormControl size="small" fullWidth disabled={importing}>
+                    <InputLabel>冲突处理方式</InputLabel>
+                    <Select
+                      label="冲突处理方式"
+                      value={importStrategy === "direct" ? "rebuild" : importStrategy}
+                      onChange={(e) => {
+                        const v = e.target.value as "rebuild" | "append" | "recreate_db";
+                        setImportStrategy(v);
+                        if (v !== "recreate_db") setImportConfirmDanger(false);
+                      }}
+                    >
+                      <MenuItem value="rebuild">
+                        <Stack>
+                          <Typography variant="body2">重建涉及的表（推荐）</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            先删除这 {importConflicts.conflicts.length} 张表再导入，库中其他表与数据不受影响
+                          </Typography>
+                        </Stack>
+                      </MenuItem>
+                      <MenuItem value="append">
+                        <Stack>
+                          <Typography variant="body2">追加 / 跳过冲突</Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            保留现有表，跳过报错语句继续导入
+                          </Typography>
+                        </Stack>
+                      </MenuItem>
+                      <MenuItem value="recreate_db">
+                        <Stack>
+                          <Typography variant="body2" sx={{ color: "error.main", fontWeight: 600 }}>
+                            整库重建（危险）
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            删除整个数据库后重新导入，库中所有数据将丢失
+                          </Typography>
+                        </Stack>
+                      </MenuItem>
+                    </Select>
+                  </FormControl>
+                  {importStrategy === "recreate_db" && (
+                    <FormControlLabel
+                      control={
+                        <Checkbox
+                          size="small"
+                          checked={importConfirmDanger}
+                          onChange={(e) => setImportConfirmDanger(e.target.checked)}
+                          sx={{ color: "error.main", "&.Mui-checked": { color: "error.main" } }}
+                        />
+                      }
+                      label={
+                        <Typography variant="body2" sx={{ color: "error.main" }}>
+                          我已知晓：整个库将被删除并重建，库中所有现有数据都会丢失
+                        </Typography>
+                      }
+                    />
+                  )}
+                </>
+              ) : (
+                <Alert severity="success">
+                  {importConflicts.dbExists
+                    ? "目标库已存在，与脚本无同名表冲突，可直接导入"
+                    : "目标库当前不存在，导入时将自动创建"}
+                </Alert>
+              )
+            )}
+            {/* 无冲突场景下的通用遇错策略（有冲突时由冲突处理方式决定，避免重复） */}
+            {!hasConflicts && (
+              <FormControl size="small" fullWidth disabled={importing}>
+                <InputLabel>遇错策略</InputLabel>
+                <Select
+                  label="遇错策略"
+                  value={importOnError}
+                  onChange={(e) => setImportOnError(e.target.value as "stop" | "continue")}
+                >
+                  <MenuItem value="stop">遇错停止（推荐）</MenuItem>
+                  <MenuItem value="continue">跳过错误继续（结束后统计被跳过的错误）</MenuItem>
+                </Select>
+              </FormControl>
+            )}
             {importing && <Alert severity="info">正在导入，大文件可能需要一些时间，请勿关闭窗口…</Alert>}
             {importResult && (
               <Alert severity={importResult.ok ? "success" : "error"}>{importResult.text}</Alert>

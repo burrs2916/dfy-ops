@@ -317,6 +317,11 @@ pub struct MysqlImportReq {
     /// 遇错策略：stop（默认）遇错即停；continue 加 --force 跳过错误继续
     #[serde(rename = "onError", default)]
     pub on_error: Option<String>,
+    /// 冲突处理策略（选库后检测到重名表时由前端下发）：
+    /// direct 不处理；rebuild 先 DROP 脚本涉及的表再导入（幂等重建，推荐）；
+    /// append 等价 --force 追加；recreate_db 删库重建（危险，前端已强确认）。
+    #[serde(rename = "conflictStrategy", default)]
+    pub conflict_strategy: Option<String>,
 }
 
 /// 新库名合法性：中文/字母/数字/下划线，1-64 字符。库名会拼进 CREATE DATABASE
@@ -344,6 +349,7 @@ pub async fn mysql_import(
     let database = req.database.clone().unwrap_or_default();
     let new_database = req.new_database.clone().unwrap_or_default();
     let on_error = req.on_error.clone().unwrap_or_else(|| "stop".into());
+    let strategy = req.conflict_strategy.clone().unwrap_or_else(|| "direct".into());
     let file_for_log = file.clone();
     let st = state.clone();
     let res = blocking(move || {
@@ -403,13 +409,69 @@ pub async fn mysql_import(
             }
             target_db = db.to_string();
         }
+        // 冲突处理策略（选库检测到重名表后用户选择的方式）
+        match strategy.as_str() {
+            "rebuild" => {
+                // 幂等重建：只 DROP 脚本涉及的表（全限定名，库里其他表不动）。
+                // 表名来自脚本提取，同样过白名单——不合法的跳过，导入时自然报错。
+                let info = analyze_sql_head(&file)?;
+                let db = target_db.clone();
+                if db.is_empty() {
+                    return Err("重建模式需要先选择目标数据库".into());
+                }
+                let names: Vec<String> = info
+                    .tables
+                    .iter()
+                    .filter(|t| valid_db_name(t))
+                    .map(|t| format!("`{db}`.`{t}`"))
+                    .collect();
+                if !names.is_empty() {
+                    let sql = format!("DROP TABLE IF EXISTS {}", names.join(", "));
+                    let mut cmd = std::process::Command::new(&client);
+                    base_args(&mut cmd);
+                    cmd.args(["-e", &sql]);
+                    let out = cmd
+                        .output()
+                        .map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
+                    if !out.status.success() {
+                        return Err(format!(
+                            "清理已存在的表失败：{}",
+                            stderr_tail(&String::from_utf8_lossy(&out.stderr))
+                        ));
+                    }
+                }
+            }
+            "recreate_db" => {
+                // 整库重建（前端已强确认）：DROP DATABASE → CREATE → 导入
+                let db = target_db.clone();
+                if db.is_empty() {
+                    return Err("整库重建需要先选择目标数据库".into());
+                }
+                let sql = format!(
+                    "DROP DATABASE IF EXISTS `{db}`; CREATE DATABASE `{db}` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+                );
+                let mut cmd = std::process::Command::new(&client);
+                base_args(&mut cmd);
+                cmd.args(["-e", &sql]);
+                let out = cmd
+                    .output()
+                    .map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
+                if !out.status.success() {
+                    return Err(format!(
+                        "重建数据库 {db} 失败：{}",
+                        stderr_tail(&String::from_utf8_lossy(&out.stderr))
+                    ));
+                }
+            }
+            _ => {}
+        }
         let mut cmd = std::process::Command::new(&client);
         base_args(&mut cmd);
         if !target_db.is_empty() {
             // -D 等价导入前 USE；argv 直传，无 shell 拼接风险
             cmd.args(["-D", &target_db]);
         }
-        if on_error == "continue" {
+        if on_error == "continue" || strategy == "append" {
             cmd.arg("--force");
         }
         let f = std::fs::File::open(&file).map_err(|e| format!("无法读取 SQL 文件：{e}"))?;
@@ -451,13 +513,97 @@ pub async fn mysql_import_analyze(
 ) -> Json<serde_json::Value> {
     let res = blocking(move || analyze_sql_head(&req.file)).await;
     match res {
-        Ok((size, has_create_db, create_db_name, use_db)) => Json(serde_json::json!({
+        Ok(info) => Json(serde_json::json!({
             "ok": true,
-            "sizeBytes": size,
-            "hasCreateDb": has_create_db,
-            "createDbName": create_db_name,
-            "useDb": use_db,
+            "sizeBytes": info.size,
+            "hasCreateDb": info.has_create_db,
+            "createDbName": info.create_db_name,
+            "useDb": info.use_db,
+            "scriptTables": info.tables,
+            "scriptHasDrop": info.has_drop_table,
         })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MysqlImportConflictsReq {
+    pub file: String,
+    /// 目标库（用户在向导中选定的现有库）
+    pub database: String,
+}
+
+/// POST /api/env/repair/mysql/import/conflicts —— 选库后自动查冲突：
+/// 一条查询同时判定「库是否存在」和「脚本表与库内现有表的重名交集」。
+/// 结果驱动前端：无冲突 → 直接导入不打扰；有冲突 → 让用户选冲突处理策略。
+pub async fn mysql_import_conflicts(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MysqlImportConflictsReq>,
+) -> Json<serde_json::Value> {
+    let cred = crate::ops::mysql_credential::load(&state.config_dir);
+    let st = state.clone();
+    let res = blocking(move || {
+        let info = analyze_sql_head(&req.file)?;
+        let db = req.database.trim().to_string();
+        if !valid_db_name(&db) {
+            return Err(format!("库名不合法：{db}"));
+        }
+        let client = super::handlers_mysql::mysql_client(&st)?;
+        // -N 去表头 -B tab 分隔；两条 SELECT：第一行 Y/N（库存在），其余行 = 库内表名
+        let sql = format!(
+            "SELECT IF(EXISTS(SELECT 1 FROM information_schema.schemata WHERE schema_name='{db}'),'Y','N'); \
+             SELECT table_name FROM information_schema.tables WHERE table_schema='{db}' AND table_type='BASE TABLE'"
+        );
+        let mut cmd = std::process::Command::new(&client);
+        cmd.args([
+            "-h", "127.0.0.1",
+            "-P", &cred.port.to_string(),
+            "-u", &cred.user,
+            "-N", "-B",
+            "-e", &sql,
+        ]);
+        if !cred.password.is_empty() {
+            cmd.arg(format!("-p{}", cred.password));
+        }
+        let out = cmd
+            .output()
+            .map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "查询目标库状态失败：{}",
+                String::from_utf8_lossy(&out.stderr).lines().rev().take(2).collect::<Vec<_>>().join(" | ")
+            ));
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        let mut lines = stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty());
+        let db_exists = lines.next().unwrap_or("N") == "Y";
+        let existing: Vec<String> = lines.map(str::to_string).collect();
+        let conflicts: Vec<String> = info
+            .tables
+            .iter()
+            .filter(|t| existing.iter().any(|e| e.eq_ignore_ascii_case(t)))
+            .cloned()
+            .collect();
+        Ok(serde_json::json!({
+            "dbExists": db_exists,
+            "scriptTables": info.tables,
+            "conflicts": conflicts,
+            "scriptHasDrop": info.has_drop_table,
+        }))
+    })
+    .await;
+    match res {
+        Ok(v) => {
+            let mut m = serde_json::Map::new();
+            m.insert("ok".into(), serde_json::Value::Bool(true));
+            if let serde_json::Value::Object(rest) = v {
+                m.extend(rest);
+            }
+            Json(serde_json::Value::Object(m))
+        }
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
 }
@@ -532,8 +678,21 @@ fn extract_db_name(segment: &str, lower: &str, keyword: &str) -> Option<String> 
     if name.is_empty() { None } else { Some(name) }
 }
 
-/// 分析脚本头部：返回 (文件大小, 是否含 CREATE DATABASE, 建库名, USE 库名)。
-fn analyze_sql_head(path: &str) -> Result<(u64, bool, Option<String>, Option<String>), String> {
+/// 脚本头部分析结果：建库/USE 检测 + 脚本涉及表名 + 是否自带 DROP TABLE。
+#[derive(Debug, Default)]
+pub struct SqlHeadInfo {
+    pub size: u64,
+    pub has_create_db: bool,
+    pub create_db_name: Option<String>,
+    pub use_db: Option<String>,
+    /// CREATE TABLE 提取的表名（不含库名前缀），供冲突检测与"重建涉及的表"
+    pub tables: Vec<String>,
+    /// 脚本自带 DROP TABLE IF EXISTS（mysqldump 标准输出）→ 天然可重复导入
+    pub has_drop_table: bool,
+}
+
+/// 分析脚本头部：建库/USE 语句、CREATE TABLE 表名、DROP TABLE 检测。
+fn analyze_sql_head(path: &str) -> Result<SqlHeadInfo, String> {
     use std::io::Read;
     let meta = std::fs::metadata(path).map_err(|e| format!("无法读取 SQL 文件：{e}"))?;
     let size = meta.len();
@@ -560,21 +719,72 @@ fn analyze_sql_head(path: &str) -> Result<(u64, bool, Option<String>, Option<Str
         }
     }
     segments.push((cur, cur_lower));
-    let mut has_create_db = false;
-    let mut create_db_name = None;
-    let mut use_db = None;
+    let mut info = SqlHeadInfo { size, ..Default::default() };
     for (seg, lower) in &segments {
-        if !has_create_db && lower.contains("create database") {
+        if !info.has_create_db && lower.contains("create database") {
             if let Some(name) = extract_db_name(seg, lower, "create database") {
-                has_create_db = true;
-                create_db_name = Some(name);
+                info.has_create_db = true;
+                info.create_db_name = Some(name);
             }
         }
-        if use_db.is_none() && lower.trim_start().starts_with("use ") {
-            use_db = extract_db_name(seg, lower, "use");
+        if info.use_db.is_none() && lower.trim_start().starts_with("use ") {
+            info.use_db = extract_db_name(seg, lower, "use");
+        }
+        if !info.has_drop_table && lower.contains("drop table") {
+            info.has_drop_table = true;
+        }
+        // CREATE TABLE 表名收集（去重；提取失败的段跳过，导入时自然报错）
+        if lower.contains("create table") {
+            if let Some(name) = extract_table_name(seg, lower) {
+                if !name.is_empty() && !info.tables.contains(&name) {
+                    info.tables.push(name);
+                }
+            }
         }
     }
-    Ok((size, has_create_db, create_db_name, use_db))
+    Ok(info)
+}
+
+/// 读取一个标识符段：反引号包裹或裸标识符，返回 (内容, 剩余文本)。
+fn read_identifier_part(s: &str) -> Option<(String, String)> {
+    if let Some(r) = s.strip_prefix('`') {
+        let end = r.find('`')?;
+        return Some((r[..end].to_string(), r[end + 1..].to_string()));
+    }
+    let name: String = s
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || (*c as u32) >= 0x4E00)
+        .collect();
+    if name.is_empty() {
+        None
+    } else {
+        Some((name.clone(), s[name.len()..].to_string()))
+    }
+}
+
+/// 提取 CREATE TABLE 后的表名，容忍 `db`.`tbl` / db.tbl / `tbl` / tbl 四种形态，
+/// 取最后一段作为纯表名。返回 None 表示无法解析（调用方跳过）。
+fn extract_table_name(segment: &str, lower: &str) -> Option<String> {
+    let kw_pos = lower.find("create table")?;
+    let after = lower[kw_pos + "create table".len()..].trim_start();
+    let after = after
+        .strip_prefix("if not exists")
+        .map(str::trim_start)
+        .unwrap_or(after);
+    let off = lower.len() - after.len();
+    let orig = segment[off.min(segment.len())..].trim_start();
+    let (mut part, mut rest) = read_identifier_part(orig)?;
+    loop {
+        match rest.strip_prefix('.') {
+            Some(r) if r.starts_with('`') || r.chars().next().is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || (c as u32) >= 0x4E00) => {
+                let (next, r2) = read_identifier_part(r)?;
+                part = next;
+                rest = r2;
+            }
+            _ => break,
+        }
+    }
+    if part.is_empty() { None } else { Some(part) }
 }
 
 /// POST /api/env/repair/java-env —— 一键修复/接管 java 用户级环境变量（幂等）：
@@ -1075,12 +1285,12 @@ mod tests {
              INSERT INTO `t` VALUES (1);",
         )
         .unwrap();
-        let (size, has_create, create_name, use_db) =
-            analyze_sql_head(path.to_str().unwrap()).unwrap();
-        assert!(size > 0);
-        assert!(has_create);
-        assert_eq!(create_name.as_deref(), Some("my_shop"));
-        assert_eq!(use_db.as_deref(), Some("my_shop"));
+        let info = analyze_sql_head(path.to_str().unwrap()).unwrap();
+        assert!(info.size > 0);
+        assert!(info.has_create_db);
+        assert_eq!(info.create_db_name.as_deref(), Some("my_shop"));
+        assert_eq!(info.use_db.as_deref(), Some("my_shop"));
+        assert!(info.tables.contains(&"t".to_string()), "应提取脚本表名: {:?}", info.tables);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1094,11 +1304,32 @@ mod tests {
             "SET NAMES utf8mb4;\nCREATE TABLE t (id INT);\nuse legacy_db;\nINSERT INTO t VALUES (1);",
         )
         .unwrap();
-        let (_, has_create, create_name, use_db) =
-            analyze_sql_head(path.to_str().unwrap()).unwrap();
-        assert!(!has_create, "无建库语句不应误报");
-        assert!(create_name.is_none());
-        assert_eq!(use_db.as_deref(), Some("legacy_db"));
+        let info = analyze_sql_head(path.to_str().unwrap()).unwrap();
+        assert!(!info.has_create_db, "无建库语句不应误报");
+        assert!(info.create_db_name.is_none());
+        assert_eq!(info.use_db.as_deref(), Some("legacy_db"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 表名提取：`db`.`tbl` 前缀形态取纯表名；mysqldump 标准头（DROP TABLE IF EXISTS）
+    /// 标记 has_drop_table——重复导入天然安全。
+    #[test]
+    fn analyze_sql_head_extracts_tables_and_drop_flag() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("dfy_ops_analyze_test3.sql");
+        std::fs::write(
+            &path,
+            "CREATE TABLE `shop`.`users` (id INT);\n\
+             DROP TABLE IF EXISTS `users`;\n\
+             CREATE TABLE IF NOT EXISTS `orders` (id INT);\n\
+             -- CREATE TABLE `commented_out` (id INT);",
+        )
+        .unwrap();
+        let info = analyze_sql_head(path.to_str().unwrap()).unwrap();
+        assert!(info.has_drop_table);
+        assert!(info.tables.contains(&"users".to_string()), "db.tbl 形态应取纯表名: {:?}", info.tables);
+        assert!(info.tables.contains(&"orders".to_string()));
+        assert!(!info.tables.contains(&"commented_out".to_string()), "注释里的表不应提取");
         let _ = std::fs::remove_file(&path);
     }
 
