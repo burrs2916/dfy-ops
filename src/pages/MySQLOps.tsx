@@ -185,7 +185,23 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
   const [iniLoading, setIniLoading] = useState(false);
   const [iniSaving, setIniSaving] = useState(false);
 
+  // 导入 SQL 向导：选文件 → 预分析（是否含建库/USE 语句）→ 选目标库 → 执行 → 结果
+  const [importOpen, setImportOpen] = useState(false);
+  const [importFile, setImportFile] = useState<string | null>(null);
+  const [importAnalyze, setImportAnalyze] = useState<{
+    ok: boolean;
+    sizeBytes?: number;
+    hasCreateDb?: boolean;
+    createDbName?: string | null;
+    useDb?: string | null;
+    error?: string;
+  } | null>(null);
+  const [importAnalyzing, setImportAnalyzing] = useState(false);
+  const [importDb, setImportDb] = useState("");
+  const [importNewDbName, setImportNewDbName] = useState("");
+  const [importOnError, setImportOnError] = useState<"stop" | "continue">("stop");
   const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<{ ok: boolean; text: string } | null>(null);
   const [confirm, setConfirm] = useState<{
     title: string;
     content: string;
@@ -436,7 +452,19 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     }
   }, [rightTab, ov?.running, loadProcs, loadVars, loadIni, loadBackups]);
 
-  const onImport = useCallback(async () => {
+  const openImport = useCallback(() => {
+    setImportFile(null);
+    setImportAnalyze(null);
+    setImportAnalyzing(false);
+    setImportDb("");
+    setImportNewDbName("");
+    setImportOnError("stop");
+    setImportResult(null);
+    setImporting(false);
+    setImportOpen(true);
+  }, []);
+
+  const pickImportFile = useCallback(async () => {
     let picked: string | null = null;
     try {
       const r = await open({
@@ -449,17 +477,52 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
       return;
     }
     if (!picked) return;
-    setImporting(true);
+    setImportFile(picked);
+    setImportAnalyze(null);
+    setImportResult(null);
+    setImportAnalyzing(true);
     try {
-      const r = await api.mysqlImport(picked);
-      if (r.ok) flash(`导入完成：${picked.split(/[\\/]/).pop()}`, "success");
-      else flash(r.error ?? "导入失败", "error");
+      setImportAnalyze(await api.mysqlImportAnalyze(picked));
     } catch (e) {
-      flash(`导入失败：${String(e)}`, "error");
+      setImportAnalyze({ ok: false, error: String(e) });
+    } finally {
+      setImportAnalyzing(false);
+    }
+  }, []);
+
+  const doImport = useCallback(async () => {
+    if (!importFile) return;
+    const isNew = importDb === "__new__";
+    setImporting(true);
+    setImportResult(null);
+    try {
+      const r = await api.mysqlImport(importFile, {
+        database: isNew ? undefined : importDb || undefined,
+        newDatabase: isNew ? importNewDbName.trim() : undefined,
+        onError: importOnError,
+      });
+      if (r.ok) {
+        setImportResult({ ok: true, text: r.message ?? "导入完成" });
+        void refreshOverview();
+      } else {
+        setImportResult({ ok: false, text: r.error ?? "导入失败" });
+      }
+    } catch (e) {
+      setImportResult({ ok: false, text: `导入失败：${String(e)}` });
     } finally {
       setImporting(false);
     }
-  }, [flash]);
+  }, [importFile, importDb, importNewDbName, importOnError, refreshOverview]);
+
+  const importNeedDb =
+    !!importAnalyze?.ok && !importAnalyzing && !importAnalyze.hasCreateDb && !importAnalyze.useDb;
+  const importCanSubmit =
+    !!importFile &&
+    !!importAnalyze?.ok &&
+    !importAnalyzing &&
+    !importing &&
+    (!importNeedDb ||
+      (importDb === "__new__" ? importNewDbName.trim().length > 0 : !!importDb));
 
   const tableAction = useCallback(
     (action: "optimize" | "analyze" | "truncate" | "drop") => {
@@ -623,7 +686,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                 </Button>
               </span>
             </Tooltip>
-            <Button size="small" variant="outlined" startIcon={<UploadFileIcon />} disabled={!running || importing} onClick={() => void onImport()} sx={btnSx}>
+            <Button size="small" variant="outlined" startIcon={<UploadFileIcon />} disabled={!running} onClick={openImport} sx={btnSx}>
               导入 SQL
             </Button>
           </Stack>
@@ -1385,6 +1448,132 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
           </Button>
           <Button variant="contained" disabled={!newDbName.trim()} onClick={() => void createDb()} sx={btnSx}>
             创建
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* ===== 导入 SQL 向导：预分析 → 关联目标库 → 执行 → 结果 ===== */}
+      <Dialog
+        open={importOpen}
+        onClose={() => {
+          if (!importing) setImportOpen(false);
+        }}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>导入 SQL 脚本</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={2}>
+            <Paper
+              variant="outlined"
+              sx={{
+                p: 1.5,
+                borderStyle: "dashed",
+                borderColor: "rgba(13, 148, 136, 0.45)",
+                display: "flex",
+                alignItems: "center",
+                gap: 1.5,
+                minWidth: 0,
+              }}
+            >
+              <Button
+                size="small"
+                variant="contained"
+                startIcon={<UploadFileIcon />}
+                onClick={() => void pickImportFile()}
+                disabled={importing}
+              >
+                选择 SQL 文件
+              </Button>
+              <Typography
+                variant="body2"
+                title={importFile ?? undefined}
+                sx={importFile ? { fontFamily: MONO_STACK, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" } : { color: "text.secondary" }}
+              >
+                {importFile
+                  ? `${importFile.split(/[\\/]/).pop()}${
+                      importAnalyze?.ok && importAnalyze.sizeBytes
+                        ? `（${Math.max(1, Math.round(importAnalyze.sizeBytes / 1024))} KB）`
+                        : ""
+                    }`
+                  : "支持含 / 不含建库语句的 .sql 脚本"}
+              </Typography>
+            </Paper>
+            {importAnalyzing && <Alert severity="info">正在分析脚本结构…</Alert>}
+            {importAnalyze && !importAnalyzing && !importAnalyze.ok && (
+              <Alert severity="error">{importAnalyze.error ?? "无法读取该文件"}</Alert>
+            )}
+            {importAnalyze?.ok && !importAnalyzing && importAnalyze.hasCreateDb && (
+              <Alert severity="success">
+                脚本含建库语句{importAnalyze.createDbName ? `（${importAnalyze.createDbName}）` : ""}
+                ，将按脚本执行
+              </Alert>
+            )}
+            {importAnalyze?.ok && !importAnalyzing && !importAnalyze.hasCreateDb && importAnalyze.useDb && (
+              <Alert severity="info">
+                未检测到建库语句，脚本将使用库「{importAnalyze.useDb}」——也可在下方改选其他库
+              </Alert>
+            )}
+            {importNeedDb && (
+              <Alert severity="warning">
+                未检测到建库 / USE 语句——请先选择目标数据库，导入时平台会自动切换到该库执行
+              </Alert>
+            )}
+            {importAnalyze?.ok && !importAnalyze.hasCreateDb && !importAnalyzing && (
+              <FormControl size="small" fullWidth disabled={importing}>
+                <InputLabel>{importNeedDb ? "目标数据库（必选）" : "目标数据库（可选）"}</InputLabel>
+                <Select
+                  label={importNeedDb ? "目标数据库（必选）" : "目标数据库（可选）"}
+                  value={importDb}
+                  onChange={(e) => setImportDb(e.target.value)}
+                >
+                  {importAnalyze.useDb && <MenuItem value=""><em>跟随脚本（{importAnalyze.useDb}）</em></MenuItem>}
+                  {(ov?.databases ?? [])
+                    .filter((d) => !sysDbs.has(d))
+                    .map((d) => (
+                      <MenuItem key={d} value={d}>
+                        {d}
+                      </MenuItem>
+                    ))}
+                  <MenuItem value="__new__">
+                    <em>＋ 新建数据库…</em>
+                  </MenuItem>
+                </Select>
+              </FormControl>
+            )}
+            {importDb === "__new__" && (
+              <TextField
+                size="small"
+                label="新库名称"
+                value={importNewDbName}
+                onChange={(e) => setImportNewDbName(e.target.value)}
+                disabled={importing}
+                helperText="仅允许中文、字母、数字、下划线（1-64 字符）；建库时使用 utf8mb4 字符集"
+              />
+            )}
+            <FormControl size="small" fullWidth disabled={importing}>
+              <InputLabel>遇错策略</InputLabel>
+              <Select
+                label="遇错策略"
+                value={importOnError}
+                onChange={(e) => setImportOnError(e.target.value as "stop" | "continue")}
+              >
+                <MenuItem value="stop">遇错停止（推荐）</MenuItem>
+                <MenuItem value="continue">跳过错误继续（结束后统计被跳过的错误）</MenuItem>
+              </Select>
+            </FormControl>
+            {importing && <Alert severity="info">正在导入，大文件可能需要一些时间，请勿关闭窗口…</Alert>}
+            {importResult && (
+              <Alert severity={importResult.ok ? "success" : "error"}>{importResult.text}</Alert>
+            )}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setImportOpen(false)} disabled={importing}>
+            关闭
+          </Button>
+          <Button variant="contained" disabled={!importCanSubmit} onClick={() => void doImport()}>
+            {importing ? "导入中…" : "开始导入"}
           </Button>
         </DialogActions>
       </Dialog>

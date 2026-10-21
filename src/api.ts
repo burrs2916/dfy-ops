@@ -149,10 +149,30 @@ export const api = {
         body: JSON.stringify({ target, action }),
       },
     ),
-  mysqlImport: (file: string) =>
-    request<{ ok: boolean; message?: string; error?: string }>("/api/env/repair/mysql/import", {
+  mysqlImportAnalyze: (file: string) =>
+    request<{
+      ok: boolean;
+      sizeBytes?: number;
+      hasCreateDb?: boolean;
+      createDbName?: string | null;
+      useDb?: string | null;
+      error?: string;
+    }>("/api/env/repair/mysql/import/analyze", {
       method: "POST",
       body: JSON.stringify({ file }),
+    }),
+  mysqlImport: (
+    file: string,
+    opts?: { database?: string; newDatabase?: string; onError?: "stop" | "continue" },
+  ) =>
+    request<{ ok: boolean; message?: string; error?: string }>("/api/env/repair/mysql/import", {
+      method: "POST",
+      body: JSON.stringify({
+        file,
+        database: opts?.database || undefined,
+        newDatabase: opts?.newDatabase || undefined,
+        onError: opts?.onError || "stop",
+      }),
     }),
   // JDK 环境变量一键修复（JAVA_HOME + PATH，幂等；已装旧机不用重装）
   javaEnvFix: () =>

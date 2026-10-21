@@ -307,11 +307,33 @@ pub async fn service_action(
 pub struct MysqlImportReq {
     /// 本机 .sql 文件绝对路径（前端原生文件选择器取得）
     pub file: String,
+    /// 目标库：等价导入前先 USE。脚本未含建库/USE 语句时必填；
+    /// 脚本自带时可为空（跟随脚本）
+    #[serde(default)]
+    pub database: Option<String>,
+    /// 新建库名：先 CREATE DATABASE IF NOT EXISTS 再导入（用户选择"新建数据库"时提供）
+    #[serde(rename = "newDatabase", default)]
+    pub new_database: Option<String>,
+    /// 遇错策略：stop（默认）遇错即停；continue 加 --force 跳过错误继续
+    #[serde(rename = "onError", default)]
+    pub on_error: Option<String>,
+}
+
+/// 新库名合法性：中文/字母/数字/下划线，1-64 字符。库名会拼进 CREATE DATABASE
+/// 语句，必须收紧字符集（不允许反引号/分号/空白），杜绝拼接注入。
+fn valid_db_name(name: &str) -> bool {
+    let n = name.chars().count();
+    n > 0
+        && n <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || (c as u32) >= 0x4E00)
 }
 
 /// POST /api/env/repair/mysql/import —— 导入 SQL 到本机 MySQL。
 /// mysql 客户端从平台安装目录定位；文件内容经 stdin 直灌（无 shell 重定向，
 /// 路径含空格/中文均安全）；凭据取平台托管（config/mysql_credential.json）。
+/// 支持目标库关联（-D 等价 USE）、先建库、遇错策略。
 pub async fn mysql_import(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MysqlImportReq>,
@@ -319,6 +341,9 @@ pub async fn mysql_import(
     // 凭据走平台托管（数据库运维页设置过 root 密码则带密码导入）
     let cred = crate::ops::mysql_credential::load(&state.config_dir);
     let file = req.file;
+    let database = req.database.clone().unwrap_or_default();
+    let new_database = req.new_database.clone().unwrap_or_default();
+    let on_error = req.on_error.clone().unwrap_or_else(|| "stop".into());
     let file_for_log = file.clone();
     let st = state.clone();
     let res = blocking(move || {
@@ -327,27 +352,22 @@ pub async fn mysql_import(
         if !std::path::Path::new(&file).is_file() {
             return Err(format!("SQL 文件不存在：{file}"));
         }
-        let f = std::fs::File::open(&file).map_err(|e| format!("无法读取 SQL 文件：{e}"))?;
-        let mut cmd = std::process::Command::new(&client);
-        cmd.args([
-            "-h",
-            "127.0.0.1",
-            "-P",
-            &cred.port.to_string(),
-            "-u",
-            &cred.user,
-            "--default-character-set=utf8mb4",
-        ]);
-        if !cred.password.is_empty() {
-            cmd.arg(format!("-p{}", cred.password));
-        }
-        cmd.stdin(std::process::Stdio::from(f));
-        let out = cmd.output().map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
-        if out.status.success() {
-            Ok(())
-        } else {
-            let err = String::from_utf8_lossy(&out.stderr);
-            let tail: String = err
+        let base_args = |cmd: &mut std::process::Command| {
+            cmd.args([
+                "-h",
+                "127.0.0.1",
+                "-P",
+                &cred.port.to_string(),
+                "-u",
+                &cred.user,
+                "--default-character-set=utf8mb4",
+            ]);
+            if !cred.password.is_empty() {
+                cmd.arg(format!("-p{}", cred.password));
+            }
+        };
+        let stderr_tail = |stderr: &str| -> String {
+            stderr
                 .lines()
                 .filter(|l| l.contains("ERROR") || !l.trim().is_empty())
                 .rev()
@@ -356,18 +376,201 @@ pub async fn mysql_import(
                 .into_iter()
                 .rev()
                 .collect::<Vec<_>>()
-                .join(" | ");
-            Err(format!("导入失败：{tail}"))
+                .join(" | ")
+        };
+        // 可选：先建库（脚本没带建库语句、用户选择"新建数据库"时）
+        if !new_database.trim().is_empty() {
+            let db = new_database.trim();
+            if !valid_db_name(db) {
+                return Err(format!(
+                    "新库名不合法：{db}（仅允许中文、字母、数字、下划线，1-64 字符）"
+                ));
+            }
+            let sql = format!(
+                "CREATE DATABASE IF NOT EXISTS `{db}` DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            );
+            let mut cmd = std::process::Command::new(&client);
+            base_args(&mut cmd);
+            cmd.args(["-e", &sql]);
+            let out = cmd
+                .output()
+                .map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
+            if !out.status.success() {
+                return Err(format!("创建数据库 {db} 失败：{}", stderr_tail(&String::from_utf8_lossy(&out.stderr))));
+            }
+        }
+        let mut cmd = std::process::Command::new(&client);
+        base_args(&mut cmd);
+        if !database.trim().is_empty() {
+            // -D 等价导入前 USE；argv 直传，无 shell 拼接风险
+            cmd.args(["-D", database.trim()]);
+        }
+        if on_error == "continue" {
+            cmd.arg("--force");
+        }
+        let f = std::fs::File::open(&file).map_err(|e| format!("无法读取 SQL 文件：{e}"))?;
+        cmd.stdin(std::process::Stdio::from(f));
+        let out = cmd.output().map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
+        if out.status.success() {
+            // --force 模式统计被跳过的错误条数，让"继续导入"的结果可见
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let skipped = stderr.lines().filter(|l| l.contains("ERROR")).count();
+            Ok(if skipped > 0 {
+                format!("导入完成（跳过 {skipped} 条错误，详情可查看日志）")
+            } else {
+                "导入完成".to_string()
+            })
+        } else {
+            Err(format!("导入失败：{}", stderr_tail(&String::from_utf8_lossy(&out.stderr))))
         }
     })
     .await;
     match res {
-        Ok(()) => {
+        Ok(message) => {
             state.repair.log(format!("MySQL 导入完成：{}", file_for_log));
-            Json(serde_json::json!({ "ok": true, "message": "导入完成" }))
+            Json(serde_json::json!({ "ok": true, "message": message }))
         }
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
+}
+
+#[derive(Deserialize)]
+pub struct MysqlImportAnalyzeReq {
+    pub file: String,
+}
+
+/// POST /api/env/repair/mysql/import/analyze —— 导入前轻量预分析。
+/// 只读文件前 256KB（建库/USE 语句几乎总在头部），去注释后检测
+/// CREATE DATABASE / USE 语句并提取库名，供前端判断是否必须选目标库。
+pub async fn mysql_import_analyze(
+    Json(req): Json<MysqlImportAnalyzeReq>,
+) -> Json<serde_json::Value> {
+    let res = blocking(move || analyze_sql_head(&req.file)).await;
+    match res {
+        Ok((size, has_create_db, create_db_name, use_db)) => Json(serde_json::json!({
+            "ok": true,
+            "sizeBytes": size,
+            "hasCreateDb": has_create_db,
+            "createDbName": create_db_name,
+            "useDb": use_db,
+        })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+/// 去掉 SQL 注释（行注释 `--` / `#`，块注释 `/* */`），字符串/标识符内部不解析。
+/// 注释里的示例语句（文档脚本常见）不应触发建库检测。
+fn strip_sql_comments(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < n {
+        let c = chars[i];
+        if c == '-' && i + 1 < n && chars[i + 1] == '-' {
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '#' {
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+        } else if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+            i += 2;
+            while i + 1 < n && !(chars[i] == '*' && chars[i + 1] == '/') {
+                i += 1;
+            }
+            i = (i + 2).min(n);
+        } else if c == '\'' || c == '"' || c == '`' {
+            // 引号串原样拷贝到配对引号（容忍未闭合），避免串内 "--" 被误判为注释
+            let quote = c;
+            out.push(c);
+            i += 1;
+            while i < n {
+                out.push(chars[i]);
+                if chars[i] == quote {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// 在语句段内提取关键字（create database / use）后的库名。段已是折叠空白版，
+/// `lower` 为同长度小写版——定位用小写，取名字用原文（保留大小写）。
+fn extract_db_name(segment: &str, lower: &str, keyword: &str) -> Option<String> {
+    let kw_pos = lower.find(keyword)?;
+    let after = &lower[kw_pos + keyword.len()..];
+    let after = after.trim_start();
+    let after = after
+        .strip_prefix("if not exists")
+        .map(str::trim_start)
+        .unwrap_or(after);
+    // 偏移换算到原文段（两串按 char 同步折叠，长度一致）
+    let off = lower.len() - after.len();
+    let orig = &segment[off.min(segment.len())..];
+    let orig = orig.trim_start();
+    if let Some(r) = orig.strip_prefix('`') {
+        let end = r.find('`')?;
+        let name = &r[..end];
+        return if name.is_empty() { None } else { Some(name.to_string()) };
+    }
+    let name: String = orig
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || (*c as u32) >= 0x4E00)
+        .collect();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+/// 分析脚本头部：返回 (文件大小, 是否含 CREATE DATABASE, 建库名, USE 库名)。
+fn analyze_sql_head(path: &str) -> Result<(u64, bool, Option<String>, Option<String>), String> {
+    use std::io::Read;
+    let meta = std::fs::metadata(path).map_err(|e| format!("无法读取 SQL 文件：{e}"))?;
+    let size = meta.len();
+    let mut f = std::fs::File::open(path).map_err(|e| format!("无法读取 SQL 文件：{e}"))?;
+    let mut buf = vec![0u8; 256 * 1024];
+    let n = f.read(&mut buf).map_err(|e| format!("无法读取 SQL 文件：{e}"))?;
+    buf.truncate(n);
+    let text = strip_sql_comments(&String::from_utf8_lossy(&buf));
+    // 按分号切段 + 折叠空白，两版同长度（定位/取名共用偏移）
+    let mut segments: Vec<(String, String)> = Vec::new();
+    let mut cur = String::new();
+    let mut cur_lower = String::new();
+    for c in text.chars() {
+        if c == ';' {
+            segments.push((std::mem::take(&mut cur), std::mem::take(&mut cur_lower)));
+        } else if c.is_whitespace() {
+            if !cur.ends_with(' ') {
+                cur.push(' ');
+                cur_lower.push(' ');
+            }
+        } else {
+            cur.push(c);
+            cur_lower.push(c.to_ascii_lowercase());
+        }
+    }
+    segments.push((cur, cur_lower));
+    let mut has_create_db = false;
+    let mut create_db_name = None;
+    let mut use_db = None;
+    for (seg, lower) in &segments {
+        if !has_create_db && lower.contains("create database") {
+            if let Some(name) = extract_db_name(seg, lower, "create database") {
+                has_create_db = true;
+                create_db_name = Some(name);
+            }
+        }
+        if use_db.is_none() && lower.trim_start().starts_with("use ") {
+            use_db = extract_db_name(seg, lower, "use");
+        }
+    }
+    Ok((size, has_create_db, create_db_name, use_db))
 }
 
 /// POST /api/env/repair/java-env —— 一键修复/接管 java 用户级环境变量（幂等）：
@@ -851,5 +1054,59 @@ mod tests {
         assert!(p_empty.contains("未配置或没有识别出的安装包"));
         let p_follow = build_plan_prompt(&items, &files, &installed, Some("上一轮：装 MySQL"), Some("端口还是不通"));
         assert!(p_follow.contains("上一轮：装 MySQL") && p_follow.contains("端口还是不通"));
+    }
+
+    /// 导入预分析：建库语句（含反引号/IF NOT EXISTS）、USE、注释里的语句不算。
+    #[test]
+    fn analyze_sql_head_detects_create_db_and_use() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("dfy_ops_analyze_test.sql");
+        std::fs::write(
+            &path,
+            "-- CREATE DATABASE `not_real`;\n\
+             /* CREATE DATABASE also_fake; */\n\
+             CREATE TABLE `t` (id INT);\n\
+             CREATE DATABASE IF NOT EXISTS `my_shop` DEFAULT CHARACTER SET utf8mb4;\n\
+             USE `my_shop`;\n\
+             INSERT INTO `t` VALUES (1);",
+        )
+        .unwrap();
+        let (size, has_create, create_name, use_db) =
+            analyze_sql_head(path.to_str().unwrap()).unwrap();
+        assert!(size > 0);
+        assert!(has_create);
+        assert_eq!(create_name.as_deref(), Some("my_shop"));
+        assert_eq!(use_db.as_deref(), Some("my_shop"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 只有建表+插入的脚本：不误报建库；USE 无反引号也能提取。
+    #[test]
+    fn analyze_sql_head_without_create_db() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("dfy_ops_analyze_test2.sql");
+        std::fs::write(
+            &path,
+            "SET NAMES utf8mb4;\nCREATE TABLE t (id INT);\nuse legacy_db;\nINSERT INTO t VALUES (1);",
+        )
+        .unwrap();
+        let (_, has_create, create_name, use_db) =
+            analyze_sql_head(path.to_str().unwrap()).unwrap();
+        assert!(!has_create, "无建库语句不应误报");
+        assert!(create_name.is_none());
+        assert_eq!(use_db.as_deref(), Some("legacy_db"));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// 新库名白名单：中英文数字下划线通过，反引号/分号/空白/超长拒绝。
+    #[test]
+    fn valid_db_name_rejects_injection() {
+        assert!(valid_db_name("my_shop"));
+        assert!(valid_db_name("业务库_01"));
+        assert!(!valid_db_name("a`b"));
+        assert!(!valid_db_name("a;b"));
+        assert!(!valid_db_name("a b"));
+        assert!(!valid_db_name(""));
+        assert!(!valid_db_name(&"x".repeat(65)));
     }
 }
