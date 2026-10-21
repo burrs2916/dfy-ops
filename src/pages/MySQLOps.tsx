@@ -1601,7 +1601,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                 value={importNewDbName}
                 onChange={(e) => setImportNewDbName(e.target.value)}
                 disabled={importing}
-                helperText="仅允许中文、字母、数字、下划线（1-64 字符）；建库时使用 utf8mb4 字符集"
+                helperText="仅允许中文、字母、数字、下划线（1-64 字符）；自动采用 utf8mb4 + unicode 排序（中文完整存储，兼容 MySQL 5.5+）"
               />
             )}
             {/* 冲突检测与处理：选库后自动查询；无冲突不打扰，有冲突让用户选策略 */}
