@@ -5,7 +5,9 @@
 //! 2. 在线下载（仅 java 有 Adoptium 链路；有网时）；
 //! 3. AI 结构化方案（steps 中白名单内的命令可确认后代执行，其余复制手动执行）。
 
-use std::sync::Arc;
+use std::io::{BufRead, Read, Write};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use axum::extract::State;
 use axum::Json;
@@ -335,6 +337,37 @@ fn valid_db_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || (c as u32) >= 0x4E00)
 }
 
+/// 导入进度实时视图（跨线程共享，全部原子/锁内数据）。
+#[derive(Clone)]
+struct ImportProgress {
+    running: Arc<AtomicBool>,
+    /// preparing / creating_db / clearing_tables / recreating_db / importing / done
+    phase: Arc<Mutex<&'static str>>,
+    bytes: Arc<AtomicU64>,
+    total: Arc<AtomicU64>,
+    errors: Arc<AtomicUsize>,
+    /// stderr 行滚动缓冲（cap 200，丢头保尾）：结果明细与失败 tail 都取自这里
+    lines: Arc<Mutex<std::collections::VecDeque<String>>>,
+}
+
+/// 导入进度槽：同屏一次只跑一个导入任务，单槽即可。
+fn import_progress_slot() -> &'static Mutex<Option<ImportProgress>> {
+    static SLOT: OnceLock<Mutex<Option<ImportProgress>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(None))
+}
+
+/// 进度收尾 guard：导入闭包任何 return（含提前 Err）都把槽标记为完成，
+/// 防止校验失败等早退路径让前端轮询永远显示"导入中"。
+struct ImportProgressGuard;
+impl Drop for ImportProgressGuard {
+    fn drop(&mut self) {
+        if let Some(p) = import_progress_slot().lock().unwrap().as_ref() {
+            p.running.store(false, Ordering::Relaxed);
+            *p.phase.lock().unwrap() = "done";
+        }
+    }
+}
+
 /// 取 stderr 尾部有效错误信息（最多 3 行，优先保留含 ERROR 的行）。
 fn stderr_tail_impl(stderr: &str) -> String {
     stderr
@@ -390,8 +423,26 @@ pub async fn mysql_import(
             }
         };
         let stderr_tail = |stderr: &str| -> String { stderr_tail_impl(stderr) };
+        // guard：任何 return 路径都收尾进度槽（防止早退路径卡死前端轮询）
+        let _progress_guard = ImportProgressGuard;
+        // 进度槽初始化：total = 文件大小，前端按字节进度轮询展示
+        let prog = ImportProgress {
+            running: Arc::new(AtomicBool::new(true)),
+            phase: Arc::new(Mutex::new("preparing")),
+            bytes: Arc::new(AtomicU64::new(0)),
+            total: Arc::new(AtomicU64::new(
+                std::fs::metadata(&file).map(|m| m.len()).unwrap_or(0),
+            )),
+            errors: Arc::new(AtomicUsize::new(0)),
+            lines: Arc::new(Mutex::new(std::collections::VecDeque::new())),
+        };
+        *import_progress_slot().lock().unwrap() = Some(prog.clone());
+        let set_phase = |p: &'static str| {
+            *prog.phase.lock().unwrap() = p;
+        };
         // 可选：先建库（脚本没带建库语句、用户选择"新建数据库"时）
         if !new_database.trim().is_empty() {
+            set_phase("creating_db");
             let db = new_database.trim();
             if !valid_db_name(db) {
                 return Err(format!(
@@ -415,6 +466,7 @@ pub async fn mysql_import(
         // 冲突处理策略（选库检测到重名表后用户选择的方式）
         match strategy.as_str() {
             "rebuild" => {
+                set_phase("clearing_tables");
                 // 幂等重建：只 DROP 脚本涉及的表（全限定名，库里其他表不动）。
                 // 表名来自脚本提取，同样过白名单——不合法的跳过，导入时自然报错。
                 let info = analyze_sql_head(&file)?;
@@ -445,6 +497,7 @@ pub async fn mysql_import(
                 }
             }
             "recreate_db" => {
+                set_phase("recreating_db");
                 // 整库重建（前端已强确认）：DROP DATABASE → CREATE → 导入
                 let db = target_db.clone();
                 if db.is_empty() {
@@ -468,6 +521,7 @@ pub async fn mysql_import(
             }
             _ => {}
         }
+        set_phase("importing");
         let mut cmd = std::process::Command::new(&client);
         base_args(&mut cmd);
         if !target_db.is_empty() {
@@ -477,36 +531,109 @@ pub async fn mysql_import(
         if on_error == "continue" || strategy == "append" {
             cmd.arg("--force");
         }
-        let f = std::fs::File::open(&file).map_err(|e| format!("无法读取 SQL 文件：{e}"))?;
-        cmd.stdin(std::process::Stdio::from(f));
-        let out = cmd.output().map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
-        // 错误明细收集：ERROR 行（含行号与原因），cap 20 条防止 stderr 爆量
-        let stderr_text = String::from_utf8_lossy(&out.stderr).to_string();
-        let error_lines: Vec<String> = stderr_text
-            .lines()
-            .map(str::trim)
-            .filter(|l| l.contains("ERROR"))
-            .map(str::to_string)
-            .collect();
-        let skipped = error_lines.len() as u32;
-        let message = if out.status.success() {
+        // stdin 管道 + stdout 丢弃：mysql 导入无 stdout 输出，null() 防管道积压
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::null());
+        let mut child = cmd.spawn().map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
+        let mut child_stdin = child.stdin.take().ok_or("无法建立导入管道")?;
+        let stderr_pipe = child.stderr.take();
+
+        // 喂入线程：分块读文件写 stdin，管道写满时阻塞（背压）——字节计数
+        // 因此近似等于 mysql 实际消费进度，正是进度条需要的语义
+        let file_for_feed = file.clone();
+        let feed_bytes = prog.bytes.clone();
+        let feeder = std::thread::spawn(move || {
+            let mut f = match std::fs::File::open(&file_for_feed) {
+                Ok(f) => f,
+                Err(_) => return,
+            };
+            let mut buf = vec![0u8; 256 * 1024];
+            loop {
+                match f.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        if child_stdin.write_all(&buf[..n]).is_err() {
+                            // mysql 提前退出（密码错/立即崩溃）→ 管道断裂，停止喂入
+                            break;
+                        }
+                        feed_bytes.fetch_add(n as u64, Ordering::Relaxed);
+                    }
+                    Err(_) => break,
+                }
+            }
+            drop(child_stdin); // EOF：mysql 开始收尾
+        });
+
+        // stderr 读线程：滚动缓冲（cap 200 行）+ ERROR 实时计数
+        let prog_for_err = prog.clone();
+        let err_reader = std::thread::spawn(move || {
+            if let Some(se) = stderr_pipe {
+                let reader = std::io::BufReader::new(se);
+                for line in reader.lines().map_while(Result::ok) {
+                    let mut buf_lines = prog_for_err.lines.lock().unwrap();
+                    if buf_lines.len() >= 200 {
+                        buf_lines.pop_front();
+                    }
+                    buf_lines.push_back(line.clone());
+                    drop(buf_lines);
+                    if line.contains("ERROR") {
+                        prog_for_err.errors.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+
+        let status = child
+            .wait()
+            .map_err(|e| format!("等待 mysql 进程失败：{e}"))?;
+        let _ = feeder.join();
+        let _ = err_reader.join();
+
+        // 错误明细与尾部错误取自滚动缓冲（stderr 全文不再持有）
+        let (error_lines, tail_text) = {
+            let buf_lines = prog.lines.lock().unwrap();
+            let error_lines: Vec<String> = buf_lines
+                .iter()
+                .filter(|l| l.contains("ERROR"))
+                .take(20)
+                .cloned()
+                .collect();
+            let tail: Vec<String> = buf_lines
+                .iter()
+                .filter(|l| l.contains("ERROR") || !l.trim().is_empty())
+                .rev()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            (error_lines, tail.join(" | "))
+        };
+        let skipped = prog.errors.load(Ordering::Relaxed) as u32;
+        let message = if status.success() {
             if skipped > 0 {
                 format!("导入完成（跳过 {skipped} 条错误语句）")
             } else {
                 "导入完成".to_string()
             }
+        } else if tail_text.is_empty() {
+            format!("导入失败（退出码 {}）", status.code().unwrap_or(-1))
         } else {
-            format!("导入失败：{}", stderr_tail(&stderr_text))
+            format!("导入失败：{tail_text}")
         };
         let mut result = serde_json::Map::new();
-        result.insert("ok".into(), serde_json::Value::Bool(out.status.success()));
+        result.insert("ok".into(), serde_json::Value::Bool(status.success()));
         result.insert("message".into(), serde_json::Value::String(message));
         result.insert("skippedCount".into(), serde_json::json!(skipped));
         result.insert(
             "errors".into(),
-            serde_json::json!(error_lines.iter().take(20).cloned().collect::<Vec<_>>()),
+            serde_json::json!(error_lines),
         );
         result.insert("targetDb".into(), serde_json::Value::String(target_db));
+        // 收尾：进度槽标记完成，前端停轮询
+        prog.running.store(false, Ordering::Relaxed);
+        *prog.phase.lock().unwrap() = "done";
         Ok(result)
     })
     .await;
@@ -595,6 +722,24 @@ pub async fn mysql_import_verify(
             Json(serde_json::Value::Object(m))
         }
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+/// GET /api/env/repair/mysql/import/progress —— 导入进度轮询（字节/阶段/实时错误数）。
+/// mysql 客户端自身无进度输出，进度由后端喂入线程按已写入管道字节数维护。
+pub async fn mysql_import_progress() -> Json<serde_json::Value> {
+    let slot = import_progress_slot().lock().unwrap();
+    match slot.as_ref() {
+        Some(p) => Json(serde_json::json!({
+            "running": p.running.load(Ordering::Relaxed),
+            "phase": *p.phase.lock().unwrap(),
+            "bytes": p.bytes.load(Ordering::Relaxed),
+            "total": p.total.load(Ordering::Relaxed),
+            "errors": p.errors.load(Ordering::Relaxed),
+        })),
+        None => Json(
+            serde_json::json!({ "running": false, "phase": "idle", "bytes": 0, "total": 0, "errors": 0 }),
+        ),
     }
 }
 

@@ -210,6 +210,14 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ database }),
     }),
+  mysqlImportProgress: () =>
+    request<{
+      running: boolean;
+      phase: "idle" | "preparing" | "creating_db" | "clearing_tables" | "recreating_db" | "importing" | "done";
+      bytes: number;
+      total: number;
+      errors: number;
+    }>("/api/env/repair/mysql/import/progress"),
   // JDK 环境变量一键修复（JAVA_HOME + PATH，幂等；已装旧机不用重装）
   javaEnvFix: () =>
     request<{ ok: boolean; message?: string; error?: string }>("/api/env/repair/java-env", {

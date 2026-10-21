@@ -218,6 +218,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/env/repair/mysql/import/verify",
             axum::routing::post(handlers_repair::mysql_import_verify),
         )
+        .route(
+            "/api/env/repair/mysql/import/progress",
+            axum::routing::get(handlers_repair::mysql_import_progress),
+        )
         // JDK 环境变量一键修复（JAVA_HOME + PATH，幂等）
         .route(
             "/api/env/repair/java-env",

@@ -16,6 +16,7 @@ import {
   FormControlLabel,
   IconButton,
   InputLabel,
+  LinearProgress,
   List,
   ListItemButton,
   ListItemText,
@@ -226,6 +227,13 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     missing: string[];
   } | null>(null);
   const [importVerifying, setImportVerifying] = useState(false);
+  // 导入过程实时进度（后端轮询）：阶段 + 字节 + 实时错误数
+  const [importProgress, setImportProgress] = useState<{
+    phase: string;
+    bytes: number;
+    total: number;
+    errors: number;
+  } | null>(null);
   const [confirm, setConfirm] = useState<{
     title: string;
     content: string;
@@ -263,26 +271,33 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     };
   }, []);
 
+  // 拉取当前浏览库的表列表（useEffect 依赖变化时 + 导入完成后自动刷新共用）
+  const reloadTables = useCallback(
+    (targetDb?: string) => {
+      const d = targetDb ?? db;
+      if (!d || !ov?.running) return;
+      let cancelled = false;
+      setTablesLoading(true);
+      api
+        .mysqlTables(d)
+        .then((r) => {
+          if (!cancelled) setTables(r.ok && r.tables ? r.tables : []);
+        })
+        .catch((e) => {
+          if (!cancelled) flash(`获取表列表失败：${String(e)}`, "error");
+        })
+        .finally(() => {
+          if (!cancelled) setTablesLoading(false);
+        });
+      return () => {
+        cancelled = true;
+      };
+    },
+    [db, ov?.running, flash],
+  );
+
   // 选中库后拉取表列表
-  useEffect(() => {
-    if (!db || !ov?.running) return;
-    let cancelled = false;
-    setTablesLoading(true);
-    api
-      .mysqlTables(db)
-      .then((r) => {
-        if (!cancelled) setTables(r.ok && r.tables ? r.tables : []);
-      })
-      .catch((e) => {
-        if (!cancelled) flash(`获取表列表失败：${String(e)}`, "error");
-      })
-      .finally(() => {
-        if (!cancelled) setTablesLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [db, ov?.running, flash]);
+  useEffect(() => reloadTables(), [reloadTables]);
 
   const runService = useCallback(
     async (action: "start" | "stop") => {
@@ -558,10 +573,20 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     if (!importFile) return;
     const isNew = importDb === "__new__";
     const hasConflicts = (importConflicts?.conflicts.length ?? 0) > 0;
-    const targetDb = isNew ? importNewDbName.trim() : importDb;
+    // 实际目标库：显式选库 > 新建库 > 脚本 USE 的库（验证与表列表刷新都对准它）
+    const targetDb = isNew ? importNewDbName.trim() : importDb || importAnalyze?.useDb || "";
     setImporting(true);
     setImportResult(null);
     setImportVerify(null);
+    // 每秒轮询后端进度槽：阶段 + 字节进度 + 实时错误计数
+    const poll = window.setInterval(() => {
+      api
+        .mysqlImportProgress()
+        .then((p) => {
+          if (p.phase !== "done") setImportProgress(p);
+        })
+        .catch(() => {});
+    }, 800);
     try {
       const r = await api.mysqlImport(importFile, {
         database: isNew ? undefined : importDb || undefined,
@@ -603,13 +628,18 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
           setImportVerifying(false);
         }
       }
+      // 导入完成自动刷新右侧表列表（目标库是当前浏览库时立即可见新表）
+      reloadTables(targetDb);
       setImporting(false);
       void refreshOverview();
     } catch (e) {
       setImportResult({ ok: false, message: `导入失败：${String(e)}`, skippedCount: 0, errors: [] });
       setImporting(false);
+    } finally {
+      window.clearInterval(poll);
+      setImportProgress(null);
     }
-  }, [importFile, importDb, importNewDbName, importOnError, importStrategy, importConflicts, importAnalyze, refreshOverview]);
+  }, [importFile, importDb, importNewDbName, importOnError, importStrategy, importConflicts, importAnalyze, reloadTables, refreshOverview]);
 
   // 与后端 valid_db_name 同口径的前端宽松校验（仅用于决定是否发起验证请求）
   const validDbNameLike = (s: string) => s.length > 0 && s.length <= 64;
@@ -1751,7 +1781,48 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                 </Select>
               </FormControl>
             )}
-            {importing && <Alert severity="info">正在导入，大文件可能需要一些时间，请勿关闭窗口…</Alert>}
+            {importing && importProgress && importProgress.phase !== "done" && (
+              <Box>
+                <Stack direction="row" justifyContent="space-between" alignItems="baseline" sx={{ mb: 0.5 }}>
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                    {importProgress.phase === "preparing" && "正在连接 MySQL…"}
+                    {importProgress.phase === "creating_db" && "正在创建数据库…"}
+                    {importProgress.phase === "clearing_tables" && "正在清理同名表…"}
+                    {importProgress.phase === "recreating_db" && "正在重建数据库…"}
+                    {importProgress.phase === "importing" && "正在导入…请勿关闭窗口"}
+                    {!["preparing", "creating_db", "clearing_tables", "recreating_db", "importing"].includes(importProgress.phase) && "正在处理…"}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    {importProgress.phase === "importing" && importProgress.total > 0 && (
+                      <>
+                        {(importProgress.bytes / 1048576).toFixed(1)} / {(importProgress.total / 1048576).toFixed(1)} MB ·{" "}
+                        {((importProgress.bytes / importProgress.total) * 100).toFixed(0)}%
+                      </>
+                    )}
+                    {importProgress.errors > 0 && (
+                      <Typography component="span" variant="caption" sx={{ color: "warning.main" }}>
+                        {" "}· 已捕获 {importProgress.errors} 条错误
+                      </Typography>
+                    )}
+                  </Typography>
+                </Stack>
+                <LinearProgress
+                  variant={
+                    importProgress.phase === "importing" && importProgress.total > 0
+                      ? "determinate"
+                      : "indeterminate"
+                  }
+                  value={
+                    importProgress.total > 0
+                      ? (importProgress.bytes / importProgress.total) * 100
+                      : undefined
+                  }
+                />
+              </Box>
+            )}
+            {importing && !importProgress && (
+              <Alert severity="info">正在导入，大文件可能需要一些时间，请勿关闭窗口…</Alert>
+            )}
             {importVerifying && <Alert severity="info">正在验证目标库的表结构…</Alert>}
             {importResult && (
               <>
