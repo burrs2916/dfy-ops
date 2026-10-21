@@ -352,6 +352,9 @@ pub async fn mysql_import(
         if !std::path::Path::new(&file).is_file() {
             return Err(format!("SQL 文件不存在：{file}"));
         }
+        // 实际导入目标：显式指定 > 新建库（建完即用）。新建库若不随同 -D 切换，
+        // 脚本又没有 USE 语句，会报 "No database selected"（实测踩过）。
+        let mut target_db = database.trim().to_string();
         let base_args = |cmd: &mut std::process::Command| {
             cmd.args([
                 "-h",
@@ -398,12 +401,13 @@ pub async fn mysql_import(
             if !out.status.success() {
                 return Err(format!("创建数据库 {db} 失败：{}", stderr_tail(&String::from_utf8_lossy(&out.stderr))));
             }
+            target_db = db.to_string();
         }
         let mut cmd = std::process::Command::new(&client);
         base_args(&mut cmd);
-        if !database.trim().is_empty() {
+        if !target_db.is_empty() {
             // -D 等价导入前 USE；argv 直传，无 shell 拼接风险
-            cmd.args(["-D", database.trim()]);
+            cmd.args(["-D", &target_db]);
         }
         if on_error == "continue" {
             cmd.arg("--force");
