@@ -335,6 +335,20 @@ fn valid_db_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || (c as u32) >= 0x4E00)
 }
 
+/// 取 stderr 尾部有效错误信息（最多 3 行，优先保留含 ERROR 的行）。
+fn stderr_tail_impl(stderr: &str) -> String {
+    stderr
+        .lines()
+        .filter(|l| l.contains("ERROR") || !l.trim().is_empty())
+        .rev()
+        .take(3)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 /// POST /api/env/repair/mysql/import —— 导入 SQL 到本机 MySQL。
 /// mysql 客户端从平台安装目录定位；文件内容经 stdin 直灌（无 shell 重定向，
 /// 路径含空格/中文均安全）；凭据取平台托管（config/mysql_credential.json）。
@@ -375,18 +389,7 @@ pub async fn mysql_import(
                 cmd.arg(format!("-p{}", cred.password));
             }
         };
-        let stderr_tail = |stderr: &str| -> String {
-            stderr
-                .lines()
-                .filter(|l| l.contains("ERROR") || !l.trim().is_empty())
-                .rev()
-                .take(3)
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev()
-                .collect::<Vec<_>>()
-                .join(" | ")
-        };
+        let stderr_tail = |stderr: &str| -> String { stderr_tail_impl(stderr) };
         // 可选：先建库（脚本没带建库语句、用户选择"新建数据库"时）
         if !new_database.trim().is_empty() {
             let db = new_database.trim();
@@ -477,24 +480,40 @@ pub async fn mysql_import(
         let f = std::fs::File::open(&file).map_err(|e| format!("无法读取 SQL 文件：{e}"))?;
         cmd.stdin(std::process::Stdio::from(f));
         let out = cmd.output().map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
-        if out.status.success() {
-            // --force 模式统计被跳过的错误条数，让"继续导入"的结果可见
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let skipped = stderr.lines().filter(|l| l.contains("ERROR")).count();
-            Ok(if skipped > 0 {
-                format!("导入完成（跳过 {skipped} 条错误，详情可查看日志）")
+        // 错误明细收集：ERROR 行（含行号与原因），cap 20 条防止 stderr 爆量
+        let stderr_text = String::from_utf8_lossy(&out.stderr).to_string();
+        let error_lines: Vec<String> = stderr_text
+            .lines()
+            .map(str::trim)
+            .filter(|l| l.contains("ERROR"))
+            .map(str::to_string)
+            .collect();
+        let skipped = error_lines.len() as u32;
+        let message = if out.status.success() {
+            if skipped > 0 {
+                format!("导入完成（跳过 {skipped} 条错误语句）")
             } else {
                 "导入完成".to_string()
-            })
+            }
         } else {
-            Err(format!("导入失败：{}", stderr_tail(&String::from_utf8_lossy(&out.stderr))))
-        }
+            format!("导入失败：{}", stderr_tail(&stderr_text))
+        };
+        let mut result = serde_json::Map::new();
+        result.insert("ok".into(), serde_json::Value::Bool(out.status.success()));
+        result.insert("message".into(), serde_json::Value::String(message));
+        result.insert("skippedCount".into(), serde_json::json!(skipped));
+        result.insert(
+            "errors".into(),
+            serde_json::json!(error_lines.iter().take(20).cloned().collect::<Vec<_>>()),
+        );
+        result.insert("targetDb".into(), serde_json::Value::String(target_db));
+        Ok(result)
     })
     .await;
     match res {
-        Ok(message) => {
+        Ok(result) => {
             state.repair.log(format!("MySQL 导入完成：{}", file_for_log));
-            Json(serde_json::json!({ "ok": true, "message": message }))
+            Json(serde_json::Value::Object(result))
         }
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
     }
@@ -503,6 +522,80 @@ pub async fn mysql_import(
 #[derive(Deserialize)]
 pub struct MysqlImportAnalyzeReq {
     pub file: String,
+}
+
+#[derive(Deserialize)]
+pub struct MysqlImportVerifyReq {
+    pub database: String,
+}
+
+/// POST /api/env/repair/mysql/import/verify —— 导入后验证：目标库实际表清单与
+/// 近似行数（information_schema 估算值）。前端与预分析的 scriptTables 对照，
+/// 得出「哪些表没建出来」，让结构完整性一目了然。
+pub async fn mysql_import_verify(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MysqlImportVerifyReq>,
+) -> Json<serde_json::Value> {
+    let cred = crate::ops::mysql_credential::load(&state.config_dir);
+    let st = state.clone();
+    let res = blocking(move || {
+        let db = req.database.trim().to_string();
+        if !valid_db_name(&db) {
+            return Err(format!("库名不合法：{db}"));
+        }
+        let client = super::handlers_mysql::mysql_client(&st)?;
+        let sql = format!(
+            "SELECT table_name, table_rows FROM information_schema.tables \
+             WHERE table_schema='{db}' AND table_type='BASE TABLE' ORDER BY table_name"
+        );
+        let mut cmd = std::process::Command::new(&client);
+        cmd.args([
+            "-h", "127.0.0.1",
+            "-P", &cred.port.to_string(),
+            "-u", &cred.user,
+            "-N", "-B",
+            "-e", &sql,
+        ]);
+        if !cred.password.is_empty() {
+            cmd.arg(format!("-p{}", cred.password));
+        }
+        let out = cmd
+            .output()
+            .map_err(|e| format!("无法启动 mysql 客户端：{e}"))?;
+        if !out.status.success() {
+            return Err(format!(
+                "验证目标库失败：{}",
+                stderr_tail_impl(&String::from_utf8_lossy(&out.stderr))
+            ));
+        }
+        // -B tab 分隔：name\trows；rows 可能是 NULL（未 ANALYZE 的表）→ 显示为空
+        let tables: Vec<serde_json::Value> = String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                let mut it = l.splitn(2, '\t');
+                let name = it.next().unwrap_or("").trim().to_string();
+                let rows = it.next().unwrap_or("").trim();
+                serde_json::json!({
+                    "name": name,
+                    "rows": if rows.is_empty() || rows == "NULL" { serde_json::Value::Null } else { serde_json::json!(rows) },
+                })
+            })
+            .collect();
+        Ok(serde_json::json!({ "tables": tables }))
+    })
+    .await;
+    match res {
+        Ok(v) => {
+            let mut m = serde_json::Map::new();
+            m.insert("ok".into(), serde_json::Value::Bool(true));
+            if let serde_json::Value::Object(rest) = v {
+                m.extend(rest);
+            }
+            Json(serde_json::Value::Object(m))
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
 }
 
 /// POST /api/env/repair/mysql/import/analyze —— 导入前轻量预分析。

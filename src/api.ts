@@ -184,7 +184,14 @@ export const api = {
       conflictStrategy?: "direct" | "rebuild" | "append" | "recreate_db";
     },
   ) =>
-    request<{ ok: boolean; message?: string; error?: string }>("/api/env/repair/mysql/import", {
+    request<{
+      ok: boolean;
+      message?: string;
+      skippedCount?: number;
+      errors?: string[];
+      targetDb?: string;
+      error?: string;
+    }>("/api/env/repair/mysql/import", {
       method: "POST",
       body: JSON.stringify({
         file,
@@ -193,6 +200,15 @@ export const api = {
         onError: opts?.onError || "stop",
         conflictStrategy: opts?.conflictStrategy || "direct",
       }),
+    }),
+  mysqlImportVerify: (database: string) =>
+    request<{
+      ok: boolean;
+      tables?: { name: string; rows: string | null }[];
+      error?: string;
+    }>("/api/env/repair/mysql/import/verify", {
+      method: "POST",
+      body: JSON.stringify({ database }),
     }),
   // JDK 环境变量一键修复（JAVA_HOME + PATH，幂等；已装旧机不用重装）
   javaEnvFix: () =>

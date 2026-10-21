@@ -196,6 +196,8 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     hasCreateDb?: boolean;
     createDbName?: string | null;
     useDb?: string | null;
+    scriptTables?: string[];
+    scriptHasDrop?: boolean;
     error?: string;
   } | null>(null);
   const [importAnalyzing, setImportAnalyzing] = useState(false);
@@ -212,7 +214,18 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
   const [importStrategy, setImportStrategy] = useState<"direct" | "rebuild" | "append" | "recreate_db">("direct");
   const [importConfirmDanger, setImportConfirmDanger] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [importResult, setImportResult] = useState<{ ok: boolean; text: string } | null>(null);
+  // 导入结果：状态 + 错误明细；导入结束后自动验证库表结构与行数
+  const [importResult, setImportResult] = useState<{
+    ok: boolean;
+    message: string;
+    skippedCount: number;
+    errors: string[];
+  } | null>(null);
+  const [importVerify, setImportVerify] = useState<{
+    tables: { name: string; rows: string | null }[];
+    missing: string[];
+  } | null>(null);
+  const [importVerifying, setImportVerifying] = useState(false);
   const [confirm, setConfirm] = useState<{
     title: string;
     content: string;
@@ -475,6 +488,8 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     setImportStrategy("direct");
     setImportConfirmDanger(false);
     setImportResult(null);
+    setImportVerify(null);
+    setImportVerifying(false);
     setImporting(false);
     setImportOpen(true);
   }, []);
@@ -495,6 +510,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     setImportFile(picked);
     setImportAnalyze(null);
     setImportResult(null);
+    setImportVerify(null);
     setImportConflicts(null);
     setImportStrategy("direct");
     setImportConfirmDanger(false);
@@ -542,8 +558,10 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     if (!importFile) return;
     const isNew = importDb === "__new__";
     const hasConflicts = (importConflicts?.conflicts.length ?? 0) > 0;
+    const targetDb = isNew ? importNewDbName.trim() : importDb;
     setImporting(true);
     setImportResult(null);
+    setImportVerify(null);
     try {
       const r = await api.mysqlImport(importFile, {
         database: isNew ? undefined : importDb || undefined,
@@ -552,17 +570,49 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
         conflictStrategy: isNew || !hasConflicts ? "direct" : importStrategy,
       });
       if (r.ok) {
-        setImportResult({ ok: true, text: r.message ?? "导入完成" });
-        void refreshOverview();
+        setImportResult({
+          ok: true,
+          message: r.message ?? "导入完成",
+          skippedCount: r.skippedCount ?? 0,
+          errors: r.errors ?? [],
+        });
       } else {
-        setImportResult({ ok: false, text: r.error ?? "导入失败" });
+        setImportResult({
+          ok: false,
+          message: r.error ?? "导入失败",
+          skippedCount: 0,
+          errors: r.errors ?? [],
+        });
       }
+      // 导入后自动验证：目标库实际表清单与行数，对照脚本表名找出缺失表
+      if (targetDb && validDbNameLike(targetDb)) {
+        setImportVerifying(true);
+        try {
+          const v = await api.mysqlImportVerify(targetDb);
+          if (v.ok && v.tables) {
+            const scriptTables = importAnalyze?.scriptTables ?? [];
+            const names = v.tables.map((t) => t.name);
+            const missing = scriptTables.filter(
+              (t) => !names.some((n) => n.toLowerCase() === t.toLowerCase()),
+            );
+            setImportVerify({ tables: v.tables, missing });
+          }
+        } catch {
+          setImportVerify(null);
+        } finally {
+          setImportVerifying(false);
+        }
+      }
+      setImporting(false);
+      void refreshOverview();
     } catch (e) {
-      setImportResult({ ok: false, text: `导入失败：${String(e)}` });
-    } finally {
+      setImportResult({ ok: false, message: `导入失败：${String(e)}`, skippedCount: 0, errors: [] });
       setImporting(false);
     }
-  }, [importFile, importDb, importNewDbName, importOnError, importStrategy, importConflicts, refreshOverview]);
+  }, [importFile, importDb, importNewDbName, importOnError, importStrategy, importConflicts, importAnalyze, refreshOverview]);
+
+  // 与后端 valid_db_name 同口径的前端宽松校验（仅用于决定是否发起验证请求）
+  const validDbNameLike = (s: string) => s.length > 0 && s.length <= 64;
 
   const importNeedDb =
     !!importAnalyze?.ok && !importAnalyzing && !importAnalyze.hasCreateDb && !importAnalyze.useDb;
@@ -1702,8 +1752,67 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
               </FormControl>
             )}
             {importing && <Alert severity="info">正在导入，大文件可能需要一些时间，请勿关闭窗口…</Alert>}
+            {importVerifying && <Alert severity="info">正在验证目标库的表结构…</Alert>}
             {importResult && (
-              <Alert severity={importResult.ok ? "success" : "error"}>{importResult.text}</Alert>
+              <>
+                <Alert
+                  severity={
+                    importResult.ok
+                      ? importResult.skippedCount > 0
+                        ? "warning"
+                        : "success"
+                      : "error"
+                  }
+                >
+                  {importResult.message}
+                </Alert>
+                {importResult.errors.length > 0 && (
+                  <Box sx={{ maxHeight: 180, overflow: "auto", borderRadius: 1.5, bgcolor: "action.hover", p: 1.25 }}>
+                    {importResult.errors.map((e, i) => (
+                      <Typography
+                        key={i}
+                        variant="caption"
+                        sx={{ display: "block", fontFamily: MONO_STACK, color: "error.main", wordBreak: "break-all", py: 0.15 }}
+                      >
+                        {e}
+                      </Typography>
+                    ))}
+                  </Box>
+                )}
+              </>
+            )}
+            {importVerify && !importVerifying && (
+              <Box>
+                <Typography variant="body2" sx={{ fontWeight: 600, mb: 0.5 }}>
+                  {importVerify.tables.length > 0
+                    ? `目标库现有 ${importVerify.tables.length} 张表（行数为估算值）`
+                    : "目标库当前没有任何表"}
+                </Typography>
+                {importVerify.missing.length > 0 && (
+                  <Alert severity="warning" sx={{ mb: 1 }}>
+                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                      {importVerify.missing.length} 张脚本中的表未成功创建，导入可能不完整：
+                    </Typography>
+                    <Typography variant="caption" sx={{ fontFamily: MONO_STACK, wordBreak: "break-all" }}>
+                      {importVerify.missing.join("、")}
+                    </Typography>
+                  </Alert>
+                )}
+                {importVerify.tables.length > 0 && (
+                  <Box sx={{ maxHeight: 200, overflow: "auto", borderRadius: 1.5, bgcolor: "action.hover", p: 1.25 }}>
+                    {importVerify.tables.map((t) => (
+                      <Stack key={t.name} direction="row" justifyContent="space-between" sx={{ py: 0.2 }}>
+                        <Typography variant="caption" sx={{ fontFamily: MONO_STACK, wordBreak: "break-all" }}>
+                          {t.name}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0, pl: 1.5 }}>
+                          {t.rows ? `${t.rows} 行` : "—"}
+                        </Typography>
+                      </Stack>
+                    ))}
+                  </Box>
+                )}
+              </Box>
             )}
           </Stack>
         </DialogContent>
