@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { MONO_STACK } from "../theme";
 import {
   Alert,
   Box,
@@ -243,7 +244,7 @@ export default function MysqlTablePanel({
         </Stack>
         {ddl && (
           <Paper variant="outlined" sx={{ p: 1.5, bgcolor: "action.hover", maxHeight: 220, overflow: "auto" }}>
-            <Typography component="pre" sx={{ fontFamily: "monospace", fontSize: 12, whiteSpace: "pre-wrap", m: 0 }}>
+            <Typography component="pre" sx={{ fontFamily: MONO_STACK, fontSize: 12, whiteSpace: "pre-wrap", m: 0 }}>
               {ddl}
             </Typography>
           </Paper>
@@ -268,7 +269,7 @@ export default function MysqlTablePanel({
                 {(schema.rows ?? []).map((r, ri) => (
                   <TableRow key={ri} hover>
                     {r.map((cell, ci) => (
-                      <TableCell key={ci} sx={{ fontFamily: ci <= 1 ? "monospace" : undefined }}>
+                      <TableCell key={ci} sx={{ fontFamily: ci <= 1 ? MONO_STACK : undefined }}>
                         {cell}
                       </TableCell>
                     ))}
@@ -395,7 +396,7 @@ export default function MysqlTablePanel({
                     <TableCell
                       key={c}
                       sortDirection={sort?.col === c ? (sort.dir === "asc" ? "asc" : "desc") : false}
-                      sx={{ fontWeight: 700, fontFamily: "monospace", whiteSpace: "nowrap" }}
+                      sx={{ fontWeight: 700, fontFamily: MONO_STACK, whiteSpace: "nowrap" }}
                     >
                       <Stack direction="row" spacing={0.5} alignItems="center" sx={{ cursor: "pointer" }} onClick={() => toggleSort(c)}>
                         {c}
@@ -418,7 +419,7 @@ export default function MysqlTablePanel({
                       <TableCell
                         key={ci}
                         sx={{
-                          fontFamily: "monospace",
+                          fontFamily: MONO_STACK,
                           color: cell === "NULL" ? "text.disabled" : undefined,
                           whiteSpace: "nowrap",
                           maxWidth: 320,
@@ -523,13 +524,13 @@ export default function MysqlTablePanel({
               {(detail?.columns ?? []).map((c, i) => (
                 <TableRow key={c}>
                   <TableCell
-                    sx={{ width: 170, fontWeight: 700, fontFamily: "monospace", verticalAlign: "top" }}
+                    sx={{ width: 170, fontWeight: 700, fontFamily: MONO_STACK, verticalAlign: "top" }}
                   >
                     {c}
                   </TableCell>
                   <TableCell
                     sx={{
-                      fontFamily: "monospace",
+                      fontFamily: MONO_STACK,
                       whiteSpace: "pre-wrap",
                       wordBreak: "break-all",
                       color: detail?.row[i] === "NULL" ? "text.disabled" : undefined,

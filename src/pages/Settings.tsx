@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Alert, Button, Divider, MenuItem, Paper, Select, Snackbar, Stack, Table, TableBody, TableCell, TableRow, TextField, Typography } from "@mui/material";
+import { MONO_STACK } from "../theme";
 import { Tune, Storage, Info, FolderOpen } from "@mui/icons-material";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
@@ -133,7 +134,7 @@ export default function Settings() {
               <TableBody>
                 {scan.files.map((f) => (
                   <TableRow key={f.path}>
-                    <TableCell sx={{ fontFamily: "monospace", fontSize: 12, py: 0.5 }}>{f.fileName}</TableCell>
+                    <TableCell sx={{ fontFamily: MONO_STACK, fontSize: 12, py: 0.5 }}>{f.fileName}</TableCell>
                     <TableCell align="right" sx={{ py: 0.5, whiteSpace: "nowrap" }}>
                       {f.target ? `识别为 ${f.target}` : "未识别"}
                       {f.inConventionDir && (
@@ -290,13 +291,13 @@ export default function Settings() {
             content: (
               <Paper variant="outlined" sx={{ overflow: "hidden" }}>
                 <SettingRow label="版本" description="DFY 运维平台">
-                  <Typography variant="body2" sx={{ fontFamily: "monospace" }}>
+                  <Typography variant="body2" sx={{ fontFamily: MONO_STACK }}>
                     0.1.0
                   </Typography>
                 </SettingRow>
                 <Divider />
                 <SettingRow label="运维 API 地址" description="内嵌 Axum 后端，仅监听本机回环地址，外部不可达">
-                  <Typography variant="body2" sx={{ fontFamily: "monospace" }}>
+                  <Typography variant="body2" sx={{ fontFamily: MONO_STACK }}>
                     127.0.0.1:18721
                   </Typography>
                 </SettingRow>

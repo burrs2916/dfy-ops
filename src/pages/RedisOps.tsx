@@ -48,6 +48,7 @@ import ChevronRightRoundedIcon from "@mui/icons-material/ChevronRightRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
 import CircularProgress from "@mui/material/CircularProgress";
 import { api } from "../api";
+import { MONO_STACK } from "../theme";
 import type { RedisKeyDetail, RedisKeyItem, RedisOverview } from "../types";
 
 const btnSx = { textTransform: "none" as const, whiteSpace: "nowrap" as const };
@@ -109,7 +110,7 @@ function KindBadge({ kind }: { kind: string }) {
           color: "primary.main",
           fontSize: 10,
           fontWeight: 700,
-          fontFamily: "monospace",
+          fontFamily: MONO_STACK,
           letterSpacing: 0.3,
           lineHeight: 1.6,
           flexShrink: 0,
@@ -154,7 +155,11 @@ function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string
         <Typography variant="caption" color="text.secondary" noWrap sx={{ display: "block" }}>
           {label}
         </Typography>
-        <Typography variant="h6" sx={{ fontWeight: 700, lineHeight: 1.25 }} noWrap>
+        <Typography
+          variant="h6"
+          sx={{ fontWeight: 700, lineHeight: 1.25, fontVariantNumeric: "tabular-nums" }}
+          noWrap
+        >
           {value}
         </Typography>
       </Box>
@@ -444,7 +449,7 @@ export default function RedisOps({
         </Box>
         {connChip}
         <Tooltip title="平台托管的 Redis 连接端点（在连接配置中修改）">
-          <Typography variant="body2" sx={{ fontFamily: "monospace", color: "text.secondary" }}>
+          <Typography variant="body2" sx={{ fontFamily: MONO_STACK, color: "text.secondary" }}>
             {cred.host}:{cred.port}
           </Typography>
         </Tooltip>
@@ -614,7 +619,7 @@ export default function RedisOps({
                 }}
               >
                 <KindBadge kind={item.kind} />
-                <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0, fontFamily: "monospace" }}>
+                <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0, fontFamily: MONO_STACK }}>
                   {item.name}
                 </Typography>
                 {item.ttl > 0 && (
@@ -703,7 +708,7 @@ export default function RedisOps({
                     variant="subtitle1"
                     noWrap
                     title={detail.name}
-                    sx={{ fontWeight: 700, fontFamily: "monospace", flex: 1, minWidth: 0 }}
+                    sx={{ fontWeight: 700, fontFamily: MONO_STACK, flex: 1, minWidth: 0 }}
                   >
                     {detail.name}
                   </Typography>
@@ -782,7 +787,7 @@ export default function RedisOps({
                   <TableBody>
                     {detail.rows.map(([k, v], i) => (
                       <TableRow key={i}>
-                        <TableCell sx={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+                        <TableCell sx={{ fontFamily: MONO_STACK, wordBreak: "break-all" }}>
                           <Tooltip title={k} enterDelay={400}>
                             <span>{k}</span>
                           </Tooltip>
@@ -803,7 +808,7 @@ export default function RedisOps({
                               sx={{
                                 flex: 1,
                                 minWidth: 0,
-                                fontFamily: "monospace",
+                                fontFamily: MONO_STACK,
                                 fontSize: "0.8125rem",
                                 whiteSpace: "pre-wrap",
                                 wordBreak: "break-all",

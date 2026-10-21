@@ -1,0 +1,40 @@
+/* 全局视觉细节：滚动条 / 选中色 / 文字渲染 —— 精致感的基础层 */
+
+/* 细滚动条：Windows 默认滚动条粗大突兀，统一为 9px 圆角悬浮式 */
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(30, 37, 48, 0.18);
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(30, 37, 48, 0.34);
+}
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 文本选中色：品牌青 */
+::selection {
+  background: rgba(13, 148, 136, 0.22);
+}
+
+/* 文字渲染：细字重环境下开启抗锯齿，小字号更清晰 */
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* 数字场景统一等宽数字（表格/指标卡/日志），列对齐更专业 */
+.MuiTableCell-root,
+.MuiChip-root {
+  font-variant-numeric: tabular-nums;
+}

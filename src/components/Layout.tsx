@@ -1,16 +1,40 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { AppBar, Box, CssBaseline, Toolbar, Typography, Button } from "@mui/material";
 import {
-  AppBar,
-  Box,
-  CssBaseline,
-  Toolbar,
-  Typography,
-  Button,
-} from "@mui/material";
-import { Settings as SettingsIcon, AccountTree, SmartToy } from "@mui/icons-material";
+  Settings as SettingsIcon,
+  AccountTree,
+  SmartToy,
+  DashboardRounded,
+  BuildCircleRounded,
+  TuneRounded,
+} from "@mui/icons-material";
 import { NavLink, Outlet } from "react-router-dom";
 import TitleBar from "./TitleBar";
+
+/** 顶部导航按钮统一样式：胶囊激活态 + 平滑过渡 */
+const navBtn = {
+  textTransform: "none" as const,
+  fontWeight: 600 as const,
+  borderRadius: 2,
+  px: 1.75,
+  py: 0.6,
+  transition: "background-color .15s ease",
+  "&:hover": { bgcolor: "rgba(255,255,255,0.12)" },
+  "&.active": {
+    bgcolor: "rgba(255,255,255,0.18)",
+    boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.25)",
+  },
+};
+
+const NAV_ITEMS = [
+  { to: "/", label: "服务总览", icon: <DashboardRounded /> },
+  { to: "/env", label: "修复中心", icon: <BuildCircleRounded /> },
+  { to: "/ops", label: "运维中心", icon: <TuneRounded /> },
+  { to: "/topology", label: "依赖拓扑", icon: <AccountTree /> },
+  { to: "/ai", label: "AI助手", icon: <SmartToy /> },
+  { to: "/settings", label: "设置", icon: <SettingsIcon /> },
+];
 
 export default function Layout() {
   // 仅 Windows 渲染自绘标题栏（Rust 侧该平台已关闭系统装饰）；
@@ -26,8 +50,12 @@ export default function Layout() {
     <Box sx={{ display: "flex", flexDirection: "column", height: "100vh" }}>
       <CssBaseline />
       {customTitlebar && <TitleBar />}
-      <AppBar position="static" elevation={0}>
-        <Toolbar>
+      <AppBar
+        position="static"
+        elevation={0}
+        sx={{ background: "linear-gradient(100deg, #0C8F84 0%, #0D9488 42%, #0EA5E9 100%)" }}
+      >
+        <Toolbar sx={{ minHeight: { xs: 56 } }}>
           <Box
             component="img"
             src="/logo.png"
@@ -44,86 +72,19 @@ export default function Layout() {
               boxShadow: 1,
             }}
           />
-          <Typography variant="h6" sx={{ fontWeight: 600, mr: 3 }}>
+          <Typography variant="h6" sx={{ fontWeight: 700, mr: 3, letterSpacing: 0.3 }}>
             DFY运维平台
           </Typography>
-          <Box sx={{ display: "flex", gap: 1 }}>
-            <Button
-              component={NavLink}
-              to="/"
-              color="inherit"
-              sx={{
-                textTransform: "none",
-                "&.active": { bgcolor: "rgba(255,255,255,0.16)" },
-              }}
-            >
-              服务总览
-            </Button>
-            <Button
-              component={NavLink}
-              to="/env"
-              color="inherit"
-              sx={{
-                textTransform: "none",
-                "&.active": { bgcolor: "rgba(255,255,255,0.16)" },
-              }}
-            >
-              修复中心
-            </Button>
-            <Button
-              component={NavLink}
-              to="/ops"
-              color="inherit"
-              sx={{
-                textTransform: "none",
-                "&.active": { bgcolor: "rgba(255,255,255,0.16)" },
-              }}
-            >
-              运维中心
-            </Button>
-            <Button
-              component={NavLink}
-              to="/topology"
-              color="inherit"
-              startIcon={<AccountTree />}
-              sx={{
-                textTransform: "none",
-                "&.active": { bgcolor: "rgba(255,255,255,0.16)" },
-              }}
-            >
-              依赖拓扑
-            </Button>
-            <Button
-              component={NavLink}
-              to="/ai"
-              color="inherit"
-              startIcon={<SmartToy />}
-              sx={{
-                textTransform: "none",
-                "&.active": { bgcolor: "rgba(255,255,255,0.16)" },
-              }}
-            >
-              AI助手
-            </Button>
-            <Button
-              component={NavLink}
-              to="/settings"
-              color="inherit"
-              startIcon={<SettingsIcon />}
-              sx={{
-                textTransform: "none",
-                "&.active": { bgcolor: "rgba(255,255,255,0.16)" },
-              }}
-            >
-              设置
-            </Button>
+          <Box sx={{ display: "flex", gap: 0.5 }}>
+            {NAV_ITEMS.map((item) => (
+              <Button key={item.to} component={NavLink} to={item.to} color="inherit" startIcon={item.icon} sx={navBtn}>
+                {item.label}
+              </Button>
+            ))}
           </Box>
         </Toolbar>
       </AppBar>
-      <Box
-        component="main"
-        sx={{ flex: 1, overflow: "auto", p: 3, bgcolor: "#f5f6f8" }}
-      >
+      <Box component="main" sx={{ flex: 1, overflow: "auto", p: 3, bgcolor: "#f4f6f8" }}>
         <Outlet />
       </Box>
     </Box>

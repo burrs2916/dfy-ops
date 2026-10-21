@@ -29,24 +29,43 @@ export const theme = createTheme({
   shape: { borderRadius: 8 },
   typography: {
     fontFamily: FONT_STACK,
-    h6: { fontSize: "1.125rem", fontWeight: 700, letterSpacing: 0.2 },
-    subtitle1: { fontSize: "0.95rem", fontWeight: 700, lineHeight: 1.4 },
-    subtitle2: { fontSize: "0.85rem", fontWeight: 600 },
-    body1: { fontSize: "0.875rem", lineHeight: 1.55 },
-    body2: { fontSize: "0.8125rem", lineHeight: 1.55 },
-    caption: { fontSize: "0.75rem", letterSpacing: 0.1 },
-    button: { textTransform: "none", fontWeight: 600, fontSize: "0.8125rem" },
+    // 中文界面适度字距（0.1~0.3px）提升精致感；标题 700 加粗、说明文字 13px
+    h6: { fontSize: "1.125rem", fontWeight: 700, letterSpacing: 0.3 },
+    subtitle1: { fontSize: "0.95rem", fontWeight: 700, lineHeight: 1.4, letterSpacing: 0.2 },
+    subtitle2: { fontSize: "0.85rem", fontWeight: 600, letterSpacing: 0.1 },
+    body1: { fontSize: "0.875rem", lineHeight: 1.55, letterSpacing: 0.1 },
+    body2: { fontSize: "0.8125rem", lineHeight: 1.55, letterSpacing: 0.1 },
+    caption: { fontSize: "0.75rem", letterSpacing: 0.2 },
+    // 中文分组标题：overline 默认全大写+大字距对中文无意义，收敛为加粗小标
+    overline: {
+      fontSize: "0.78rem",
+      fontWeight: 700,
+      letterSpacing: 1,
+      textTransform: "none",
+      lineHeight: 1.6,
+    },
+    button: { textTransform: "none", fontWeight: 600, fontSize: "0.8125rem", letterSpacing: 0.2 },
   },
   components: {
-    // ===== 按钮：统一圆角/内边距/字重，contained 悬停带品牌色投影 =====
+    // ===== 按钮：统一圆角/内边距/字重；contained 悬停带品牌投影，outlined 统一淡边框 =====
     MuiButton: {
       defaultProps: { disableElevation: true },
       styleOverrides: {
         root: { borderRadius: 8, paddingInline: 14 },
-        sizeSmall: { paddingInline: 10 },
+        sizeSmall: { paddingInline: 10, fontSize: "0.78rem" },
         containedPrimary: {
           boxShadow: "none",
           "&:hover": { boxShadow: `0 2px 8px ${alpha("#0D9488", 0.35)}` },
+        },
+        outlined: {
+          borderColor: "rgba(30, 37, 48, 0.18)",
+          "&:hover": {
+            borderColor: alpha("#0D9488", 0.55),
+            backgroundColor: alpha("#0D9488", 0.04),
+          },
+        },
+        text: {
+          "&:hover": { backgroundColor: alpha("#0D9488", 0.06) },
         },
       },
     },
@@ -115,10 +134,22 @@ export const theme = createTheme({
         root: { textTransform: "none", fontWeight: 600, fontSize: "0.85rem", minHeight: 42 },
       },
     },
-    // ===== 卡片：去 MUI 灰纹理，统一圆角 =====
+    // ===== 卡片：去 MUI 灰纹理，柔和双层小阴影（克制、不压内容）=====
     MuiPaper: {
       styleOverrides: {
-        root: { backgroundImage: "none", borderRadius: 10 },
+        root: {
+          backgroundImage: "none",
+          borderRadius: 10,
+        },
+        elevation1: {
+          boxShadow: "0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06)",
+        },
+      },
+    },
+    // ===== 页签：指示器圆角短条，更轻盈 =====
+    MuiTabs: {
+      styleOverrides: {
+        indicator: { borderRadius: "3px 3px 0 0", height: 3 },
       },
     },
     // ===== 弹窗/提示 =====

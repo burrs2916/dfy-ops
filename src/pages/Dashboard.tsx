@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { MONO_STACK } from "../theme";
 import {
   Alert,
   Box,
@@ -397,7 +398,7 @@ export default function Dashboard() {
                         <Typography
                           component="code"
                           variant="caption"
-                          sx={{ flexGrow: 1, fontFamily: "monospace", wordBreak: "break-all" }}
+                          sx={{ flexGrow: 1, fontFamily: MONO_STACK, wordBreak: "break-all" }}
                         >
                           {f.fixHint}
                         </Typography>

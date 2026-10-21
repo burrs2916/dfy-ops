@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { MONO_STACK } from "../theme";
 import {
   Alert,
   Box,
@@ -572,7 +573,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
               </Tooltip>
             )}
           </Stack>
-          <Typography variant="body2" color="text.secondary" sx={{ fontFamily: "monospace" }}>
+          <Typography variant="body2" color="text.secondary" sx={{ fontFamily: MONO_STACK }}>
             {ov ? `${ov.user}@${ov.host}:${ov.port}` : ""}
           </Typography>
           <Box sx={{ flex: 1 }} />
@@ -709,7 +710,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                         primary={d}
                         primaryTypographyProps={{
                           variant: "body2",
-                          sx: { fontWeight: sysDbs.has(d) ? 400 : 600, fontFamily: "monospace" },
+                          sx: { fontWeight: sysDbs.has(d) ? 400 : 600, fontFamily: MONO_STACK },
                         }}
                         secondary={sysDbs.has(d) ? "系统库" : undefined}
                       />
@@ -768,7 +769,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                                 <Typography
                                   variant="body2"
                                   sx={{
-                                    fontFamily: "monospace",
+                                    fontFamily: MONO_STACK,
                                     minWidth: 0,
                                     overflow: "hidden",
                                     textOverflow: "ellipsis",
@@ -829,7 +830,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
               <Box sx={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", minWidth: 0 }}>
                 {/* 表工具条：当前表 + 维护操作 */}
                 <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.5 }} flexWrap="wrap" rowGap={1}>
-                  <Chip size="small" icon={<StorageIcon />} label={`${db}.${table}`} sx={{ fontFamily: "monospace" }} />
+                  <Chip size="small" icon={<StorageIcon />} label={`${db}.${table}`} sx={{ fontFamily: MONO_STACK }} />
                   <Box sx={{ flex: 1 }} />
                   <Button size="small" startIcon={<BuildCircleIcon />} onClick={() => tableAction("optimize")} sx={btnSx}>
                     优化
@@ -864,7 +865,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                     }
                   }}
                   placeholder={db ? `在 ${db} 中执行，如 SELECT * FROM 表名 LIMIT 100` : "输入 SQL（选中左侧库后自动在该库执行）"}
-                  sx={{ "& .MuiInputBase-input": { fontFamily: "monospace" } }}
+                  sx={{ "& .MuiInputBase-input": { fontFamily: MONO_STACK } }}
                 />
                 <Stack direction="row" spacing={1} alignItems="center" flexWrap="wrap" rowGap={1}>
                   <Button size="small" variant="contained" disabled={querying || !sql.trim()} onClick={() => void execSql()} sx={btnSx}>
@@ -893,7 +894,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                         </MenuItem>
                         {history.map((h, i) => (
                           <MenuItem key={i} value={h} sx={{ maxWidth: 420 }}>
-                            <Typography variant="caption" sx={{ fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis" }}>
+                            <Typography variant="caption" sx={{ fontFamily: MONO_STACK, overflow: "hidden", textOverflow: "ellipsis" }}>
                               {h}
                             </Typography>
                           </MenuItem>
@@ -914,7 +915,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                       <TableHead>
                         <TableRow>
                           {result.columns!.map((c, i) => (
-                            <TableCell key={i} sx={{ fontWeight: 700, fontFamily: "monospace" }}>
+                            <TableCell key={i} sx={{ fontWeight: 700, fontFamily: MONO_STACK }}>
                               {c}
                             </TableCell>
                           ))}
@@ -927,7 +928,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                               <TableCell
                                 key={ci}
                                 sx={{
-                                  fontFamily: "monospace",
+                                  fontFamily: MONO_STACK,
                                   color: cell === "NULL" ? "text.disabled" : undefined,
                                   whiteSpace: "nowrap",
                                   maxWidth: 320,
@@ -969,7 +970,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                   users!.map((u) => (
                     <Paper key={`${u.user}@${u.host}`} variant="outlined" sx={{ p: 1.5 }}>
                       <Stack direction="row" spacing={1} alignItems="center">
-                        <Typography variant="body2" sx={{ fontWeight: 600, fontFamily: "monospace" }}>
+                        <Typography variant="body2" sx={{ fontWeight: 600, fontFamily: MONO_STACK }}>
                           {u.user}@{u.host}
                         </Typography>
                         {u.user === "root" && <Chip size="small" label="平台管理员" />}
@@ -1033,7 +1034,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                                 variant="caption"
                                 sx={{
                                   display: "block",
-                                  fontFamily: "monospace",
+                                  fontFamily: MONO_STACK,
                                   color: "text.secondary",
                                   whiteSpace: "nowrap",
                                   overflow: "hidden",
@@ -1085,7 +1086,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                                 <TableCell
                                   key={ci}
                                   sx={{
-                                    fontFamily: "monospace",
+                                    fontFamily: MONO_STACK,
                                     whiteSpace: "nowrap",
                                     maxWidth: 280,
                                     overflow: "hidden",
@@ -1261,7 +1262,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                       <TableBody>
                         {backups.map((f) => (
                           <TableRow key={f.file} hover>
-                            <TableCell sx={{ fontFamily: "monospace" }}>{f.file}</TableCell>
+                            <TableCell sx={{ fontFamily: MONO_STACK }}>{f.file}</TableCell>
                             <TableCell>{f.sizeKb} KB</TableCell>
                             <TableCell>{new Date(f.modified * 1000).toLocaleString()}</TableCell>
                             <TableCell>
@@ -1295,7 +1296,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                     <Tooltip title={iniPath}>
                       <Typography
                         variant="caption"
-                        sx={{ fontFamily: "monospace", color: "text.secondary", maxWidth: 380, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                        sx={{ fontFamily: MONO_STACK, color: "text.secondary", maxWidth: 380, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                       >
                         {iniPath}
                       </Typography>
@@ -1350,7 +1351,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                       disabled={iniLoading || !iniPath}
                       onChange={(e) => setIniContent(e.target.value)}
                       placeholder={iniLoading ? "加载中…" : ""}
-                      sx={{ "& .MuiInputBase-input": { fontFamily: "monospace", fontSize: 13 } }}
+                      sx={{ "& .MuiInputBase-input": { fontFamily: MONO_STACK, fontSize: 13 } }}
                     />
                   </>
                 )}
@@ -1682,7 +1683,7 @@ function UserGrantButton({
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 0.5 }}>
             <Typography variant="body2" color="text.secondary">
-              目标账号 <Typography component="span" sx={{ fontFamily: "monospace", fontWeight: 600 }}>{user}@{host}</Typography>
+              目标账号 <Typography component="span" sx={{ fontFamily: MONO_STACK, fontWeight: 600 }}>{user}@{host}</Typography>
               。先撤销现有全部授权，再按下方选择重新授权，密码保持不变。
             </Typography>
             <FormControl size="small" fullWidth>
@@ -1780,7 +1781,7 @@ function UserPasswordButton({
         <DialogContent>
           <Stack spacing={2} sx={{ mt: 0.5 }}>
             <Typography variant="body2" color="text.secondary">
-              目标账号 <Typography component="span" sx={{ fontFamily: "monospace", fontWeight: 600 }}>{user}@{host}</Typography>
+              目标账号 <Typography component="span" sx={{ fontFamily: MONO_STACK, fontWeight: 600 }}>{user}@{host}</Typography>
               ，由 root 执行改密，无需旧密码。使用该账号的应用需同步更新连接密码。
             </Typography>
             <TextField
@@ -1864,8 +1865,8 @@ function VariableRow({
 
   return (
     <TableRow hover>
-      <TableCell sx={{ fontFamily: "monospace", fontWeight: 600, whiteSpace: "nowrap" }}>{item.name}</TableCell>
-      <TableCell sx={{ fontFamily: "monospace", maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <TableCell sx={{ fontFamily: MONO_STACK, fontWeight: 600, whiteSpace: "nowrap" }}>{item.name}</TableCell>
+      <TableCell sx={{ fontFamily: MONO_STACK, maxWidth: 280, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         <Tooltip title={item.value} disableHoverListener={editing}>
           <span>{item.value}</span>
         </Tooltip>

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
+import { MONO_STACK } from "../theme";
 import {
   Alert,
   Box,
@@ -47,7 +48,7 @@ function ConfigRow({
         component="code"
         sx={{
           flex: 1,
-          fontFamily: "monospace",
+          fontFamily: MONO_STACK,
           fontSize: 12,
           bgcolor: "rgba(0,0,0,0.04)",
           p: "4px 8px",
@@ -390,7 +391,7 @@ export default function ServiceDetail() {
                         component="code"
                         sx={{
                           flex: 1,
-                          fontFamily: "monospace",
+                          fontFamily: MONO_STACK,
                           fontSize: 11,
                           bgcolor: "rgba(0,0,0,0.04)",
                           p: "3px 6px",
@@ -454,7 +455,7 @@ export default function ServiceDetail() {
               maxHeight: 360,
               overflow: "auto",
               whiteSpace: "pre-wrap",
-              fontFamily: "monospace",
+              fontFamily: MONO_STACK,
             }}
           >
             {logs
@@ -509,7 +510,7 @@ export default function ServiceDetail() {
               maxHeight: 420,
               overflow: "auto",
               whiteSpace: "pre-wrap",
-              fontFamily: "monospace",
+              fontFamily: MONO_STACK,
             }}
           >
             {buildLogs || "（暂无构建输出）"}

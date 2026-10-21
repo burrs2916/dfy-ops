@@ -74,17 +74,37 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
   return (
     <Card
       variant="outlined"
-      sx={{ height: "100%", cursor: "pointer" }}
+      sx={{
+        height: "100%",
+        cursor: "pointer",
+        transition: "transform .18s ease, box-shadow .18s ease, border-color .18s ease",
+        "&:hover": {
+          transform: "translateY(-2px)",
+          boxShadow: "0 4px 12px rgba(13, 148, 136, 0.12)",
+          borderColor: "rgba(13, 148, 136, 0.45)",
+        },
+      }}
       onClick={() => navigate(`/service/${s.id}`)}
     >
-      <CardContent sx={{ height: "100%" }}>
+      <CardContent sx={{ height: "100%", "&:last-child": { pb: 2 } }}>
           <Stack direction="row" justifyContent="space-between" alignItems="center">
-            <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+            <Typography variant="subtitle1" sx={{ fontWeight: 700 }}>
               {s.name}
             </Typography>
             <Chip size="small" label={KIND_LABEL[s.kind] ?? s.kind} />
           </Stack>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 1 }}>
+          <Typography
+            variant="body2"
+            color="text.secondary"
+            sx={{
+              mt: 1,
+              display: "-webkit-box",
+              WebkitLineClamp: 2,
+              WebkitBoxOrient: "vertical",
+              overflow: "hidden",
+              minHeight: 40,
+            }}
+          >
             {s.description}
           </Typography>
           <Stack

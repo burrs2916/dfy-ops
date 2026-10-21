@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MONO_STACK } from "../theme";
 import {
   Alert,
   Badge,
@@ -335,7 +336,7 @@ function ServiceEnvSection({
                       <Typography
                         variant="body2"
                         sx={{
-                          fontFamily: "monospace",
+                          fontFamily: MONO_STACK,
                           color: STATUS_HEX[it.status],
                           wordBreak: "break-all",
                         }}
@@ -350,7 +351,7 @@ function ServiceEnvSection({
                           <Typography
                             variant="caption"
                             sx={{
-                              fontFamily: "monospace",
+                              fontFamily: MONO_STACK,
                               color: "text.primary",
                               wordBreak: "break-all",
                               flex: 1,
@@ -787,7 +788,7 @@ function RepairCenter({
             <Chip size="small" color="warning" label="PATH 缺失" />
           )}
           {t === "java" && st.installDir && (
-            <Typography variant="caption" sx={{ fontFamily: "monospace", color: "text.secondary", wordBreak: "break-all", width: "100%" }}>
+            <Typography variant="caption" sx={{ fontFamily: MONO_STACK, color: "text.secondary", wordBreak: "break-all", width: "100%" }}>
               {st.installDir}
             </Typography>
           )}
@@ -876,7 +877,7 @@ function RepairCenter({
       statusLine = (
         <Stack direction="row" spacing={1} alignItems="center" sx={{ minWidth: 0 }}>
           <Chip size="small" color="warning" label="残留目录" />
-          <Typography variant="caption" sx={{ fontFamily: "monospace", color: "text.secondary", wordBreak: "break-all" }}>
+          <Typography variant="caption" sx={{ fontFamily: MONO_STACK, color: "text.secondary", wordBreak: "break-all" }}>
             {st.installDir}（未注册服务，可清理后重装）
           </Typography>
         </Stack>
@@ -1010,7 +1011,7 @@ function RepairCenter({
                 纯远程部署（本机不安装）：检测目标为托管连接端点
                 <Typography
                   component="span"
-                  sx={{ fontFamily: "monospace", fontWeight: 700, color: "text.primary", mx: 0.5 }}
+                  sx={{ fontFamily: MONO_STACK, fontWeight: 700, color: "text.primary", mx: 0.5 }}
                 >
                   {redisEndpoint ? `${redisEndpoint.host}:${redisEndpoint.port}` : "…"}
                 </Typography>
@@ -1264,7 +1265,7 @@ function RepairCenter({
                         </Typography>
                       </TableCell>
                       <TableCell>
-                        <Typography variant="body2" sx={{ fontFamily: "monospace", wordBreak: "break-all", color: "text.secondary" }}>
+                        <Typography variant="body2" sx={{ fontFamily: MONO_STACK, wordBreak: "break-all", color: "text.secondary" }}>
                           {item.actual}
                         </Typography>
                       </TableCell>
@@ -1368,7 +1369,7 @@ function RepairCenter({
               {s.command && (
                 <Typography
                   variant="caption"
-                  sx={{ display: "block", mt: 0.5, fontFamily: "monospace", wordBreak: "break-all", color: "text.primary" }}
+                  sx={{ display: "block", mt: 0.5, fontFamily: MONO_STACK, wordBreak: "break-all", color: "text.primary" }}
                 >
                   {s.command}
                 </Typography>
@@ -1409,7 +1410,7 @@ function RepairCenter({
             该命令将在本机以管理员权限执行（请在随后弹出的 UAC 窗口确认）：
           </Typography>
           <Paper variant="outlined" sx={{ p: 1.5, mt: 1, bgcolor: "action.hover" }}>
-            <Typography variant="body2" sx={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+            <Typography variant="body2" sx={{ fontFamily: MONO_STACK, wordBreak: "break-all" }}>
               {execCommand}
             </Typography>
           </Paper>
@@ -1449,7 +1450,7 @@ function RepairCenter({
                 安装目录：
               </Typography>
               <Paper variant="outlined" sx={{ p: 1.5, mt: 1, bgcolor: "action.hover" }}>
-                <Typography variant="body2" sx={{ fontFamily: "monospace", wordBreak: "break-all" }}>
+                <Typography variant="body2" sx={{ fontFamily: MONO_STACK, wordBreak: "break-all" }}>
                   {uninstallTarget?.installDir}
                 </Typography>
               </Paper>
@@ -1792,7 +1793,7 @@ export default function EnvCheck() {
                 key={`${repairJob.logs.length}-${i}`}
                 variant="caption"
                 sx={{
-                  fontFamily: "monospace",
+                  fontFamily: MONO_STACK,
                   display: "block",
                   mt: i === 0 && arr.length === 3 ? 0.5 : 0.25,
                   wordBreak: "break-all",
