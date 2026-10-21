@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Box, IconButton, Typography } from "@mui/material";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { BRAND_GRADIENT } from "../theme";
 
 /** Windows 窗口三键的内联 SVG（贴原生风格细线图标，不引额外依赖） */
 function IconMinimize() {
@@ -96,7 +97,7 @@ export default function TitleBar() {
       sx={{
         height: 36,
         flexShrink: 0,
-        bgcolor: "primary.main",
+        background: BRAND_GRADIENT,
         display: "flex",
         alignItems: "stretch",
         justifyContent: "space-between",

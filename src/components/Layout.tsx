@@ -11,6 +11,7 @@ import {
 } from "@mui/icons-material";
 import { NavLink, Outlet } from "react-router-dom";
 import TitleBar from "./TitleBar";
+import { BRAND_GRADIENT } from "../theme";
 
 /** 顶部导航按钮统一样式：胶囊激活态 + 平滑过渡 */
 const navBtn = {
@@ -53,7 +54,10 @@ export default function Layout() {
       <AppBar
         position="static"
         elevation={0}
-        sx={{ background: "linear-gradient(100deg, #0C8F84 0%, #0D9488 42%, #0EA5E9 100%)" }}
+        sx={{
+          background: BRAND_GRADIENT,
+          borderRadius: 0,
+        }}
       >
         <Toolbar sx={{ minHeight: { xs: 56 } }}>
           <Box

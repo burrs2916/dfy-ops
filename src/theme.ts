@@ -9,6 +9,11 @@ const FONT_STACK =
 const MONO_STACK =
   '"Cascadia Code", "JetBrains Mono", Consolas, "SF Mono", Menlo, "Courier New", monospace';
 
+// 标题栏 / 顶栏共用品牌渐变：中间大段纯品牌青，两端仅做微弱的色温/亮度
+// 过渡（两侧向中间靠拢）——色差刻意收敛，避免拼接口出现明显断层。
+export const BRAND_GRADIENT =
+  "linear-gradient(90deg, #0C8E85 0%, #0D9488 42%, #0D9488 58%, #0E93A2 100%)";
+
 // 品牌青蓝主色（logo 渐变起点 #0D9488 → #0EA5E9）。success 也用品牌色：
 // 全项目不允许出现绿色系（用户明确要求），「成功」语义统一青蓝呈现。
 export const theme = createTheme({
