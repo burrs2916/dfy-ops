@@ -840,7 +840,7 @@ export default function RedisOps({
       </Box>
 
       {/* ===== 连接配置 ===== */}
-      <Dialog open={credOpen} onClose={() => setCredOpen(false)} maxWidth="xs" fullWidth>
+      <Dialog open={credOpen} onClose={() => setCredOpen(false)} maxWidth="sm" fullWidth>
         <DialogTitle sx={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 1 }}>
           <SettingsIcon color="primary" />
           连接配置

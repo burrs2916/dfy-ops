@@ -867,11 +867,12 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
 
       {/* ===== 主区块：CSS 隐藏挂载（停止服务不卸载，SQL 输入/结果/选中库保留） ===== */}
       <Box sx={{ display: running ? undefined : "none" }}>
-        <Stack direction="row" spacing={2} alignItems="flex-start">
+        {/* stretch 等高：左树跟随右侧工作区高度，避免窗口高时树下留白 */}
+        <Stack direction="row" spacing={2} alignItems="stretch">
           {/* ===== 左栏：Navicat 风格库表树（箭头展开 · 图标分层 · 悬浮操作） ===== */}
           <Paper
             variant="outlined"
-            sx={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column", maxHeight: 660 }}
+            sx={{ width: 300, flexShrink: 0, display: "flex", flexDirection: "column" }}
           >
             <Box sx={{ px: 2, pt: 1.5, pb: 1 }}>
               <Stack direction="row" spacing={1} alignItems="center">
