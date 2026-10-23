@@ -300,7 +300,7 @@ export function ServiceDiscoveryDialog({
                 <Typography variant="caption" color="text.secondary">
                   {summary}
                 </Typography>
-                <TableContainer sx={{ border: 1, borderColor: "divider", borderRadius: 1.5, maxHeight: 320 }}>
+                <TableContainer sx={{ border: 1, borderColor: "divider", borderRadius: 1, maxHeight: 320 }}>
                   <Table size="small" stickyHeader>
                     <TableHead>
                       <TableRow>

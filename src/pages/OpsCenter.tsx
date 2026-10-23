@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Box, Stack, Tab, Tabs, Typography } from "@mui/material";
+import { Box, Stack, Tab, Tabs } from "@mui/material";
 import { BoltOutlined, DnsOutlined, StorageOutlined } from "@mui/icons-material";
 import MySQLOps from "./MySQLOps";
 import RedisOps from "./RedisOps";
-import { RemoteServicesPanel } from "../components/RemoteServicesPanel";
+import RemoteServicesPanel from "../components/RemoteServicesPanel";
+import { PageHeader } from "../components/PageHeader";
 import { api } from "../api";
 import { useOpsStore } from "../store";
 
@@ -51,14 +52,10 @@ export default function OpsCenter() {
 
   return (
     <Stack spacing={2} sx={{ height: "100%", minHeight: 0 }}>
-      <Box sx={{ flexShrink: 0, mb: -0.5 }}>
-        <Typography variant="h5" sx={{ fontWeight: 700 }}>
-          运维中心
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          MySQL 与 Redis 的在线管理：表/数据/权限/SQL 查询、Key 浏览与 TTL 运维；远程部署集中配置虚拟机中间件地址
-        </Typography>
-      </Box>
+      <PageHeader
+        title="运维中心"
+        description="MySQL 与 Redis 的在线管理：表/数据/权限/SQL 查询、Key 浏览与 TTL 运维；远程部署集中配置虚拟机中间件地址"
+      />
 
       <Tabs
         value={subTab}

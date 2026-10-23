@@ -148,7 +148,7 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
   };
 
   return (
-    <Box sx={{ flex: 1, minHeight: 0, overflow: "auto", px: { xs: 1.5, sm: 3 }, py: 2 }}>
+    <Box sx={{ flex: 1, minHeight: 0, overflow: "auto" }}>
       {/* 页头：标题说明居左，扫描入口居右——主操作（改地址保存）在表内，扫描是辅助 */}
       <Stack
         direction={{ xs: "column", sm: "row" }}
@@ -211,7 +211,7 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
                     ...ROW_GRID,
                     px: 1.5,
                     py: 1.5,
-                    borderRadius: 1.5,
+                    borderRadius: 1,
                     border: "1px solid",
                     borderColor: isConfigured ? "divider" : "warning.main",
                     bgcolor: isConfigured ? "background.paper" : "rgba(186,117,23,0.05)",

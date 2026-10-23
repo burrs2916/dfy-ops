@@ -23,6 +23,7 @@ import { Close, ContentCopy, Download, Pause, PlayArrow, Refresh } from "@mui/ic
 import { useOpsStore, useAppSettingsStore } from "../store";
 import { ServiceCard } from "../components/ServiceCard";
 import ReadinessCard from "../components/ReadinessCard";
+import { PageHeader } from "../components/PageHeader";
 import { api } from "../api";
 import type { DiagnosisResponse } from "../types";
 
@@ -200,14 +201,11 @@ export default function Dashboard() {
 
   return (
     <Stack spacing={3}>
-      <Box>
-        <Stack direction="row" justifyContent="space-between" alignItems="center">
-          <Box>
-            <Typography variant="h5" sx={{ fontWeight: 700 }}>
-              服务总览
-            </Typography>
-          </Box>
-          <Stack direction="row" spacing={1} alignItems="center">
+      <PageHeader
+        title="服务总览"
+        description="全部服务的运行状态、环境健康与部署就绪度一屏总览；异常项有直达修复入口"
+        actions={
+          <>
             <Button variant="outlined" startIcon={<Refresh />} onClick={manualRefresh}>
               刷新
             </Button>
@@ -243,13 +241,13 @@ export default function Dashboard() {
             >
               一键诊断
             </Button>
-          </Stack>
-        </Stack>
-        <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: "block" }}>
-          共 {services.length} 个服务，{healthyCount} 个健康 · 实时刷新{pollingActive ? "中" : "已暂停"} · 上次更新{" "}
-          {lastUpdate ? lastUpdate.toLocaleTimeString("zh-CN") : "—"}
-        </Typography>
-      </Box>
+          </>
+        }
+      />
+      <Typography variant="caption" color="text.secondary" sx={{ mt: -1.5, mb: 0.5, display: "block" }}>
+        共 {services.length} 个服务，{healthyCount} 个健康 · 实时刷新{pollingActive ? "中" : "已暂停"} · 上次更新{" "}
+        {lastUpdate ? lastUpdate.toLocaleTimeString("zh-CN") : "—"}
+      </Typography>
 
       {!bootstrapped ? (
         <Card variant="outlined" sx={{ p: 2.5 }}>

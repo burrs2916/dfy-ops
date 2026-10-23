@@ -142,7 +142,7 @@ function StatCard({ icon, label, value }: { icon: React.ReactNode; label: string
         sx={{
           width: 38,
           height: 38,
-          borderRadius: 1.5,
+          borderRadius: 1,
           display: "flex",
           alignItems: "center",
           justifyContent: "center",

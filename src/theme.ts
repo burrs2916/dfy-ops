@@ -159,12 +159,18 @@ export const theme = createTheme({
         indicator: { borderRadius: "3px 3px 0 0", height: 3 },
       },
     },
-    // ===== 弹窗/提示 =====
+    // ===== 弹窗/提示：圆角与容器体系统一（10px 档），内边距节奏全局一致 =====
     MuiDialog: {
-      styleOverrides: { paper: { borderRadius: 12 } },
+      styleOverrides: { paper: { borderRadius: 10 } },
     },
     MuiDialogTitle: {
-      styleOverrides: { root: { fontSize: "1rem", fontWeight: 700 } },
+      styleOverrides: { root: { fontSize: "1rem", fontWeight: 700, px: 2.5, pt: 2.25, pb: 1.25 } },
+    },
+    MuiDialogContent: {
+      styleOverrides: { root: { px: 2.5, py: 1.5 } },
+    },
+    MuiDialogActions: {
+      styleOverrides: { root: { px: 2.5, py: 1.75 } },
     },
     MuiAlert: {
       styleOverrides: {

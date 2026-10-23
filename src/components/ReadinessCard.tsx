@@ -290,7 +290,7 @@ export default function ReadinessCard({
                 sx={{
                   px: 1.25,
                   py: 0.75,
-                  borderRadius: 1.5,
+                  borderRadius: 1,
                   bgcolor: a.severity === "error" ? "rgba(163,45,45,0.05)" : "rgba(186,117,23,0.05)",
                   border: 1,
                   borderColor: a.severity === "error" ? "rgba(163,45,45,0.18)" : "rgba(186,117,23,0.22)",

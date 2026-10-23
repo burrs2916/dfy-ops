@@ -1868,7 +1868,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                   {importResult.message}
                 </Alert>
                 {importResult.errors.length > 0 && (
-                  <Box sx={{ maxHeight: 180, overflow: "auto", borderRadius: 1.5, bgcolor: "action.hover", p: 1.25 }}>
+                  <Box sx={{ maxHeight: 180, overflow: "auto", borderRadius: 1, bgcolor: "action.hover", p: 1.25 }}>
                     {importResult.errors.map((e, i) => (
                       <Typography
                         key={i}
@@ -1900,7 +1900,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                   </Alert>
                 )}
                 {importVerify.tables.length > 0 && (
-                  <Box sx={{ maxHeight: 200, overflow: "auto", borderRadius: 1.5, bgcolor: "action.hover", p: 1.25 }}>
+                  <Box sx={{ maxHeight: 200, overflow: "auto", borderRadius: 1, bgcolor: "action.hover", p: 1.25 }}>
                     {importVerify.tables.map((t) => (
                       <Stack key={t.name} direction="row" justifyContent="space-between" sx={{ py: 0.2 }}>
                         <Typography variant="caption" sx={{ fontFamily: MONO_STACK, wordBreak: "break-all" }}>

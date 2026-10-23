@@ -97,7 +97,7 @@ export function SettingsLayout({
               selected={activeSection === section.key}
               onClick={() => scrollToSection(section.key)}
               sx={{
-                borderRadius: 1.5,
+                borderRadius: 1,
                 mb: 0.25,
                 py: 1,
                 "&.Mui-selected": {

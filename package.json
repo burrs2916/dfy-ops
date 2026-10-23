@@ -1,7 +1,7 @@
 {
   "name": "dfy-ops",
   "private": true,
-  "version": "0.2.2",
+  "version": "0.2.3",
   "type": "module",
   "description": "DFY运维平台 - 本地异构服务的智能运维控制台",
   "scripts": {
