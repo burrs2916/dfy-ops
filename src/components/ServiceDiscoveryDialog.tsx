@@ -19,6 +19,7 @@ import {
   TableHead,
   TableRow,
   Tooltip,
+  TextField,
   Typography,
 } from "@mui/material";
 import { Hub, Radar, TravelExplore } from "@mui/icons-material";
@@ -70,6 +71,8 @@ export function ServiceDiscoveryDialog({
 }: ServiceDiscoveryDialogProps) {
   const [adapters, setAdapters] = useState<NetworkAdapter[] | null>(null);
   const [cidr, setCidr] = useState("");
+  const [manualMode, setManualMode] = useState(false);
+  const [manualCidr, setManualCidr] = useState("");
   const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hosts, setHosts] = useState<DiscoveredHost[] | null>(null);
@@ -78,36 +81,54 @@ export function ServiceDiscoveryDialog({
   const [adopting, setAdopting] = useState(false);
 
   const targetText = targets.map((t) => TARGET_LABEL[t] ?? t).join("、");
+  // 生效网段：下拉模式取选中项，手动模式取输入框
+  const activeCidr = manualMode ? manualCidr.trim() : cidr;
 
   useEffect(() => {
     if (!open) return;
     setAdapters(null);
     setCidr("");
+    setManualMode(false);
+    setManualCidr("");
     setScanning(false);
     setError(null);
     setHosts(null);
     setSummary(null);
     setAdopted(null);
-    void api
-      .networkAdapters()
-      .then((r) => setAdapters(r.adapters))
-      .catch(() => setAdapters([]));
+    // 并行拉网卡列表与上次使用的网段：上次网段在网卡列表里则直接选中，
+    // 否则（网段变化后手填过的）切手动模式带入——用户改网段无需每次重填
+    void Promise.all([
+      api.networkAdapters().then((r) => r.adapters).catch(() => [] as NetworkAdapter[]),
+      api.scanConfig().then((r) => r.lastCidr).catch(() => ""),
+    ]).then(([list, last]) => {
+      setAdapters(list);
+      if (last) {
+        if (list.some((a) => a.cidr === last)) {
+          setCidr(last);
+        } else {
+          setManualMode(true);
+          setManualCidr(last);
+        }
+      }
+    });
   }, [open]);
 
   const scan = async () => {
-    if (!cidr || scanning) return;
+    if (!activeCidr || scanning) return;
     setScanning(true);
     setError(null);
     setHosts(null);
     setSummary(null);
     setAdopted(null);
     try {
-      const r = await api.discoverServices(cidr);
+      const r = await api.discoverServices(activeCidr);
       if (!r.ok) {
         setError(r.error ?? "扫描失败，请稍后重试");
       } else {
         setHosts(r.hosts ?? []);
         setSummary(`已扫描 ${r.scanned ?? 0} 台主机 · 耗时 ${((r.elapsedMs ?? 0) / 1000).toFixed(1)} 秒`);
+        // 扫描成功即记住该网段：网段变化后下次打开无需重填
+        void api.saveScanConfig(activeCidr).catch(() => undefined);
       }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -166,31 +187,74 @@ export function ServiceDiscoveryDialog({
               size="small"
               variant="outlined"
               startIcon={<TravelExplore />}
-              disabled={!cidr || scanning}
+              disabled={!activeCidr || scanning}
               onClick={() => void scan()}
               sx={{ whiteSpace: "nowrap", flexShrink: 0 }}
             >
               {scanning ? "扫描中…" : "开始扫描"}
             </Button>
-            <FormControl size="small" sx={{ flex: 1, minWidth: 0 }} disabled={scanning || adapters === null}>
-              <Select value={cidr} onChange={(e) => setCidr(e.target.value)} displayEmpty>
-                <MenuItem value="">
-                  <em>{adapters === null ? "正在读取本机网卡…" : "请选择本机网卡对应的网段…"}</em>
-                </MenuItem>
-                {adapters?.map((a, i) => (
-                  <MenuItem key={`${a.cidr}-${i}`} value={a.cidr}>
-                    {a.name} · {a.ip}（{a.cidr}，{a.hosts} 台主机）
+            {manualMode ? (
+              <TextField
+                size="small"
+                sx={{ flex: 1, minWidth: 0 }}
+                placeholder="手动输入网段，如 192.168.56.0/24"
+                value={manualCidr}
+                disabled={scanning}
+                onChange={(e) => setManualCidr(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void scan();
+                }}
+                InputProps={{
+                  endAdornment: (
+                    <Button
+                      size="small"
+                      onClick={() => {
+                        setManualMode(false);
+                        setManualCidr("");
+                      }}
+                      disabled={scanning}
+                      sx={{ whiteSpace: "nowrap", flexShrink: 0 }}
+                    >
+                      改选网卡
+                    </Button>
+                  ),
+                }}
+              />
+            ) : (
+              <FormControl size="small" sx={{ flex: 1, minWidth: 0 }} disabled={scanning || adapters === null}>
+                <Select
+                  value={cidr}
+                  onChange={(e) => {
+                    if (e.target.value === "__manual__") {
+                      setManualMode(true);
+                    } else {
+                      setCidr(e.target.value);
+                    }
+                  }}
+                  displayEmpty
+                >
+                  <MenuItem value="">
+                    <em>{adapters === null ? "正在读取本机网卡…" : "请选择本机网卡对应的网段…"}</em>
                   </MenuItem>
-                ))}
-              </Select>
-            </FormControl>
+                  {adapters?.map((a, i) => (
+                    <MenuItem key={`${a.cidr}-${i}`} value={a.cidr}>
+                      {a.name} · {a.ip}（{a.cidr}，{a.hosts} 台主机）
+                    </MenuItem>
+                  ))}
+                  <MenuItem value="__manual__" sx={{ borderTop: 1, borderColor: "divider" }}>
+                    <em>手动输入网段…</em>
+                  </MenuItem>
+                </Select>
+              </FormControl>
+            )}
           </Stack>
 
           {/* 引导核心：未选网段是流程缺口，明说缺什么、补完能做什么，而不是等报错 */}
-          {!cidr && (
+          {!activeCidr && (
             <Alert severity="info" icon={<Hub fontSize="inherit" />}>
-              尚未选择扫描网段——没有网段，平台无法逐台探测 {targetText} 所在的主机。
-              请在上方选择一张网卡（虚拟机常用 VirtualBox Host-Only / VMware VMnet 等虚拟网卡网段）后再开始扫描。
+              {manualMode
+                ? "请输入要扫描的网段（格式 a.b.c.d/前缀，如 192.168.56.0/24）——输入后平台将逐台探测该网段内的目标服务端口。"
+                : "尚未选择扫描网段——没有网段，平台无法逐台探测 " + targetText + " 所在的主机。请在上方选择一张网卡（虚拟机常用 VirtualBox Host-Only / VMware VMnet 等虚拟网卡网段），或切换到手动输入。"}
             </Alert>
           )}
 

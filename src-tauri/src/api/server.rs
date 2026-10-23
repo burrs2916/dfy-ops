@@ -386,6 +386,14 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::post(handlers_network::discover),
         )
         .route(
+            "/api/network/scan-config",
+            axum::routing::get(handlers_network::get_scan_config),
+        )
+        .route(
+            "/api/network/scan-config",
+            axum::routing::post(handlers_network::save_scan_config),
+        )
+        .route(
             "/api/services/:id/remote",
             axum::routing::get(handlers_network::get_remote),
         )

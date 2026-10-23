@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -321,6 +322,61 @@ fn connect(addr: SocketAddr) -> Result<TcpStream, String> {
 }
 
 // ===== 第三方服务远程端点 =====
+
+// ===== 扫描网段配置 =====
+
+/// 上次使用的扫描网段持久化（config/network_scan.json）。
+///
+/// 生产环境网段变化时（换路由器/虚拟机网络模式切换），用户在 UI 手动输入
+/// 新网段扫描即可，无需重新编译——这里记住上次输入，下次打开直接带入。
+fn scan_config_path(config_dir: &Path) -> std::path::PathBuf {
+    config_dir.join("network_scan.json")
+}
+
+fn load_last_cidr(config_dir: &Path) -> String {
+    match std::fs::read(scan_config_path(config_dir)) {
+        Ok(bytes) => serde_json::from_slice::<serde_json::Value>(&bytes)
+            .ok()
+            .and_then(|v| v.get("lastCidr").and_then(|c| c.as_str().map(String::from)))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+/// 查询上次使用的扫描网段（空串表示从未扫描过）。
+pub async fn get_scan_config(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "lastCidr": load_last_cidr(&state.config_dir) }))
+}
+
+#[derive(Deserialize)]
+pub struct SaveScanConfigReq {
+    pub last_cidr: String,
+}
+
+/// 保存上次使用的扫描网段（扫描成功时前端自动回写）。
+pub async fn save_scan_config(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SaveScanConfigReq>,
+) -> Json<serde_json::Value> {
+    let cidr = req.last_cidr.trim().to_string();
+    if !cidr.is_empty() && parse_cidr(&cidr).is_err() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "网段格式无法识别：请按 a.b.c.d/前缀 填写（如 192.168.56.0/24）"
+        }));
+    }
+    std::fs::create_dir_all(&state.config_dir).ok();
+    let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "lastCidr": cidr }))
+        .map_err(|e| e.to_string());
+    match bytes.and_then(|b| {
+        std::fs::write(scan_config_path(&state.config_dir), b).map_err(|e| e.to_string())
+    }) {
+        Ok(()) => Json(serde_json::json!({ "ok": true })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("写入网段配置失败：{e}") })),
+    }
+}
+
+// ===== 第三方服务远程端点（网关地址配置） =====
 
 /// 服务的远程端点读取口径（与 handlers.rs 的检测同一来源）：
 /// Redis 端点在 redis_credential（密码同文件），其余第三方在 remote_endpoints。

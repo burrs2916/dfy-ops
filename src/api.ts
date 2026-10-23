@@ -386,6 +386,13 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ host, port }),
     }),
+  scanConfig: () =>
+    request<{ lastCidr: string }>("/api/network/scan-config"),
+  saveScanConfig: (lastCidr: string) =>
+    request<{ ok: boolean; error?: string }>("/api/network/scan-config", {
+      method: "POST",
+      body: JSON.stringify({ last_cidr: lastCidr }),
+    }),
   // ===== Redis 远程运维（类 Another Redis Desktop Manager） =====
   redisCredential: () =>
     request<{ host: string; port: number; password: string }>("/api/redis/credential"),
