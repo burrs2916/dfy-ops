@@ -85,7 +85,7 @@ export default function OpsCenter() {
       </Box>
 
       {/* ===== 远程部署：虚拟机/远程主机上的第三方中间件地址集中配置 ===== */}
-      <Box sx={{ flex: 1, minHeight: 0, display: subTab === "deploy" ? undefined : "none", overflow: "auto" }}>
+      <Box sx={{ flex: 1, minHeight: 0, display: subTab === "deploy" ? "flex" : "none", flexDirection: "column" }}>
         {subTab === "deploy" && <RemoteServicesPanel />}
       </Box>
     </Stack>
