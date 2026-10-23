@@ -11,6 +11,8 @@ const V_GAP = 96;
 const PAD = 32;
 
 function statusTone(s: ServiceStatus): "ok" | "warn" | "down" {
+  // 先设置、后检测：待配置态按「需要处理」的暖黄提示，不渲染成红色 down
+  if (s.runState === "needs-config") return "warn";
   if (!s.running) return "down";
   if (!s.healthy) return "warn";
   return "ok";
@@ -174,13 +176,15 @@ export default function Topology() {
                     fill="#5b6572"
                   >
                     {s.id} ·{" "}
-                    {!s.running
-                      ? "未运行"
-                      : !s.healthy
-                        ? "异常"
-                        : s.runState === "detected"
-                          ? "外部运行"
-                          : "健康"}
+                    {s.runState === "needs-config"
+                      ? "待配置"
+                      : !s.running
+                        ? "未运行"
+                        : !s.healthy
+                          ? "异常"
+                          : s.runState === "detected"
+                            ? "外部运行"
+                            : "健康"}
                   </text>
                 </g>
               );

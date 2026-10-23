@@ -1,5 +1,6 @@
 import { useState } from "react";
 import {
+  Button,
   Card,
   CardContent,
   Chip,
@@ -9,13 +10,14 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { PlayArrow, Radar, Refresh, Replay, Stop } from "@mui/icons-material";
+import { PlayArrow, Dns, Radar, Refresh, Replay, Stop } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useOpsStore } from "../store";
 import type { CheckStatus, ServiceEnvReport, ServiceStatus } from "../types";
 import { StatusBadge } from "./StatusBadge";
 import { ServiceDiscoveryDialog } from "./ServiceDiscoveryDialog";
+import { RemoteServicesDialog } from "./RemoteServicesDialog";
 
 const KIND_LABEL: Record<string, string> = {
   vertx: "Vert.x",
@@ -46,6 +48,7 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
   const [reloading, setReloading] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
+  const [remoteConfigOpen, setRemoteConfigOpen] = useState(false);
 
   // 卡片级快捷操作：执行期间禁点，完成后只刷新本服务 + 其依赖
   //（启动会级联拉起 dependsOn，依赖的状态也可能变化），不做全量探测，
@@ -132,7 +135,7 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
             </Stack>
             {/* 快捷操作：阻止冒泡，避免误触卡片跳转。
                 第三方依赖（VerneMQ/MinIO/Redis）由系统服务/虚拟机管理，平台只检测不托管
-                → 无启停按钮；提供「服务发现」（扫描网段定位远程地址）与单服务刷新 */}
+                → 无启停按钮；「先设置、后检测」：待配置态显示显式配置按钮引导完成设置 */}
             {s.thirdParty ? (
               <Stack
                 direction="row"
@@ -141,11 +144,26 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
                 onClick={(e) => e.stopPropagation()}
                 sx={{ flexShrink: 0 }}
               >
-                <Tooltip title="服务发现：扫描网段定位本服务的远程地址">
-                  <IconButton size="small" onClick={() => setDiscovering(true)}>
-                    <Radar fontSize="small" />
-                  </IconButton>
-                </Tooltip>
+                {s.runState === "needs-config" ? (
+                  <Tooltip title="服务部署在虚拟机/远程主机：先配置远程地址，检测才有意义">
+                    <Button
+                      size="small"
+                      variant="contained"
+                      color="warning"
+                      startIcon={<Dns fontSize="small" />}
+                      onClick={() => setRemoteConfigOpen(true)}
+                      sx={{ mr: 0.5, whiteSpace: "nowrap" }}
+                    >
+                      配置地址
+                    </Button>
+                  </Tooltip>
+                ) : (
+                  <Tooltip title="服务发现：扫描网段定位本服务的远程地址">
+                    <IconButton size="small" onClick={() => setDiscovering(true)}>
+                      <Radar fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                )}
                 <Tooltip title="刷新此服务状态">
                   <IconButton size="small" onClick={reload} disabled={reloading || busy}>
                     {reloading ? (
@@ -210,6 +228,12 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
         onClose={() => setDiscovering(false)}
         targets={[s.id]}
         onAdopted={() => void reload()}
+      />
+      {/* 待配置态的显式入口：手填与扫描发现都在这里完成 */}
+      <RemoteServicesDialog
+        open={remoteConfigOpen}
+        onClose={() => setRemoteConfigOpen(false)}
+        onSaved={() => void reload()}
       />
     </Card>
   );

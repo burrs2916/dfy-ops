@@ -55,6 +55,15 @@ pub fn load(config_dir: &Path) -> RedisCredential {
     }
 }
 
+/// 用户是否保存过连接配置：文件不存在 = 从未设置过。
+///
+/// 检测流程据此区分「已配置后检测」与「从未设置」——从未设置时不拿默认
+/// 地址兜底探测（192.168.56.101 只是本开发机的约定值，对用户环境毫无
+/// 意义），而是报告 needs-config，由前端引导先完成设置。
+pub fn is_configured(config_dir: &Path) -> bool {
+    path(config_dir).exists()
+}
+
 pub fn save(config_dir: &Path, cred: &RedisCredential) -> Result<(), String> {
     std::fs::create_dir_all(config_dir).map_err(|e| format!("无法创建配置目录：{e}"))?;
     let bytes = serde_json::to_vec_pretty(cred).map_err(|e| format!("凭据序列化失败：{e}"))?;

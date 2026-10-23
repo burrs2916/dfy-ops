@@ -18,6 +18,11 @@ export function StatusBadge({
     if (!installed) {
       return <Chip size="small" label="未安装" color="default" variant="outlined" />;
     }
+    // 先设置、后检测：第三方服务未配置远程地址时不算「未运行」，
+    // 用琥珀色引导用户先完成设置，避免误以为服务挂了
+    if (runState === "needs-config") {
+      return <Chip size="small" label="待配置地址" color="warning" variant="outlined" />;
+    }
     return <Chip size="small" label="未运行" color="default" variant="outlined" />;
   }
   if (healthy) {

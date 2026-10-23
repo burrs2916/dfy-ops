@@ -35,6 +35,11 @@ pub enum RunState {
     Managed,
     Detected,
     Down,
+    /// 第三方依赖（虚拟机/远程部署场景）：本机没有进程与端口，也未配置远程
+    /// 地址——「设置」必须在「检测」之前，此时不判定 Down（那会误导用户以为
+    /// 服务挂了），而是提示先到「远程服务」配置地址，配置后检测才有意义。
+    #[serde(rename = "needs-config")]
+    NeedsConfig,
 }
 
 /// 把同步阻塞段移交 tokio 的 blocking 线程池执行。
@@ -109,6 +114,11 @@ pub struct ServiceStatus {
 ///   远程端点优先——服务跑在虚拟机/局域网主机上时，本机检测必然误报 Down。
 fn remote_of(state: &AppState, def: &ServiceDef) -> Option<(String, u16)> {
     if def.remote_only {
+        // 先设置、后检测：从未保存过连接配置时不拿默认值兜底探测，
+        // 报告 needs-config 让前端引导用户先完成设置
+        if !crate::ops::redis_credential::is_configured(&state.config_dir) {
+            return None;
+        }
         let cred = crate::ops::redis_credential::load(&state.config_dir);
         return Some((cred.host, cred.port));
     }
@@ -144,11 +154,19 @@ fn to_status(
     } else {
         detect_external(def, snap)
     };
+    // 先设置、后检测：第三方服务本机既无进程也无端口、又没有配置远程地址时，
+    // 检测得不出「未运行」的结论（它只说明「没在检测目标上」）——转为待配置态，
+    // 由前端引导用户先完成地址设置。
+    let run_state = if run_state == RunState::Down && def.third_party && remote.is_none() {
+        RunState::NeedsConfig
+    } else {
+        run_state
+    };
     ServiceStatus {
         id: def.id.clone(),
         name: def.name.clone(),
         kind: def.kind.clone(),
-        running: run_state != RunState::Down,
+        running: matches!(run_state, RunState::Managed | RunState::Detected),
         run_state,
         healthy,
         ports,
