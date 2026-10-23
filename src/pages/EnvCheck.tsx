@@ -77,7 +77,7 @@ const STATUS_LABEL: Record<CheckStatus, string> = {
 };
 
 const STATUS_HEX: Record<CheckStatus, string> = {
-  pass: "#0284C7",
+  pass: "#1e3f66",
   warn: "#BA7517",
   fail: "#A32D2D",
 };
@@ -952,7 +952,7 @@ function RepairCenter({
               flexShrink: 0,
               color: "#fff",
               bgcolor: runningThis ? "primary.main" : st?.serviceInstalled ? "success.main" : "primary.main",
-              boxShadow: "0 2px 8px rgba(13,148,136,0.25)",
+              boxShadow: "0 2px 8px rgba(30,63,102,0.25)",
               "& svg": { fontSize: 22 },
             }}
           >

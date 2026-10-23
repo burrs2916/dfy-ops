@@ -766,7 +766,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
 
       {/* ===== 连接信息与快捷操作 ===== */}
       <Paper variant="outlined" sx={{ p: 2, position: "relative", overflow: "hidden" }}>
-        {/* 品牌渐变饰条（#0284C7 → #0EA5E9），呼应 logo 提升页面质感 */}
+        {/* 品牌渐变饰条（#1e3f66 → #4a6fa5），呼应 logo 提升页面质感 */}
         <Box
           sx={{
             position: "absolute",
@@ -774,7 +774,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
             left: 0,
             right: 0,
             height: 3,
-            background: "linear-gradient(90deg, #0284C7, #0EA5E9)",
+            background: "linear-gradient(90deg, #1e3f66, #4a6fa5)",
           }}
         />
         <Stack direction="row" spacing={2} alignItems="center" flexWrap="wrap" rowGap={1}>
@@ -1632,7 +1632,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
               sx={{
                 p: 1.5,
                 borderStyle: "dashed",
-                borderColor: "rgba(13, 148, 136, 0.45)",
+                borderColor: "rgba(30, 63, 102, 0.45)",
                 display: "flex",
                 alignItems: "center",
                 gap: 1.5,

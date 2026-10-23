@@ -9,27 +9,35 @@ const FONT_STACK =
 const MONO_STACK =
   '"Cascadia Code", "JetBrains Mono", Consolas, "SF Mono", Menlo, "Courier New", monospace';
 
-// 标题栏 / 顶栏共用品牌渐变：中间大段纯品牌青，两端仅做微弱的色温/亮度
+// 标题栏 / 顶栏共用品牌渐变：中间大段纯品牌深蓝，两端仅做微弱的色温/亮度
 // 过渡（两侧向中间靠拢）——色差刻意收敛，避免拼接口出现明显断层。
 export const BRAND_GRADIENT =
-  "linear-gradient(90deg, #0279B4 0%, #0284C7 42%, #0284C7 58%, #0E9AC8 100%)";
+  "linear-gradient(90deg, #17334f 0%, #1e3f66 42%, #1e3f66 58%, #24466e 100%)";
 
-// 品牌青蓝主色（logo 渐变起点 #0284C7 → #0EA5E9）。success 也用品牌色：
-// 全项目不允许出现绿色系（用户明确要求），「成功」语义统一青蓝呈现。
+// 品牌深海军蓝（与 gateway-console 系统主题保持一致：#1e3f66 体系）。
+// success 也用品牌色：全项目不允许出现绿色系（用户明确要求），
+// 「成功」语义统一品牌蓝呈现。
+export const NAVY = {
+  main: "#1e3f66",
+  hover: "#2a5688",
+  active: "#163a5e",
+  light: "#4a6fa5",
+} as const;
+
 export const theme = createTheme({
   palette: {
     mode: "light",
-    primary: { main: "#0284C7" },
-    secondary: { main: "#0EA5E9" },
-    success: { main: "#0284C7" },
+    primary: { main: NAVY.main },
+    secondary: { main: NAVY.light },
+    success: { main: NAVY.main },
     error: { main: "#A32D2D" },
     warning: { main: "#BA7517" },
     text: {
-      primary: "#1e2530",
-      secondary: "#5b6572",
-      disabled: "#9aa3af",
+      primary: "#1f2937",
+      secondary: "#6b7280",
+      disabled: "#9ca3af",
     },
-    divider: "rgba(30, 37, 48, 0.12)",
+    divider: "rgba(31, 41, 55, 0.12)",
   },
   shape: { borderRadius: 8 },
   typography: {
@@ -62,17 +70,17 @@ export const theme = createTheme({
         sizeSmall: { paddingInline: 10, fontSize: "0.78rem" },
         containedPrimary: {
           boxShadow: "none",
-          "&:hover": { boxShadow: `0 2px 8px ${alpha("#0284C7", 0.35)}` },
+          "&:hover": { boxShadow: `0 2px 8px ${alpha("#1e3f66", 0.35)}` },
         },
         outlined: {
-          borderColor: "rgba(30, 37, 48, 0.18)",
+          borderColor: "rgba(31, 41, 55, 0.18)",
           "&:hover": {
-            borderColor: alpha("#0284C7", 0.55),
-            backgroundColor: alpha("#0284C7", 0.04),
+            borderColor: alpha("#1e3f66", 0.55),
+            backgroundColor: alpha("#1e3f66", 0.04),
           },
         },
         text: {
-          "&:hover": { backgroundColor: alpha("#0284C7", 0.06) },
+          "&:hover": { backgroundColor: alpha("#1e3f66", 0.06) },
         },
       },
     },
@@ -86,11 +94,11 @@ export const theme = createTheme({
         root: {
           backgroundColor: "#fff",
           transition: "box-shadow .15s ease",
-          "& .MuiOutlinedInput-notchedOutline": { borderColor: "rgba(30, 37, 48, 0.16)" },
-          "&:hover": { "& .MuiOutlinedInput-notchedOutline": { borderColor: alpha("#0284C7", 0.55) } },
+          "& .MuiOutlinedInput-notchedOutline": { borderColor: "rgba(31, 41, 55, 0.16)" },
+          "&:hover": { "& .MuiOutlinedInput-notchedOutline": { borderColor: alpha("#1e3f66", 0.55) } },
           "&.Mui-focused": {
-            "& .MuiOutlinedInput-notchedOutline": { borderColor: "#0284C7", borderWidth: 1.5 },
-            boxShadow: `0 0 0 3px ${alpha("#0284C7", 0.12)}`,
+            "& .MuiOutlinedInput-notchedOutline": { borderColor: "#1e3f66", borderWidth: 1.5 },
+            boxShadow: `0 0 0 3px ${alpha("#1e3f66", 0.12)}`,
           },
         },
         input: { fontSize: "0.8125rem" },
@@ -111,7 +119,7 @@ export const theme = createTheme({
         root: { borderRadius: 6, fontWeight: 600, fontSize: "0.72rem" },
         sizeSmall: { height: 22 },
         outlined: {
-          borderColor: "rgba(30, 37, 48, 0.18)",
+          borderColor: "rgba(31, 41, 55, 0.18)",
           color: "#5b6572",
         },
       },
@@ -124,7 +132,7 @@ export const theme = createTheme({
           fontSize: "0.72rem",
           letterSpacing: 0.3,
           color: "#5b6572",
-          backgroundColor: alpha("#0284C7", 0.045),
+          backgroundColor: alpha("#1e3f66", 0.045),
           whiteSpace: "nowrap",
         },
         root: { fontSize: "0.8125rem", padding: "7px 14px" },
@@ -132,7 +140,7 @@ export const theme = createTheme({
     },
     MuiTableRow: {
       styleOverrides: {
-        root: { transition: "background-color .12s ease", "&:hover": { backgroundColor: alpha("#0284C7", 0.03) } },
+        root: { transition: "background-color .12s ease", "&:hover": { backgroundColor: alpha("#1e3f66", 0.03) } },
       },
     },
     // ===== 页签：小写化 + 加粗 13px =====
@@ -185,7 +193,7 @@ export const theme = createTheme({
       },
     },
     MuiLinearProgress: {
-      styleOverrides: { root: { borderRadius: 2, backgroundColor: alpha("#0284C7", 0.12) } },
+      styleOverrides: { root: { borderRadius: 2, backgroundColor: alpha("#1e3f66", 0.12) } },
     },
     MuiSnackbarContent: {
       styleOverrides: { root: { borderRadius: 8 } },

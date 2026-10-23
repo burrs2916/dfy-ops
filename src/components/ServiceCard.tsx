@@ -82,8 +82,8 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
         transition: "transform .18s ease, box-shadow .18s ease, border-color .18s ease",
         "&:hover": {
           transform: "translateY(-2px)",
-          boxShadow: "0 4px 12px rgba(13, 148, 136, 0.12)",
-          borderColor: "rgba(13, 148, 136, 0.45)",
+          boxShadow: "0 4px 12px rgba(30, 63, 102, 0.12)",
+          borderColor: "rgba(30, 63, 102, 0.45)",
         },
       }}
       onClick={() => navigate(`/service/${s.id}`)}

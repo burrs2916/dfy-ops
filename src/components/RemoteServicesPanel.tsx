@@ -235,7 +235,7 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
                             borderRadius: 0.75,
                             fontSize: 11,
                             fontWeight: 700,
-                            bgcolor: isConfigured ? "rgba(13,148,136,0.10)" : "rgba(186,117,23,0.12)",
+                            bgcolor: isConfigured ? "rgba(30,63,102,0.10)" : "rgba(186,117,23,0.12)",
                             color: isConfigured ? "primary.main" : "warning.main",
                           }}
                         >

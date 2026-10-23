@@ -88,7 +88,16 @@ export default function Layout() {
           </Box>
         </Toolbar>
       </AppBar>
-      <Box component="main" sx={{ flex: 1, overflow: "auto", p: 3, bgcolor: "#f3f6f6" }}>
+      <Box
+        component="main"
+        sx={{
+          flex: 1,
+          overflow: "auto",
+          p: 3,
+          // 与 gateway-console 一致的浅灰渐变背景
+          background: "linear-gradient(135deg, #f5f7fa 0%, #e9ecef 100%)",
+        }}
+      >
         <Outlet />
       </Box>
     </Box>
