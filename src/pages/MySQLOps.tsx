@@ -241,6 +241,12 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     action: () => Promise<void>;
   } | null>(null);
   const noticeTimer = useRef<number | null>(null);
+  // 导入进度轮询句柄：组件卸载（切页）时兜底清理，避免空转打接口
+  const importPollRef = useRef<number | null>(null);
+  // SQL 执行 / 冲突检测的请求序号：快速连续操作时丢弃过期响应，
+  // 防止旧结果覆盖新结果（如快速翻页、连续切目标库）
+  const execSeqRef = useRef(0);
+  const conflictSeqRef = useRef(0);
 
   const flash = useCallback((text: string, severity: "success" | "error") => {
     setNotice({ text, severity });
@@ -326,8 +332,11 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
       }
       setQuerying(true);
       setResult(null);
+      const seq = ++execSeqRef.current;
       try {
         const r = await api.mysqlExec(text, db ?? undefined);
+        // 连续执行时丢弃过期响应：旧查询后到不能覆盖新查询结果
+        if (seq !== execSeqRef.current) return;
         setResult(r);
         if (r.ok) {
           setHistory((h) => [text, ...h.filter((x) => x !== text)].slice(0, 10));
@@ -336,9 +345,10 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
           }
         }
       } catch (e) {
+        if (seq !== execSeqRef.current) return;
         setResult({ ok: false, error: String(e) });
       } finally {
-        setQuerying(false);
+        if (seq === execSeqRef.current) setQuerying(false);
       }
     },
     [sql, db, flash],
@@ -548,8 +558,11 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
       setImportConfirmDanger(false);
       if (!v || v === "__new__" || !importFile) return;
       setImportChecking(true);
+      const seq = ++conflictSeqRef.current;
       try {
         const r = await api.mysqlImportConflicts(importFile, v);
+        // 快速切换目标库时丢弃过期响应：旧库的冲突结论不能落到新库上
+        if (seq !== conflictSeqRef.current) return;
         if (r.ok) {
           const conflicts = r.conflicts ?? [];
           setImportConflicts({
@@ -561,9 +574,9 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
           if (conflicts.length > 0) setImportStrategy("rebuild");
         }
       } catch {
-        setImportConflicts(null);
+        if (seq === conflictSeqRef.current) setImportConflicts(null);
       } finally {
-        setImportChecking(false);
+        if (seq === conflictSeqRef.current) setImportChecking(false);
       }
     },
     [importFile],
@@ -579,7 +592,7 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     setImportResult(null);
     setImportVerify(null);
     // 每秒轮询后端进度槽：阶段 + 字节进度 + 实时错误计数
-    const poll = window.setInterval(() => {
+    importPollRef.current = window.setInterval(() => {
       api
         .mysqlImportProgress()
         .then((p) => {
@@ -636,10 +649,21 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
       setImportResult({ ok: false, message: `导入失败：${String(e)}`, skippedCount: 0, errors: [] });
       setImporting(false);
     } finally {
-      window.clearInterval(poll);
+      if (importPollRef.current !== null) {
+        window.clearInterval(importPollRef.current);
+        importPollRef.current = null;
+      }
       setImportProgress(null);
     }
   }, [importFile, importDb, importNewDbName, importOnError, importStrategy, importConflicts, importAnalyze, reloadTables, refreshOverview]);
+
+  // 组件卸载（切页）时兜底清理轮询：导入仍在后端继续，但前端不再空转打接口
+  useEffect(
+    () => () => {
+      if (importPollRef.current !== null) window.clearInterval(importPollRef.current);
+    },
+    [],
+  );
 
   // 与后端 valid_db_name 同口径的前端宽松校验（仅用于决定是否发起验证请求）
   const validDbNameLike = (s: string) => s.length > 0 && s.length <= 64;

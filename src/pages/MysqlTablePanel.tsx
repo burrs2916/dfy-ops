@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { MONO_STACK } from "../theme";
 import {
   Alert,
@@ -104,6 +104,8 @@ export default function MysqlTablePanel({
     }
   };
 
+  // 请求序号：快速翻页/排序时丢弃过期响应，防止旧页数据覆盖新页
+  const loadSeqRef = useRef(0);
   const loadData = useCallback(
     async (
       p: number,
@@ -113,6 +115,7 @@ export default function MysqlTablePanel({
       size?: number,
     ) => {
       setLoading(true);
+      const seq = ++loadSeqRef.current;
       try {
         const r = await api.mysqlData({
           db,
@@ -124,6 +127,7 @@ export default function MysqlTablePanel({
           col: c || undefined,
           kw: k || undefined,
         });
+        if (seq !== loadSeqRef.current) return;
         if (r.ok) {
           setData(r);
         } else {
@@ -131,9 +135,10 @@ export default function MysqlTablePanel({
           onNotify(r.error ?? "查询失败", "error");
         }
       } catch (e) {
+        if (seq !== loadSeqRef.current) return;
         onNotify(`查询失败：${String(e)}`, "error");
       } finally {
-        setLoading(false);
+        if (seq === loadSeqRef.current) setLoading(false);
       }
     },
     [db, table, onNotify, pageSize],

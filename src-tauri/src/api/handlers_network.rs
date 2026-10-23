@@ -380,8 +380,13 @@ pub async fn save_scan_config(
 
 /// 服务的远程端点读取口径（与 handlers.rs 的检测同一来源）：
 /// Redis 端点在 redis_credential（密码同文件），其余第三方在 remote_endpoints。
+/// Redis 从未保存过连接配置时返回 None（与检测的「先设置后检测」口径一致），
+/// 否则配置面板会把默认兜底地址当成已配置展示，误导用户。
 pub fn service_remote(state: &AppState, service_id: &str) -> Option<(String, u16)> {
     if service_id == "redis" {
+        if !crate::ops::redis_credential::is_configured(&state.config_dir) {
+            return None;
+        }
         let cred = crate::ops::redis_credential::load(&state.config_dir);
         return Some((cred.host, cred.port));
     }

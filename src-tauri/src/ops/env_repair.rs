@@ -1852,11 +1852,16 @@ fn backup_mysql_before_delete(install_dir: &str, config_dir: &str) -> Result<Opt
     //    --result-file 直写文件避免 shell 重定向的编码问题（UTF-8 原样落盘）
     let backup_dir = std::path::Path::new(config_dir).join("backups");
     std::fs::create_dir_all(&backup_dir).map_err(|e| format!("创建备份目录 {} 失败：{e}", backup_dir.display()))?;
-    let secs = std::time::SystemTime::now()
+    let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let out_file = backup_dir.join(format!("mysql-biz-{}.sql", timestamp_utc(secs)));
+        .unwrap_or_default();
+    // 毫秒后缀：卸载备份是强确认才触发的大动作，但同秒并发两次仍会
+    // 互相覆盖——备份文件一旦被覆盖就找不回来，毫秒级区分成本低得多
+    let out_file = backup_dir.join(format!(
+        "mysql-biz-{}.{:03}.sql",
+        timestamp_utc(now.as_secs()),
+        now.subsec_millis()
+    ));
     let out = std::process::Command::new(&dump_exe)
         .args(mysql_auth_args(cred.port, &cred.user, &cred.password))
         .args([
