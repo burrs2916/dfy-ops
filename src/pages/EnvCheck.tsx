@@ -51,7 +51,7 @@ import {
   Widgets,
 } from "@mui/icons-material";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { useAppSettingsStore, useOpsStore } from "../store";
 import type {
@@ -1537,6 +1537,23 @@ export default function EnvCheck() {
   const [hideAcked, setHideAcked] = useState(false);
   // 轮询开关默认关闭：默认策略「启动检测一次 + 按需手动复检」，与总览一致
   const [live, setLive] = useState(false);
+  const [searchParams, setSearchParams] = useSearchParams();
+  // 「去修复」跳入时的目标服务：滚动定位 + 短暂高亮，让用户不用在长页里翻找
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const target = searchParams.get("service");
+    if (!target || Object.keys(envMap).length === 0) return;
+    setSearchParams({}, { replace: true });
+    const timer = window.setTimeout(() => {
+      document
+        .getElementById(`env-report-${target}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      setHighlightId(target);
+      window.setTimeout(() => setHighlightId(null), 2600);
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [searchParams, envMap, setSearchParams]);
 
   // ===== 环境修复（java 分级链路 + 通用资源包/在线链路，共用同一任务状态） =====
   const [repairJob, setRepairJob] = useState<EnvRepairJob | null>(null);
@@ -1889,16 +1906,27 @@ export default function EnvCheck() {
               {/* 每个服务一个分区（全宽表格） */}
               <Stack spacing={2}>
                 {reports.map((r) => (
-                  <ServiceEnvSection
+                  <Box
                     key={r.id}
-                    report={r}
-                    acked={acked}
-                    onToggleAck={toggleAck}
-                    onlyProblems={onlyProblems}
-                    hideAcked={hideAcked}
-                    onRepair={startRepair}
-                    repairDisabled={!!repairJob?.running}
-                  />
+                    id={`env-report-${r.id}`}
+                    sx={{
+                      borderRadius: 2,
+                      transition: "box-shadow 0.4s, outline-color 0.4s",
+                      outline: highlightId === r.id ? 2 : 0,
+                      outlineColor: "primary.main",
+                      outlineOffset: 2,
+                    }}
+                  >
+                    <ServiceEnvSection
+                      report={r}
+                      acked={acked}
+                      onToggleAck={toggleAck}
+                      onlyProblems={onlyProblems}
+                      hideAcked={hideAcked}
+                      onRepair={startRepair}
+                      repairDisabled={!!repairJob?.running}
+                    />
+                  </Box>
                 ))}
               </Stack>
             </>

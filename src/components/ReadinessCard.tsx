@@ -160,7 +160,8 @@ export default function ReadinessCard({
         icon: <SettingsSuggest fontSize="small" />,
         text: `${s.name}：${detail}${env.items.filter((i) => i.status !== "pass").length > 2 ? " 等" : ""}`,
         action: "去修复",
-        onAct: () => navigate("/env"),
+        // 带 service 参数：修复中心直接定位滚动到该服务的报告分区
+        onAct: () => navigate(`/env?service=${s.id}`),
       });
     }
   }

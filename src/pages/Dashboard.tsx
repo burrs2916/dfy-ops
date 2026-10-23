@@ -274,7 +274,13 @@ export default function Dashboard() {
           services={services}
           envMap={envMap}
           onOpenRemoteConfig={() => setRemoteConfigOpen(true)}
-          onStartService={(id) => void api.start(id).then(() => refreshServices([id]))}
+          onStartService={(id) =>
+            void api
+              .start(id)
+              .then(() => refreshServices([id]))
+              .then(() => setSnack({ open: true, msg: "启动完成", severity: "success" }))
+              .catch((e) => setSnack({ open: true, msg: "启动失败：" + (e as Error).message, severity: "error" }))
+          }
         />
       )}
 

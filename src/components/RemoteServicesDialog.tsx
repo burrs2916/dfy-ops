@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Button,
@@ -46,6 +46,19 @@ export function RemoteServicesDialog({ open, onClose, onSaved }: RemoteServicesD
   const [saving, setSaving] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ severity: "success" | "error" | "info"; text: string } | null>(null);
   const [discovering, setDiscovering] = useState(false);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // 读取完成时的值快照：检测用户是否改了没保存，关闭前拦截确认
+  const snapshotRef = useRef<string>("");
+
+  const isDirty = JSON.stringify(values) !== snapshotRef.current;
+
+  const requestClose = () => {
+    if (isDirty && !saving) {
+      setConfirmDiscard(true);
+    } else {
+      onClose();
+    }
+  };
 
   const reload = async () => {
     setLoading(true);
@@ -68,6 +81,7 @@ export function RemoteServicesDialog({ open, onClose, onSaved }: RemoteServicesD
       }
       setValues(nextValues);
       setConfigured(nextConfigured);
+      snapshotRef.current = JSON.stringify(nextValues);
     } finally {
       setLoading(false);
     }
@@ -103,6 +117,8 @@ export function RemoteServicesDialog({ open, onClose, onSaved }: RemoteServicesD
         setConfigured((c) => ({ ...c, [id]: true }));
         setMsg({ severity: "success", text: `${id} 远程地址已更新为 ${host}:${port}，服务状态即将按新地址检测` });
         onSaved?.();
+        // 回读落库值并刷新快照：保存后不再是「未保存修改」状态
+        void reload();
       }
     } catch (e) {
       setMsg({ severity: "error", text: e instanceof Error ? e.message : String(e) });
@@ -112,7 +128,7 @@ export function RemoteServicesDialog({ open, onClose, onSaved }: RemoteServicesD
   };
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth>
+    <Dialog open={open} onClose={requestClose} maxWidth="sm" fullWidth>
       <DialogTitle sx={{ fontWeight: 700, display: "flex", alignItems: "center", gap: 1 }}>
         <Dns color="primary" />
         远程服务配置
@@ -220,6 +236,29 @@ export function RemoteServicesDialog({ open, onClose, onSaved }: RemoteServicesD
         targets={SERVICES.map((s) => s.id)}
         onAdopted={() => void reload()}
       />
+
+      {/* 改了没保存就关 → 拦截确认，避免静默丢失 */}
+      <Dialog open={confirmDiscard} onClose={() => setConfirmDiscard(false)} maxWidth="xs" fullWidth>
+        <DialogTitle>放弃未保存的修改？</DialogTitle>
+        <DialogContent>
+          <Typography variant="body2">
+            你修改了服务地址但尚未保存——关闭后将丢失这些修改。
+          </Typography>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmDiscard(false)}>继续编辑</Button>
+          <Button
+            variant="contained"
+            color="warning"
+            onClick={() => {
+              setConfirmDiscard(false);
+              onClose();
+            }}
+          >
+            放弃并关闭
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Dialog>
   );
 }
