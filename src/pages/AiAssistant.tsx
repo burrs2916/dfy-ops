@@ -23,7 +23,7 @@ import type {
 } from "../types";
 import { ProviderCard } from "./ai/ProviderCard";
 import { ConfirmDialog, EndpointDialog, ModelDialog, ProviderDialog } from "./ai/dialogs";
-import { CARD_BG, PRIMARY_COLOR, PROVIDER_PRESETS, ProviderDot, type TestResult } from "./ai/shared";
+import { CARD_BG, PROVIDER_PRESETS, ProviderDot, type TestResult } from "./ai/shared";
 
 /**
  * AI 助手 —— 模型配置页。
@@ -292,7 +292,7 @@ export default function AiAssistant() {
             sx={{
               borderRadius: 2,
               fontSize: 11,
-              background: `linear-gradient(135deg, ${PRIMARY_COLOR} 0%, #3B82F6 100%)`,
+              background: `linear-gradient(135deg, #0D9488 0%, #0EA5E9 100%)`,
             }}
           >
             新增供应商

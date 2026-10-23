@@ -38,7 +38,7 @@ export default function OpsCenter() {
   return (
     <Stack spacing={2} sx={{ height: "100%", minHeight: 0 }}>
       <Box sx={{ flexShrink: 0, mb: -0.5 }}>
-        <Typography variant="h6" sx={{ fontWeight: 700, letterSpacing: 0.2 }}>
+        <Typography variant="h5" sx={{ fontWeight: 700 }}>
           运维中心
         </Typography>
         <Typography variant="body2" color="text.secondary">

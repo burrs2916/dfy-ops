@@ -817,7 +817,7 @@ export default function RedisOps({
                                 wordBreak: "break-all",
                               }}
                             >
-                              {v || <span style={{ color: "#9e9e9e" }}>（空）</span>}
+                              {v || <span style={{ color: "#9aa3af" }}>（空）</span>}
                             </Typography>
                             <IconButton
                               className="copy-btn"

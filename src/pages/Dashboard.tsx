@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { MONO_STACK } from "../theme";
 import {
   Alert,
@@ -20,7 +19,7 @@ import {
   Stack,
   Typography,
 } from "@mui/material";
-import { Close, ContentCopy, Download, Pause, PlayArrow, Refresh, ScienceOutlined } from "@mui/icons-material";
+import { Close, ContentCopy, Download, Pause, PlayArrow, Refresh } from "@mui/icons-material";
 import { useOpsStore, useAppSettingsStore } from "../store";
 import { ServiceCard } from "../components/ServiceCard";
 import ReadinessCard from "../components/ReadinessCard";
@@ -41,7 +40,6 @@ export default function Dashboard() {
   } = useOpsStore();
   const statusRefreshMs = useAppSettingsStore((s) => s.settings.statusRefreshSecs) * 1000;
   const envRefreshMs = useAppSettingsStore((s) => s.settings.envRefreshSecs) * 1000;
-  const navigate = useNavigate();
   const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" | "info" }>({
     open: false,
     msg: "",
@@ -235,13 +233,6 @@ export default function Dashboard() {
               disabled={bulkBusy !== null}
             >
               全部停止
-            </Button>
-            <Button
-              variant="outlined"
-              startIcon={<ScienceOutlined />}
-              onClick={() => navigate("/env")}
-            >
-              修复中心
             </Button>
             <Button
               variant="contained"

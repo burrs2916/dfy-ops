@@ -16,13 +16,15 @@ function statusTone(s: ServiceStatus): "ok" | "warn" | "down" {
   return "ok";
 }
 
+// 状态配色与全应用语义一致：success = 品牌青（全项目禁绿色系），
+// ok 用品牌青的浅底+主色描边，warn/down 沿用主题的暖黄/暗红。
 const TONE_FILL: Record<string, string> = {
-  ok: "#E8F3E1",
+  ok: "#E6F4F2",
   warn: "#FCF1DC",
   down: "#F4EEEE",
 };
 const TONE_STROKE: Record<string, string> = {
-  ok: "#3B6D11",
+  ok: "#0D9488",
   warn: "#BA7517",
   down: "#A32D2D",
 };
@@ -108,7 +110,7 @@ export default function Topology() {
                 orient="auto"
                 markerUnits="strokeWidth"
               >
-                <path d="M0,0 L8,3 L0,6 Z" fill="#888" />
+                <path d="M0,0 L8,3 L0,6 Z" fill="#7d8996" />
               </marker>
             </defs>
 
@@ -126,7 +128,7 @@ export default function Topology() {
                   <path
                     key={`${dep}-${s.id}`}
                     d={`M ${x1} ${y1} C ${x1} ${my}, ${x2} ${my}, ${x2} ${y2}`}
-                    stroke="#aaa"
+                    stroke="#9aa5b1"
                     strokeWidth={1.5}
                     fill="none"
                     markerEnd="url(#arrow)"
@@ -160,7 +162,7 @@ export default function Topology() {
                     textAnchor="middle"
                     fontSize={13}
                     fontWeight={600}
-                    fill="#222"
+                    fill="#1e2530"
                   >
                     {s.name}
                   </text>
@@ -169,7 +171,7 @@ export default function Topology() {
                     y={p.y + 43}
                     textAnchor="middle"
                     fontSize={11}
-                    fill="#555"
+                    fill="#5b6572"
                   >
                     {s.id} ·{" "}
                     {!s.running

@@ -50,16 +50,16 @@ export function ProviderDot({ name, size = 10 }: { name: string; size?: number }
   );
 }
 
-// ===== web-craft 同款配色（浅色主题分支） =====
-export const PRIMARY_COLOR = "#1D4ED8";
+// ===== 配色（与全应用主题一致：主色=品牌青，error=主题暗红，disabled=主题灰） =====
+export const PRIMARY_COLOR = "#0D9488";
 export const CARD_BORDER = "rgba(0,0,0,0.08)";
 export const CARD_BG = "rgba(255,255,255,0.8)";
 export const INNER_CARD_BG = "rgba(245,245,245,0.6)";
 export const HOVER_BG = "rgba(0,0,0,0.03)";
 export const HOVER_BG2 = "rgba(0,0,0,0.02)";
-export const ERROR_COLOR = "#DC2626";
+export const ERROR_COLOR = "#A32D2D";
 export const SUCCESS_COLOR = "#0D9488";
-export const DISABLED_COLOR = "#9E9E9E";
+export const DISABLED_COLOR = "#9AA3AF";
 
 export function getApiTypeLabel(apiType: string): string {
   return API_TYPE_OPTIONS.find((o) => o.value === apiType)?.label ?? apiType;

@@ -36,6 +36,8 @@ export const theme = createTheme({
     fontFamily: FONT_STACK,
     // 中文界面适度字距（0.1~0.3px）提升精致感；标题 700 加粗、说明文字 13px
     h6: { fontSize: "1.125rem", fontWeight: 700, letterSpacing: 0.3 },
+    // h4 在本应用中用于指标大数字（如部署就绪度百分比）：紧凑加粗 + 等宽数字
+    h4: { fontSize: "2rem", fontWeight: 800, lineHeight: 1.1, letterSpacing: 0 },
     subtitle1: { fontSize: "0.95rem", fontWeight: 700, lineHeight: 1.4, letterSpacing: 0.2 },
     subtitle2: { fontSize: "0.85rem", fontWeight: 600, letterSpacing: 0.1 },
     body1: { fontSize: "0.875rem", lineHeight: 1.55, letterSpacing: 0.1 },

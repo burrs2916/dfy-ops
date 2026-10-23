@@ -77,7 +77,7 @@ const STATUS_LABEL: Record<CheckStatus, string> = {
 };
 
 const STATUS_HEX: Record<CheckStatus, string> = {
-  pass: "#3B6D11",
+  pass: "#0D9488",
   warn: "#BA7517",
   fail: "#A32D2D",
 };

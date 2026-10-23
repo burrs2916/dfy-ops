@@ -86,7 +86,7 @@ export function EndpointCard({
         onClick={onToggle}
       >
         <Box sx={{ display: "flex", alignItems: "center", gap: 0.75 }}>
-          <CableIcon sx={{ fontSize: 14, color: "#FBBF24" }} />
+          <CableIcon sx={{ fontSize: 14, color: "#BA7517" }} />
           <Box>
             <Typography variant="caption" sx={{ fontWeight: 600 }}>
               {endpoint.name}

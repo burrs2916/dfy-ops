@@ -148,10 +148,7 @@ export default function ReadinessCard({
             />
           )}
         </Box>
-        <Typography
-          variant="h4"
-          sx={{ fontWeight: 800, color: `${tone}.main`, lineHeight: 1, minWidth: 96, textAlign: "right" }}
-        >
+        <Typography variant="h4" sx={{ fontWeight: 800, color: `${tone}.main`, minWidth: 96, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
           {pct}%
         </Typography>
       </Stack>
