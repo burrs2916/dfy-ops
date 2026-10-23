@@ -14,3 +14,4 @@ pub mod appsettings;
 pub mod resource;
 pub mod mysql_credential;
 pub mod redis_credential;
+pub mod remote_endpoints;

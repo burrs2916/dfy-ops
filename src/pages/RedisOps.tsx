@@ -46,9 +46,11 @@ import VpnKeyOutlinedIcon from "@mui/icons-material/VpnKeyOutlined";
 import ChevronLeftRoundedIcon from "@mui/icons-material/ChevronLeftRounded";
 import ChevronRightRoundedIcon from "@mui/icons-material/ChevronRightRounded";
 import ContentCopyRoundedIcon from "@mui/icons-material/ContentCopyRounded";
+import RadarIcon from "@mui/icons-material/Radar";
 import CircularProgress from "@mui/material/CircularProgress";
 import { api } from "../api";
 import { MONO_STACK } from "../theme";
+import { ServiceDiscoveryDialog } from "../components/ServiceDiscoveryDialog";
 import type { RedisKeyDetail, RedisKeyItem, RedisOverview } from "../types";
 
 const btnSx = { textTransform: "none" as const, whiteSpace: "nowrap" as const };
@@ -211,6 +213,7 @@ export default function RedisOps({
 
   const [credOpen, setCredOpen] = useState(false);
   const [credForm, setCredForm] = useState({ host: "", port: 6379, password: "" });
+  const [credDiscover, setCredDiscover] = useState(false);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -853,6 +856,19 @@ export default function RedisOps({
               value={credForm.host}
               onChange={(e) => setCredForm({ ...credForm, host: e.target.value })}
               placeholder="192.168.56.101"
+              InputProps={{
+                endAdornment: (
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    startIcon={<RadarIcon />}
+                    onClick={() => setCredDiscover(true)}
+                    sx={{ textTransform: "none", whiteSpace: "nowrap", flexShrink: 0, mr: 0.5 }}
+                  >
+                    自动发现
+                  </Button>
+                ),
+              }}
             />
             <TextField
               size="small"
@@ -883,6 +899,18 @@ export default function RedisOps({
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* 连接配置的自动发现：只回填表单（密码等其余字段由用户确认后统一保存） */}
+      <ServiceDiscoveryDialog
+        open={credDiscover}
+        onClose={() => setCredDiscover(false)}
+        targets={["redis"]}
+        fillOnly
+        onAdopted={(host, port) => {
+          setCredForm((f) => ({ ...f, host, port: port ?? f.port }));
+          setCredDiscover(false);
+        }}
+      />
 
       {/* ===== 删除强确认 ===== */}
       <Dialog open={confirmTarget !== null} onClose={() => setConfirmTarget(null)} maxWidth="xs" fullWidth>

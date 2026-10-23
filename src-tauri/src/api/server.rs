@@ -12,6 +12,7 @@ use tower_http::cors::{AllowOrigin, CorsLayer};
 use crate::api::handlers;
 use crate::api::handlers_ai;
 use crate::api::handlers_mysql;
+use crate::api::handlers_network;
 use crate::api::handlers_redis;
 use crate::api::handlers_repair;
 use crate::ops::aimodels::AiModelConfig;
@@ -373,6 +374,24 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route(
             "/api/ai/active-model",
             axum::routing::post(handlers_ai::set_active_model),
+        )
+        // 服务发现域：网卡枚举 / 网段扫描（Redis·VerneMQ·MinIO 协议级识别）/
+        // 第三方服务远程端点（虚拟机部署场景的服务状态检测目标）
+        .route(
+            "/api/network/adapters",
+            axum::routing::get(handlers_network::adapters),
+        )
+        .route(
+            "/api/network/discover",
+            axum::routing::post(handlers_network::discover),
+        )
+        .route(
+            "/api/services/:id/remote",
+            axum::routing::get(handlers_network::get_remote),
+        )
+        .route(
+            "/api/services/:id/remote",
+            axum::routing::post(handlers_network::save_remote),
         )
         .with_state(state)
         // 层的执行顺序是「后挂的在外层」：CORS 最外层，先裁决预检与来源白名单，

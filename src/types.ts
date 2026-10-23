@@ -332,6 +332,38 @@ export interface MysqlBackupFile {
   modified: number;
 }
 
+/** GET /api/network/adapters：本机 IPv4 网卡（含 VMnet/vmnet 虚拟网卡） */
+export interface NetworkAdapter {
+  name: string;
+  ip: string;
+  /** 网段 CIDR（如 192.168.56.0/24），直接作为扫描输入 */
+  cidr: string;
+  hosts: number;
+}
+
+/** 网段扫描中某台主机上确认到的服务（协议级识别） */
+export interface DiscoveredService {
+  port: number;
+  service: string;
+  detail: string;
+}
+
+export interface DiscoveredHost {
+  ip: string;
+  services: DiscoveredService[];
+}
+
+/** POST /api/network/discover：网段扫描结果 */
+export interface DiscoverResult {
+  ok: boolean;
+  cidr?: string;
+  scanned?: number;
+  elapsedMs?: number;
+  hosts?: DiscoveredHost[];
+  error?: string;
+  missing?: string;
+}
+
 /** GET /api/redis/overview：INFO 解析结果（字段为原始字符串，缺失为空串） */
 export interface RedisOverview {
   ok?: boolean;

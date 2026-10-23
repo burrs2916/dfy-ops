@@ -100,15 +100,22 @@ pub struct ServiceStatus {
     pub log_paths: Vec<String>,
 }
 
-/// 纯远程第三方服务（remoteOnly，Redis）的检测目标：托管连接配置指向的端点。
-/// 本机不安装也不检测本地进程/端口——凭据文件读取失败时回退默认值
-/// （192.168.56.101:6379），与服务详情页「Redis 管理 → 连接配置」同一可信源。
+/// 第三方服务的远程检测目标：
+/// - `remoteOnly`（Redis）：本机不安装也不检测本地进程/端口，一律走托管端点——
+///   凭据文件读取失败时回退默认值（192.168.56.101:6379），与
+///   服务详情页「Redis 管理 → 连接配置」同一可信源。
+/// - 其余第三方（VerneMQ / MinIO）：默认仍走本机进程/端口检测；
+///   用户通过「服务发现」或手动配置托管了远程端点后（remote_endpoints.json），
+///   远程端点优先——服务跑在虚拟机/局域网主机上时，本机检测必然误报 Down。
 fn remote_of(state: &AppState, def: &ServiceDef) -> Option<(String, u16)> {
-    if !def.remote_only {
-        return None;
+    if def.remote_only {
+        let cred = crate::ops::redis_credential::load(&state.config_dir);
+        return Some((cred.host, cred.port));
     }
-    let cred = crate::ops::redis_credential::load(&state.config_dir);
-    Some((cred.host, cred.port))
+    if def.third_party {
+        return crate::api::handlers_network::service_remote(state, &def.id);
+    }
+    None
 }
 
 fn to_status(

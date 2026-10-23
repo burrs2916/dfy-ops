@@ -9,12 +9,13 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { PlayArrow, Refresh, Replay, Stop } from "@mui/icons-material";
+import { PlayArrow, Radar, Refresh, Replay, Stop } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useOpsStore } from "../store";
 import type { CheckStatus, ServiceEnvReport, ServiceStatus } from "../types";
 import { StatusBadge } from "./StatusBadge";
+import { ServiceDiscoveryDialog } from "./ServiceDiscoveryDialog";
 
 const KIND_LABEL: Record<string, string> = {
   vertx: "Vert.x",
@@ -44,6 +45,7 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
   const [busy, setBusy] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  const [discovering, setDiscovering] = useState(false);
 
   // 卡片级快捷操作：执行期间禁点，完成后只刷新本服务 + 其依赖
   //（启动会级联拉起 dependsOn，依赖的状态也可能变化），不做全量探测，
@@ -129,8 +131,32 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
               )}
             </Stack>
             {/* 快捷操作：阻止冒泡，避免误触卡片跳转。
-                第三方依赖（VerneMQ/MinIO）由系统服务/容器管理，平台只检测不托管 → 无启停按钮 */}
-            {!s.thirdParty && (
+                第三方依赖（VerneMQ/MinIO/Redis）由系统服务/虚拟机管理，平台只检测不托管
+                → 无启停按钮；提供「服务发现」（扫描网段定位远程地址）与单服务刷新 */}
+            {s.thirdParty ? (
+              <Stack
+                direction="row"
+                spacing={0.25}
+                alignItems="center"
+                onClick={(e) => e.stopPropagation()}
+                sx={{ flexShrink: 0 }}
+              >
+                <Tooltip title="服务发现：扫描网段定位本服务的远程地址">
+                  <IconButton size="small" onClick={() => setDiscovering(true)}>
+                    <Radar fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+                <Tooltip title="刷新此服务状态">
+                  <IconButton size="small" onClick={reload} disabled={reloading || busy}>
+                    {reloading ? (
+                      <CircularProgress size={14} />
+                    ) : (
+                      <Refresh fontSize="small" />
+                    )}
+                  </IconButton>
+                </Tooltip>
+              </Stack>
+            ) : (
               <Stack
                 direction="row"
                 spacing={0.25}
@@ -179,6 +205,12 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
             </Typography>
           )}
         </CardContent>
+      <ServiceDiscoveryDialog
+        open={discovering}
+        onClose={() => setDiscovering(false)}
+        targets={[s.id]}
+        onAdopted={() => void reload()}
+      />
     </Card>
   );
 }

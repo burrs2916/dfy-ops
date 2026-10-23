@@ -8,11 +8,13 @@ import type {
   AiTestResult,
   AppSettings,
   DiagnosisResponse,
+  DiscoverResult,
   EnvCheckItem,
   EnvRepairJob,
   EnvRepairStart,
   GenericRepairStart,
   LogsResponse,
+  NetworkAdapter,
   RepairExecResult,
   RepairPlan,
   ResourceScan,
@@ -366,6 +368,23 @@ export const api = {
     request<{ ok: boolean; rows?: number; message?: string; error?: string }>("/api/mysql/export-csv", {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+  // ===== 服务发现（网卡枚举 → 网段扫描 → 第三方服务远程端点） =====
+  networkAdapters: () =>
+    request<{ adapters: NetworkAdapter[] }>("/api/network/adapters"),
+  discoverServices: (cidr: string) =>
+    request<DiscoverResult>("/api/network/discover", {
+      method: "POST",
+      body: JSON.stringify({ cidr }),
+    }),
+  serviceRemote: (id: string) =>
+    request<{ host: string | null; port: number | null }>(
+      `/api/services/${id}/remote`,
+    ),
+  saveServiceRemote: (id: string, host: string, port: number) =>
+    request<{ ok: boolean; error?: string }>(`/api/services/${id}/remote`, {
+      method: "POST",
+      body: JSON.stringify({ host, port }),
     }),
   // ===== Redis 远程运维（类 Another Redis Desktop Manager） =====
   redisCredential: () =>
