@@ -26,7 +26,7 @@ const TONE_FILL: Record<string, string> = {
   down: "#F4EEEE",
 };
 const TONE_STROKE: Record<string, string> = {
-  ok: "#0D9488",
+  ok: "#0284C7",
   warn: "#BA7517",
   down: "#A32D2D",
 };

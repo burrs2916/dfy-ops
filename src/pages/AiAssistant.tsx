@@ -292,7 +292,7 @@ export default function AiAssistant() {
             sx={{
               borderRadius: 2,
               fontSize: 11,
-              background: `linear-gradient(135deg, #0D9488 0%, #0EA5E9 100%)`,
+              background: `linear-gradient(135deg, #0284C7 0%, #0EA5E9 100%)`,
             }}
           >
             新增供应商

@@ -20,7 +20,7 @@ export const PROVIDER_PRESETS = ["OpenAI", "Anthropic", "DeepSeek", "Google", "O
 export const PROVIDER_COLORS = [
   "#60A5FA", "#38BDF8", "#26C6DA", "#FBBF24", "#FF6B6B",
   "#22D3EE", "#AB47BC", "#FFA726", "#0EA5E9", "#5C6BC0",
-  "#EC407A", "#7E57C2", "#0D9488", "#F59E0B", "#8D6E63",
+  "#EC407A", "#7E57C2", "#0284C7", "#F59E0B", "#8D6E63",
 ];
 
 export function hashString(s: string): number {
@@ -51,14 +51,14 @@ export function ProviderDot({ name, size = 10 }: { name: string; size?: number }
 }
 
 // ===== 配色（与全应用主题一致：主色=品牌青，error=主题暗红，disabled=主题灰） =====
-export const PRIMARY_COLOR = "#0D9488";
+export const PRIMARY_COLOR = "#0284C7";
 export const CARD_BORDER = "rgba(0,0,0,0.08)";
 export const CARD_BG = "rgba(255,255,255,0.8)";
 export const INNER_CARD_BG = "rgba(245,245,245,0.6)";
 export const HOVER_BG = "rgba(0,0,0,0.03)";
 export const HOVER_BG2 = "rgba(0,0,0,0.02)";
 export const ERROR_COLOR = "#A32D2D";
-export const SUCCESS_COLOR = "#0D9488";
+export const SUCCESS_COLOR = "#0284C7";
 export const DISABLED_COLOR = "#9AA3AF";
 
 export function getApiTypeLabel(apiType: string): string {
