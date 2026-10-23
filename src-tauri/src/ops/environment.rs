@@ -199,8 +199,8 @@ fn fix_hint_for(id: &str) -> String {
         ),
         "greptime" => "从 https://github.com/GreptimeTeam/greptimedb/releases 下载 greptime 二进制，放入 install_dir/greptimedb/".into(),
         "webview2" => "在目标 Windows 主机安装 Microsoft Edge WebView2 Runtime：https://developer.microsoft.com/microsoft-edge/webview2/".into(),
-        "service-vernemq" | "dep-vernemq" => "在主机安装 VerneMQ（https://vernemq.com/downloads）并作为服务启动；本机开发可用 OrbStack/Docker 容器提供".into(),
-        "service-minio" | "dep-minio" => "从 https://min.io/download 下载 minio 并作为服务运行，配置 MINIO_ROOT_USER / MINIO_ROOT_PASSWORD；本机开发可用容器".into(),
+        "service-vernemq" | "dep-vernemq" => "VerneMQ 为远程部署模式（本机不安装）：请到「运维中心 → 远程部署」配置虚拟机/远程主机地址后重新检测".into(),
+        "service-minio" | "dep-minio" => "MinIO 为远程部署模式（本机不安装）：请到「运维中心 → 远程部署」配置虚拟机/远程主机地址后重新检测".into(),
         "service-mysql" | "dep-mysql" => by_platform(
             "winget install -e --id Oracle.MySQL   # 或访问 https://dev.mysql.com/downloads/ 安装 MySQL Server",
             "brew install mysql   # 或用 OrbStack/Docker 容器提供",

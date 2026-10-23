@@ -40,13 +40,10 @@ interface ActionItem {
 export default function ReadinessCard({
   services,
   envMap,
-  onOpenRemoteConfig,
   onStartService,
 }: {
   services: ServiceStatus[];
   envMap: Record<string, ServiceEnvReport>;
-  /** 待办「配置远程地址」：打开远程服务配置面板 */
-  onOpenRemoteConfig: () => void;
   /** 待办「立即启动」：直接拉起受管服务 */
   onStartService?: (id: string) => void;
 }) {
@@ -106,8 +103,9 @@ export default function ReadinessCard({
         severity: "warning",
         icon: <Dns fontSize="small" />,
         text: `${s.name}：部署在虚拟机/远程主机，尚未配置远程地址，无法监测`,
-        action: "去配置",
-        onAct: onOpenRemoteConfig,
+        action: "去配置部署",
+        // 直达运维中心的远程部署页：集中配置 + 网段发现
+        onAct: () => navigate("/ops?tab=deploy"),
       });
       continue;
     }

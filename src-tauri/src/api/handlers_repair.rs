@@ -94,8 +94,9 @@ pub async fn start_generic_repair(
         blocking(move || (resource::find_zip(&dir, target), resource::find_msi(&dir, target))).await
     };
 
-    // mysql/redis/java 支持免安装版管线；java 的安装目录固定平台托管位置
-    let zip_capable = matches!(target, "mysql" | "redis" | "java");
+    // mysql/java 支持免安装版管线；java 的安装目录固定平台托管位置。
+    // redis 纯远程部署（上方已拦截），不进本地安装管线。
+    let zip_capable = matches!(target, "mysql" | "java");
     let started = if zip_capable && zip.is_some() {
         let install_dir = if target == "java" {
             crate::ops::env_repair::JDK_MANAGED_HOME.to_string()

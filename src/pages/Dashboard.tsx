@@ -19,10 +19,9 @@ import {
   Stack,
   Typography,
 } from "@mui/material";
-import { Close, ContentCopy, DnsOutlined, Download, Pause, PlayArrow, Refresh } from "@mui/icons-material";
+import { Close, ContentCopy, Download, Pause, PlayArrow, Refresh } from "@mui/icons-material";
 import { useOpsStore, useAppSettingsStore } from "../store";
 import { ServiceCard } from "../components/ServiceCard";
-import { RemoteServicesDialog } from "../components/RemoteServicesDialog";
 import ReadinessCard from "../components/ReadinessCard";
 import { api } from "../api";
 import type { DiagnosisResponse } from "../types";
@@ -51,7 +50,6 @@ export default function Dashboard() {
   const [diagnosing, setDiagnosing] = useState(false);
   const [bulkBusy, setBulkBusy] = useState<null | "start" | "stop">(null);
   const [confirmStop, setConfirmStop] = useState(false);
-  const [remoteConfigOpen, setRemoteConfigOpen] = useState(false);
   // 轮询开关默认关闭：默认策略是「启动检测一次 + 按需手动/单服务刷新」，
   // 全量探测在 Windows 上开销大，常驻轮询得不偿失（需要时在设置里配间隔）
   const [live, setLive] = useState(false);
@@ -231,13 +229,6 @@ export default function Dashboard() {
             </Button>
             <Button
               variant="outlined"
-              startIcon={<DnsOutlined />}
-              onClick={() => setRemoteConfigOpen(true)}
-            >
-              远程服务
-            </Button>
-            <Button
-              variant="outlined"
               color="warning"
               onClick={() => setConfirmStop(true)}
               disabled={bulkBusy !== null}
@@ -273,7 +264,6 @@ export default function Dashboard() {
         <ReadinessCard
           services={services}
           envMap={envMap}
-          onOpenRemoteConfig={() => setRemoteConfigOpen(true)}
           onStartService={(id) =>
             void api
               .start(id)
@@ -345,13 +335,6 @@ export default function Dashboard() {
           </Button>
         </DialogActions>
       </Dialog>
-
-      {/* 远程服务配置：虚拟机/远程主机上的第三方中间件地址集中查看与编辑 */}
-      <RemoteServicesDialog
-        open={remoteConfigOpen}
-        onClose={() => setRemoteConfigOpen(false)}
-        onSaved={() => void refreshServices(["redis", "vernemq", "minio"])}
-      />
 
       <Dialog open={diag !== null} onClose={() => setDiag(null)} maxWidth="sm" fullWidth>
         <DialogTitle sx={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>

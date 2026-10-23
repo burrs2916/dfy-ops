@@ -17,8 +17,6 @@ import { useOpsStore } from "../store";
 import type { CheckStatus, ServiceEnvReport, ServiceStatus } from "../types";
 import { StatusBadge } from "./StatusBadge";
 import { ServiceDiscoveryDialog } from "./ServiceDiscoveryDialog";
-import { RemoteServicesDialog } from "./RemoteServicesDialog";
-
 const KIND_LABEL: Record<string, string> = {
   vertx: "Vert.x",
   vue_spa: "Vue3",
@@ -48,7 +46,6 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
   const [reloading, setReloading] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
-  const [remoteConfigOpen, setRemoteConfigOpen] = useState(false);
 
   // 卡片级快捷操作：执行期间禁点，完成后只刷新本服务 + 其依赖
   //（启动会级联拉起 dependsOn，依赖的状态也可能变化），不做全量探测，
@@ -145,16 +142,16 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
                 sx={{ flexShrink: 0 }}
               >
                 {s.runState === "needs-config" ? (
-                  <Tooltip title="服务部署在虚拟机/远程主机：先配置远程地址，检测才有意义">
+                  <Tooltip title="服务部署在虚拟机/远程主机：去运维中心「远程部署」配置地址">
                     <Button
                       size="small"
                       variant="contained"
                       color="warning"
                       startIcon={<Dns fontSize="small" />}
-                      onClick={() => setRemoteConfigOpen(true)}
+                      onClick={() => navigate("/ops?tab=deploy")}
                       sx={{ mr: 0.5, whiteSpace: "nowrap" }}
                     >
-                      配置地址
+                      配置部署
                     </Button>
                   </Tooltip>
                 ) : (
@@ -228,12 +225,6 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
         onClose={() => setDiscovering(false)}
         targets={[s.id]}
         onAdopted={() => void reload()}
-      />
-      {/* 待配置态的显式入口：手填与扫描发现都在这里完成 */}
-      <RemoteServicesDialog
-        open={remoteConfigOpen}
-        onClose={() => setRemoteConfigOpen(false)}
-        onSaved={() => void reload()}
       />
     </Card>
   );
