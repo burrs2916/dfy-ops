@@ -59,7 +59,6 @@ import TuneIcon from "@mui/icons-material/Tune";
 import BackupIcon from "@mui/icons-material/Backup";
 import RestoreIcon from "@mui/icons-material/Restore";
 import ChevronRightIcon from "@mui/icons-material/ChevronRight";
-import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import DescriptionIcon from "@mui/icons-material/Description";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import NetworkCheckIcon from "@mui/icons-material/NetworkCheck";
@@ -918,11 +917,17 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                         });
                       }}
                     >
-                      {open ? (
-                        <ExpandMoreIcon sx={{ fontSize: 16, color: "text.secondary", mr: 0.5 }} />
-                      ) : (
-                        <ChevronRightIcon sx={{ fontSize: 16, color: "text.secondary", mr: 0.5 }} />
-                      )}
+                      {/* 展开指示器：统一细箭头（展开时旋转 90°），避免实心三角被误读为下拉框 */}
+                      <ChevronRightIcon
+                        sx={{
+                          fontSize: 16,
+                          color: "text.secondary",
+                          mr: 0.5,
+                          flexShrink: 0,
+                          transition: "transform 0.15s ease",
+                          transform: open ? "rotate(90deg)" : "none",
+                        }}
+                      />
                       <StorageIcon
                         sx={{ fontSize: 15, mr: 1, color: sysDbs.has(d) ? "text.disabled" : "primary.main" }}
                       />
