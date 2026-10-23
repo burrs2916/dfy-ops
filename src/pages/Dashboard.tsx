@@ -270,7 +270,12 @@ export default function Dashboard() {
           </Stack>
         </Card>
       ) : (
-        <ReadinessCard services={services} envMap={envMap} />
+        <ReadinessCard
+          services={services}
+          envMap={envMap}
+          onOpenRemoteConfig={() => setRemoteConfigOpen(true)}
+          onStartService={(id) => void api.start(id).then(() => refreshServices([id]))}
+        />
       )}
 
       {error && <Alert severity="error">{error}（请确认运维后端已在 127.0.0.1:18721 运行）</Alert>}

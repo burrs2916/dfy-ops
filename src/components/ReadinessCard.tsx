@@ -1,7 +1,28 @@
-import { Box, Card, Chip, CircularProgress, Stack, Typography } from "@mui/material";
+import { Box, Button, Card, Chip, CircularProgress, Stack, Typography } from "@mui/material";
+import {
+  Build,
+  CheckCircle,
+  Dns,
+  PlayArrow,
+  RocketLaunchOutlined,
+  SettingsSuggest,
+} from "@mui/icons-material";
+import { useNavigate } from "react-router-dom";
 import type { ServiceEnvReport, ServiceStatus } from "../types";
 
 type Tone = "success" | "warning" | "error";
+
+/** 待办行动项：一条「环境缺失/待配置/未运行」问题 + 直达解决入口 */
+interface ActionItem {
+  key: string;
+  severity: "error" | "warning";
+  icon: React.ReactNode;
+  /** 问题一句话：点名服务与缺失内容 */
+  text: string;
+  /** 行动按钮文案 */
+  action: string;
+  onAct: () => void;
+}
 
 /**
  * 部署就绪度卡片。
@@ -11,17 +32,25 @@ type Tone = "success" | "warning" | "error";
  *  - 桌面客户端（isDaemon=false，如 Tauri GUI）直接计入分母——它就是被运维的
  *    服务之一，未运行就拉低分数，与其他服务平等处理；
  *  - 总百分比 + 分段进度条：自研段（深）与第三方段（浅）分色，挂了哪类一眼可见；
- *  - 文案拆解 n/n = 自研 x/y + 第三方 z/w，不再给一个看不出构成的裸数字；
- *  - 桌面客户端有一块**常驻**区域，用彩色圆点显示每个客户端的在线/未运行——
- *    一眼看清 GUI 客户端的实时状态，不必去翻服务卡。
+ *  - 「待办行动」区块：未就绪不再只是标签——每条直接点名缺什么（服务 × 原因 ×
+ *    具体缺失项），并给出一键解决入口（配置地址 / 启动 / 去修复），用户不用自己
+ *    推断下一步；
+ *  - 桌面客户端有一块**常驻**区域，用彩色圆点显示每个客户端的在线/未运行。
  */
 export default function ReadinessCard({
   services,
   envMap,
+  onOpenRemoteConfig,
+  onStartService,
 }: {
   services: ServiceStatus[];
   envMap: Record<string, ServiceEnvReport>;
+  /** 待办「配置远程地址」：打开远程服务配置面板 */
+  onOpenRemoteConfig: () => void;
+  /** 待办「立即启动」：直接拉起受管服务 */
+  onStartService?: (id: string) => void;
 }) {
+  const navigate = useNavigate();
   // 全部服务计入分母（桌面客户端平等参与）。
   const managed = services;
   const own = managed.filter((s) => !s.thirdParty);
@@ -67,17 +96,75 @@ export default function ReadinessCard({
 
   const tone: Tone = pct === 100 ? "success" : pct === 0 ? "error" : "warning";
 
-  const notReady = managed
-    .filter((s) => !isReady(s))
-    .map((s) => {
-      const e = envMap[s.id];
-      let reason = "";
-      if (!s.running) reason = "未运行";
-      else if (!s.healthy) reason = "端口不可达";
-      else if (e && e.overall !== "pass")
-        reason = e.overall === "fail" ? "环境缺失" : "环境警告";
-      return { name: s.name, reason, third: s.thirdParty };
-    });
+  // ===== 待办行动清单：按严重度排序，每条带直达解决入口 =====
+  const actions: ActionItem[] = [];
+  for (const s of managed) {
+    // 1. 待配置地址（先设置、后检测）：第三方服务未配置远程地址
+    if (s.runState === "needs-config") {
+      actions.push({
+        key: `needs-config-${s.id}`,
+        severity: "warning",
+        icon: <Dns fontSize="small" />,
+        text: `${s.name}：部署在虚拟机/远程主机，尚未配置远程地址，无法监测`,
+        action: "去配置",
+        onAct: onOpenRemoteConfig,
+      });
+      continue;
+    }
+    // 2. 未安装：明确判定缺失
+    if (!s.installed && !s.thirdParty) {
+      actions.push({
+        key: `missing-${s.id}`,
+        severity: "error",
+        icon: <RocketLaunchOutlined fontSize="small" />,
+        text: `${s.name}：尚未安装`,
+        action: "去安装",
+        onAct: () => navigate(`/service/${s.id}`),
+      });
+      continue;
+    }
+    // 3. 未运行（受管服务可直接拉起；第三方不可托管只能提示）
+    if (!s.running && s.installed && !s.thirdParty) {
+      actions.push({
+        key: `stopped-${s.id}`,
+        severity: "error",
+        icon: <PlayArrow fontSize="small" />,
+        text: `${s.name}：未运行`,
+        action: "立即启动",
+        onAct: () => onStartService?.(s.id),
+      });
+      continue;
+    }
+    // 4. 运行但端口不可达
+    if (s.running && !s.healthy) {
+      actions.push({
+        key: `unreach-${s.id}`,
+        severity: "error",
+        icon: <Build fontSize="small" />,
+        text: `${s.name}：进程在但端口不可达`,
+        action: "查看详情",
+        onAct: () => navigate(`/service/${s.id}`),
+      });
+      continue;
+    }
+    // 5. 环境检查不满足：点名具体的缺失项（缺什么一眼可见）
+    const env = envMap[s.id];
+    if (env && env.overall !== "pass") {
+      const bad = env.items.filter((i) => i.status !== "pass").slice(0, 2);
+      const detail = bad
+        .map((i) => `${i.name}${i.status === "fail" ? "（缺失）" : "（警告）"}`)
+        .join("、");
+      actions.push({
+        key: `env-${s.id}`,
+        severity: env.overall === "fail" ? "error" : "warning",
+        icon: <SettingsSuggest fontSize="small" />,
+        text: `${s.name}：${detail}${env.items.filter((i) => i.status !== "pass").length > 2 ? " 等" : ""}`,
+        action: "去修复",
+        onAct: () => navigate("/env"),
+      });
+    }
+  }
+  const errorCount = actions.filter((a) => a.severity === "error").length;
 
   // 分段进度条：按就绪的自研/第三方占比分色，未就绪部分留底色。
   const seg = (n: number) => `${(n / Math.max(total, 1)) * 100}%`;
@@ -114,6 +201,13 @@ export default function ReadinessCard({
             variant="outlined"
             label={envLoaded ? `环境满足 ${envPass}/${total}` : "环境检测中…"}
           />
+          {actions.length > 0 && (
+            <Chip
+              size="small"
+              color={errorCount > 0 ? "error" : "warning"}
+              label={errorCount > 0 ? `待处理 ${actions.length}（${errorCount} 严重）` : `待处理 ${actions.length}`}
+            />
+          )}
         </Stack>
       </Stack>
 
@@ -181,22 +275,48 @@ export default function ReadinessCard({
         </Box>
       )}
 
-      {notReady.length > 0 && (
+      {/* 待办行动：每条问题点名缺失内容 + 一键解决；全部就绪时给明确绿灯 */}
+      {actions.length > 0 ? (
         <Box sx={{ mt: 2 }}>
           <Typography variant="caption" color="text.secondary">
-            未就绪（{notReady.length}）：
+            待处理（{actions.length}）——按严重度排序：
           </Typography>
-          <Stack direction="row" spacing={1} flexWrap="wrap" useFlexGap sx={{ mt: 0.5 }}>
-            {notReady.map((n) => (
-              <Chip
-                key={n.name}
-                size="small"
-                color={n.reason === "环境缺失" || n.reason === "未运行" ? "error" : "warning"}
-                label={`${n.name}${n.third ? "（第三方）" : ""} · ${n.reason}`}
-              />
+          <Stack spacing={0.75} sx={{ mt: 0.75 }}>
+            {actions.map((a) => (
+              <Stack
+                key={a.key}
+                direction="row"
+                spacing={1}
+                alignItems="center"
+                sx={{
+                  px: 1.25,
+                  py: 0.75,
+                  borderRadius: 1.5,
+                  bgcolor: a.severity === "error" ? "rgba(163,45,45,0.05)" : "rgba(186,117,23,0.05)",
+                  border: 1,
+                  borderColor: a.severity === "error" ? "rgba(163,45,45,0.18)" : "rgba(186,117,23,0.22)",
+                }}
+              >
+                <Box sx={{ color: a.severity === "error" ? "error.main" : "warning.main", display: "flex", flexShrink: 0 }}>
+                  {a.icon}
+                </Box>
+                <Typography variant="caption" sx={{ flex: 1, minWidth: 0, lineHeight: 1.45 }}>
+                  {a.text}
+                </Typography>
+                <Button size="small" variant="outlined" onClick={a.onAct} sx={{ flexShrink: 0, whiteSpace: "nowrap" }}>
+                  {a.action}
+                </Button>
+              </Stack>
             ))}
           </Stack>
         </Box>
+      ) : (
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 2 }}>
+          <CheckCircle color="success" fontSize="small" />
+          <Typography variant="body2" sx={{ fontWeight: 600 }}>
+            一切就绪：所有服务运行正常，环境全部满足
+          </Typography>
+        </Stack>
       )}
     </Card>
   );
