@@ -156,10 +156,21 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
         return;
       }
       setConfigured((c) => ({ ...c, [id]: true }));
-      const svcName = SERVICES.find((s) => s.id === id)?.name ?? id;
+      const svc = SERVICES.find((x) => x.id === id);
+      const svcName = svc?.name ?? id;
+      // 凭据状态必须说清楚，让用户一眼知道这次保存到底做了什么：
+      // 设了密码 → 明确告知已设置（框中圆点即当前密码，眼睛可核对）；
+      // 没设密码 → 明确告知将以无认证方式访问，不是遗漏
+      const credPart = svc?.needUsername
+        ? `MQTT 账号「${v.username.trim() || "guest"}」${
+            v.password ? "的密码已设置（框中圆点即当前密码，点眼睛可核对）" : "，未设置密码（匿名访问）"
+          }`
+        : v.password
+          ? "访问密码已设置（框中圆点即当前密码，点眼睛可核对）"
+          : "未设置访问密码（无认证访问）";
       setMsg({
         severity: "success",
-        text: `${svcName} 远程地址已保存为 ${input.host}:${input.port}（凭据已按当前填写更新）——已写入配置文件持久化，重启应用后仍生效；服务状态即将按新地址检测。`,
+        text: `${svcName} 远程地址已保存为 ${input.host}:${input.port}；${credPart}——已写入应用配置持久化，重启后仍生效，服务状态即将按新地址检测。`,
       });
       onSaved?.();
       void reload();
