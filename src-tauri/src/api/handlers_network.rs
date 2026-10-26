@@ -237,7 +237,7 @@ async fn identify(ip: Ipv4Addr, port: u16, fallback: &str) -> (String, String) {
     let result = tokio::task::spawn_blocking(move || match kind.as_str() {
         "redis" => probe_redis(addr),
         "minio" => probe_minio(addr),
-        "vernemq" => probe_mqtt(addr),
+        "vernemq" => probe_mqtt(addr, "", "").map(|(ok, d)| if ok { ("VerneMQ".into(), d) } else { ("MQTT?".into(), d) }),
         _ => Ok(("open".into(), "端口开放".into())),
     })
     .await
@@ -289,28 +289,90 @@ fn probe_minio(addr: SocketAddr) -> Result<(String, String), String> {
     }
 }
 
-/// MQTT 3.1.1 CONNECT 握手：收到 CONNACK（0x20 首字节）即确认 MQTT broker。
-/// 固定编码 CONNECT 包：协议名 "MQTT" + level 4 + clean session + keepalive 60，
-/// client id "dfy-ops"（服务端只回 CONNACK，不会留存订阅等副作用）。
-fn probe_mqtt(addr: SocketAddr) -> Result<(String, String), String> {
+/// MQTT 剩余长度 varint 编码（MQTT 2.2.3 规范：每字节低 7 位，最高位续传标志）。
+/// 密码较长时 CONNECT 总长会超过 127，固定单字节编码会静默构造出非法包。
+fn encode_mqtt_varint(mut n: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let mut byte = (n % 128) as u8;
+        n /= 128;
+        if n > 0 {
+            byte |= 0x80;
+        }
+        out.push(byte);
+        if n == 0 {
+            break;
+        }
+    }
+    out
+}
+
+/// 构造 MQTT 3.1.1 CONNECT 包（真实客户端式握手）：可变头 + payload，
+/// 带 clean session、keepalive 60s，按需携带 username/password——
+/// RabbitMQ（MQTT 插件）等要求认证的 broker 只对带凭证的 CONNECT 给出有效反馈。
+fn build_connect_packet(client_id: &str, username: Option<&str>, password: Option<&str>) -> Vec<u8> {
+    // MQTT 规范要求 password flag 必须伴随 username flag；只有密码没有用户名时
+    // 用 guest 兜底，避免构造出协议非法的包被 broker 直接断开。
+    let username = match (username, password) {
+        (None, Some(_)) => Some("guest"),
+        (u, _) => u,
+    };
+    let mut payload = Vec::new();
+    for field in [Some(client_id), username, password].into_iter().flatten() {
+        payload.extend_from_slice(&(field.len() as u16).to_be_bytes());
+        payload.extend_from_slice(field.as_bytes());
+    }
+    let mut flags = 0x02u8; // clean session
+    if username.is_some() {
+        flags |= 0x80;
+    }
+    if password.is_some() {
+        flags |= 0x40;
+    }
+    let mut packet = vec![0x00, 0x04, b'M', b'Q', b'T', b'T', 0x04, flags, 0x00, 0x3C];
+    packet.extend_from_slice(&payload);
+    let mut out = vec![0x10];
+    out.extend_from_slice(&encode_mqtt_varint(packet.len()));
+    out.extend_from_slice(&packet);
+    out
+}
+
+/// MQTT CONNECT 握手：真实客户端式连接，解析 CONNACK 返回码给出明确反馈。
+/// 返回 (是否握手成功, 反馈详情)：收到 CONNACK（无论接受与否）即证明端口上是
+/// MQTT 服务；Err 表示连 MQTT 反馈都没有（连接被关闭 / 非 MQTT 响应）。
+fn probe_mqtt(addr: SocketAddr, username: &str, password: &str) -> Result<(bool, String), String> {
     let mut s = connect(addr)?;
     use std::io::{Read, Write};
-    let connect_packet: &[u8] = &[
-        0x10, 0x12, // CONNECT，剩余长度 18
-        0x00, 0x04, b'M', b'Q', b'T', b'T', // 协议名
-        0x04, // level 4（MQTT 3.1.1）
-        0x02, // clean session
-        0x00, 0x3C, // keepalive 60s
-        0x00, 0x06, b'd', b'f', b'y', b'-', b'o', b'p', b's', // client id "dfy-ops"
-    ];
-    s.write_all(connect_packet)
+    let uname = if username.is_empty() { None } else { Some(username) };
+    let pword = if password.is_empty() { None } else { Some(password) };
+    let packet = build_connect_packet("dfy-ops", uname, pword);
+    s.write_all(&packet)
         .map_err(|e| format!("发送 MQTT CONNECT 失败：{e}"))?;
-    let mut buf = [0u8; 4];
-    let n = s.read(&mut buf).map_err(|e| format!("读取响应失败：{e}"))?;
-    if n >= 1 && buf[0] & 0xF0 == 0x20 {
-        Ok(("VerneMQ".into(), "MQTT 握手已确认".into()))
-    } else {
-        Err("响应不是 MQTT CONNACK".into())
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 64];
+    while buf.len() < 4 {
+        match s.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(e) => return Err(format!("等待 Broker 反馈失败：{e}")),
+        }
+    }
+    if buf.is_empty() {
+        // TCP 通了但对 CONNECT 毫无回应直接关闭——最常见的是账号禁止远程登录
+        return Err("连接被服务端关闭，未返回任何 MQTT 反馈——常见原因：账号仅限本机登录（RabbitMQ 的 guest 默认如此）或代理剥断了连接".into());
+    }
+    if buf[0] & 0xF0 != 0x20 {
+        return Err("响应不是 MQTT CONNACK——该端口可能不是 MQTT 服务".into());
+    }
+    let rc = if buf.len() >= 4 { buf[3] } else { 0xFF };
+    match rc {
+        0x00 => Ok((true, "MQTT 握手成功，Broker 已接受连接".into())),
+        0x01 => Ok((false, "端口确认是 MQTT 服务，但协议版本未被接受（broker 不支持 MQTT 3.1.1）".into())),
+        0x02 => Ok((false, "端口确认是 MQTT 服务，但客户端标识被 Broker 拒绝".into())),
+        0x03 => Ok((false, "端口确认是 MQTT 服务，但 Broker 暂时不可用（可能达到连接上限）".into())),
+        0x04 => Ok((false, "端口确认是 MQTT 服务，但认证被拒：用户名或密码不正确".into())),
+        0x05 => Ok((false, "端口确认是 MQTT 服务，但该账号未获授权连接".into())),
+        _ => Ok((false, "端口确认是 MQTT 服务，但连接被 Broker 拒绝".into())),
     }
 }
 
@@ -396,29 +458,32 @@ pub fn service_remote(state: &AppState, service_id: &str) -> Option<(String, u16
 }
 
 /// 查询服务当前远程端点（未配置返回 null，前端据此显示「未配置」引导）。
-/// 密码不回显明文，只返回是否已设置。
+/// 用户名与密码回显明文：本机运维平台的信任边界就是本机磁盘（与 *_credential
+/// 存储同级），密码框直接显示已存值（掩码 + 可切换明文），无需「留空不改」猜测语义。
 pub async fn get_remote(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(service_id): axum::extract::Path<String>,
 ) -> Json<serde_json::Value> {
     if service_id == "redis" {
         if !crate::ops::redis_credential::is_configured(&state.config_dir) {
-            return Json(serde_json::json!({ "host": null, "port": null, "password_set": false }));
+            return Json(serde_json::json!({ "host": null, "port": null, "username": "", "password": "" }));
         }
         let cred = crate::ops::redis_credential::load(&state.config_dir);
         return Json(serde_json::json!({
             "host": cred.host,
             "port": cred.port,
-            "password_set": !cred.password.is_empty(),
+            "username": "",
+            "password": cred.password,
         }));
     }
     match crate::ops::remote_endpoints::load(&state.config_dir, &service_id) {
         Some(e) => Json(serde_json::json!({
             "host": e.host,
             "port": e.port,
-            "password_set": !e.password.is_empty(),
+            "username": e.username,
+            "password": e.password,
         })),
-        None => Json(serde_json::json!({ "host": null, "port": null, "password_set": false })),
+        None => Json(serde_json::json!({ "host": null, "port": null, "username": "", "password": "" })),
     }
 }
 
@@ -426,14 +491,19 @@ pub async fn get_remote(
 pub struct SaveRemoteReq {
     pub host: String,
     pub port: u16,
-    /// 可选访问密码：空 = 无认证 / 保持 Redis 已有密码不变
+    /// 可选认证用户名（MQTT broker）：缺省（扫描采用）= 不改动已存值，
+    /// 显式传值（含空串）= 覆盖。
     #[serde(default)]
-    pub password: String,
+    pub username: Option<String>,
+    /// 可选访问密码：缺省（扫描采用）= 不改动已存密码，
+    /// 显式传值（含空串）= 覆盖（用户在回显框里清空即主动删除密码）。
+    #[serde(default)]
+    pub password: Option<String>,
 }
 
 /// 保存服务远程端点：服务发现「采用」与手动配置共用入口。
-/// Redis 写 redis_credential（密码仅在填写时更新），其余写 remote_endpoints
-/// （密码为可选字段，空 = 无认证）。
+/// Redis 写 redis_credential，其余写 remote_endpoints。username/password
+/// 缺省时沿用已存值——服务发现只确认地址，绝不能悄悄抹掉已有凭据。
 pub async fn save_remote(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(service_id): axum::extract::Path<String>,
@@ -447,19 +517,24 @@ pub async fn save_remote(
         let mut cred = crate::ops::redis_credential::load(&state.config_dir);
         cred.host = host;
         cred.port = req.port;
-        if !req.password.trim().is_empty() {
-            cred.password = req.password.trim().to_string();
+        if let Some(p) = req.password {
+            cred.password = p.trim().to_string();
         }
         crate::ops::redis_credential::save(&state.config_dir, &cred)
     } else {
+        let prev = crate::ops::remote_endpoints::load(&state.config_dir, &service_id);
+        let username = match req.username {
+            Some(u) => u.trim().to_string(),
+            None => prev.as_ref().map(|e| e.username.clone()).unwrap_or_default(),
+        };
+        let password = match req.password {
+            Some(p) => p.trim().to_string(),
+            None => prev.as_ref().map(|e| e.password.clone()).unwrap_or_default(),
+        };
         crate::ops::remote_endpoints::save(
             &state.config_dir,
             &service_id,
-            &crate::ops::remote_endpoints::RemoteEndpoint {
-                host,
-                port: req.port,
-                password: req.password.trim().to_string(),
-            },
+            &crate::ops::remote_endpoints::RemoteEndpoint { host, port: req.port, username, password },
         )
     };
     match result {
@@ -474,6 +549,9 @@ pub async fn save_remote(
 pub struct RemoteTestReq {
     pub host: String,
     pub port: u16,
+    /// 认证用户名（MQTT broker 等）：空则由测试逻辑按服务类型取默认值
+    #[serde(default)]
+    pub username: String,
     #[serde(default)]
     pub password: String,
 }
@@ -484,12 +562,12 @@ const TEST_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 远程端点测试（用表单当前值，不落盘）：用户填完地址点「测试」即可知道配置对不对，
 /// 不用先保存再盯着服务状态猜。各服务的验证深度与服务身份识别一致：
-/// - Redis：AUTH（有密码时）+ PING——密码错误/需要密码能明确报出（密码留空回退已保存凭据，与「留空不改」语义一致）
-/// - VerneMQ：MQTT CONNECT 握手确认 broker 身份；需认证的 broker 返回失败码，同样证明端口上是 MQTT 服务
+/// - Redis：AUTH（有密码时）+ PING——密码错误/需要密码能明确报出
+/// - VerneMQ：真实客户端式 MQTT 握手（带用户名密码），CONNACK 返回码逐项解读——
+///   认证被拒、guest 禁止远程登录等都有明确反馈，不再笼统「未确认」
 /// - MinIO：HTTP 特征确认（访问密钥需 S3 签名才能验证，纯探测做不到，如实说明）
 /// - GreptimeDB：HTTP GET /health 返回 2xx 确认
 pub async fn remote_test(
-    State(state): State<Arc<AppState>>,
     axum::extract::Path(service_id): axum::extract::Path<String>,
     Json(req): Json<RemoteTestReq>,
 ) -> Json<serde_json::Value> {
@@ -500,9 +578,8 @@ pub async fn remote_test(
             "error": "主机地址不能为空：请先填写虚拟机/远程主机的 IP 地址"
         }));
     }
-    let config_dir = state.config_dir.clone();
     let res = tokio::task::spawn_blocking(move || {
-        run_remote_test(&service_id, &config_dir, &host, req.port, req.password.trim())
+        run_remote_test(&service_id, &host, req.port, req.username.trim(), req.password.trim())
     })
     .await
     .unwrap_or_else(|_| Err("测试任务执行失败".into()));
@@ -515,23 +592,18 @@ pub async fn remote_test(
 /// 同步执行一次端点测试：Ok((warn, detail)) —— warn=true 表示端口通但服务身份未确认。
 fn run_remote_test(
     service_id: &str,
-    config_dir: &Path,
     host: &str,
     port: u16,
+    username: &str,
     password: &str,
 ) -> Result<(bool, String), String> {
     let started = Instant::now();
     let (warn, detail) = match service_id {
         "redis" => {
-            // 留空不改：回退已保存凭据的密码，测的才是「保存后」的真实状态
-            let mut pwd = password.to_string();
-            if pwd.is_empty() {
-                pwd = crate::ops::redis_credential::load(config_dir).password;
-            }
             let cred = crate::ops::redis_credential::RedisCredential {
                 host: host.to_string(),
                 port,
-                password: pwd,
+                password: password.to_string(),
             };
             let mut conn = crate::api::handlers_redis::open_conn(&cred)?;
             let pong: String = redis::cmd("PING")
@@ -544,11 +616,18 @@ fn run_remote_test(
         }
         "vernemq" => {
             let addr = resolve_one(host, port)?;
-            match probe_mqtt(addr) {
-                Ok((_, d)) => (false, d),
-                Err(_) => (
+            // 密码非空而用户名留空时按 MQTT 生态最常见默认账号 guest 尝试
+            let u = if username.is_empty() && !password.is_empty() {
+                "guest"
+            } else {
+                username
+            };
+            match probe_mqtt(addr, u, password) {
+                Ok((true, d)) => (false, d),
+                Ok((false, d)) => (true, d),
+                Err(e) => (
                     true,
-                    "端口连通，但 MQTT 握手未确认——请核对端口是否为 MQTT 服务端口".to_string(),
+                    format!("端口连通，但未拿到 MQTT 握手反馈——{e}"),
                 ),
             }
         }
@@ -663,5 +742,61 @@ mod tests {
         // 错误信息必须给出补救指引（前缀范围），而不是只说"格式错误"
         let err = parse_cidr("10.0.0.0/8").unwrap_err();
         assert!(err.contains("/22"), "错误提示应说明可选前缀范围：{err}");
+    }
+
+    #[test]
+    fn mqtt_varint_encodes_boundaries() {
+        assert_eq!(encode_mqtt_varint(0), vec![0x00]);
+        assert_eq!(encode_mqtt_varint(127), vec![0x7F]);
+        // 128 起进第二字节（0x80 续传位）
+        assert_eq!(encode_mqtt_varint(128), vec![0x80, 0x01]);
+        assert_eq!(encode_mqtt_varint(16383), vec![0xFF, 0x7F]);
+        assert_eq!(encode_mqtt_varint(16384), vec![0x80, 0x80, 0x01]);
+    }
+
+    #[test]
+    fn connect_packet_anonymous_structure() {
+        let p = build_connect_packet("dfy-ops", None, None);
+        assert_eq!(p[0], 0x10); // CONNECT
+        // 剩余长度 = 可变头 10 + clientId(2+7) = 19，单字节 varint
+        assert_eq!(p[1], 19);
+        assert_eq!(&p[2..8], b"\x00\x04MQTT");
+        assert_eq!(p[8], 0x04); // level 4
+        assert_eq!(p[9], 0x02); // clean session only，无用户名密码标志
+        assert_eq!(p.len(), 2 + 19);
+    }
+
+    #[test]
+    fn connect_packet_with_credentials() {
+        let p = build_connect_packet("dfy-ops", Some("guest"), Some("dfy123456"));
+        assert_eq!(p[0], 0x10);
+        assert_eq!(p[9], 0x02 | 0x80 | 0x40); // clean session + username + password
+        // payload 顺序：clientId(2+7) + username(2+5) + password(2+9)，可变头 10
+        let remaining = 10 + (2 + 7) + (2 + 5) + (2 + 9);
+        assert_eq!(p[1], remaining as u8);
+        // username 出现在 clientId 之后
+        let uname_at = 2 + 10 + (2 + 7);
+        assert_eq!(&p[uname_at..uname_at + 2], &[0, 5]);
+        assert_eq!(&p[uname_at + 2..uname_at + 7], b"guest");
+    }
+
+    /// 只有密码没有用户名：协议要求 password 伴随 username，应自动以 guest 兜底
+    #[test]
+    fn connect_packet_password_without_username_fills_guest() {
+        let p = build_connect_packet("dfy-ops", None, Some("secret"));
+        assert_eq!(p[9], 0x02 | 0x80 | 0x40);
+        let uname_at = 2 + 10 + (2 + 7);
+        assert_eq!(&p[uname_at + 2..uname_at + 7], b"guest");
+    }
+
+    /// 密码很长时剩余长度超过 127：varint 必须多字节，否则包是非法的
+    #[test]
+    fn connect_packet_long_password_varint() {
+        let long_pwd = "x".repeat(150);
+        let p = build_connect_packet("dfy-ops", Some("u"), Some(&long_pwd));
+        // 剩余长度 = 10 + (2+7) + (2+1) + (2+150) = 174 > 127
+        assert_eq!(p[1], 0xAE); // 174 = 0b10101110 → 低7位 0x2E | 0x80
+        assert_eq!(p[2], 0x01);
+        assert_eq!(p[1] as usize & 0x7F | ((p[2] as usize) << 7), 174);
     }
 }

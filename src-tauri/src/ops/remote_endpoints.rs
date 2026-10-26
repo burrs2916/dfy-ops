@@ -18,6 +18,10 @@ use std::path::Path;
 pub struct RemoteEndpoint {
     pub host: String,
     pub port: u16,
+    /// 可选认证用户名（MQTT broker 等）：空 = 未设置。明文存储，信任边界与本机
+    /// 配置目录一致（与 *_credential 同级），加密只增加伪安全感。
+    #[serde(default)]
+    pub username: String,
     /// 可选访问密码（MinIO 等）：空 = 无认证。明文存储，信任边界与本机
     /// 配置目录一致（与 *_credential 同级），加密只增加伪安全感。
     #[serde(default)]
@@ -61,10 +65,12 @@ mod tests {
         let ep = RemoteEndpoint {
             host: "192.168.56.101".into(),
             port: 18830,
+            username: "guest".into(),
             password: String::new(),
         };
         save(&dir, "vernemq", &ep).unwrap();
         assert_eq!(load(&dir, "vernemq").unwrap().port, 18830);
+        assert_eq!(load(&dir, "vernemq").unwrap().username, "guest");
         assert!(load(&dir, "minio").is_none());
         save(
             &dir,
@@ -72,6 +78,7 @@ mod tests {
             &RemoteEndpoint {
                 host: "10.0.0.5".into(),
                 port: 9000,
+                username: String::new(),
                 password: "minio-secret".into(),
             },
         )
@@ -85,5 +92,23 @@ mod tests {
     fn missing_file_is_none() {
         let dir = std::env::temp_dir().join("dfy-ops-remote-ep-missing");
         assert!(load(&dir, "vernemq").is_none());
+    }
+
+    /// 旧版本配置文件没有 username 字段：serde default 必须兜住，不能反序列化失败。
+    #[test]
+    fn legacy_config_without_username_loads() {
+        let dir = std::env::temp_dir().join(format!("dfy-ops-remote-ep-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            path(&dir),
+            r#"{"vernemq":{"host":"1.2.3.4","port":1883,"password":"p"}}"#,
+        )
+        .unwrap();
+        let ep = load(&dir, "vernemq").unwrap();
+        assert_eq!(ep.host, "1.2.3.4");
+        assert_eq!(ep.username, "");
+        assert_eq!(ep.password, "p");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

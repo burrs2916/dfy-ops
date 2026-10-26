@@ -4,26 +4,44 @@ import {
   Box,
   Button,
   CircularProgress,
+  IconButton,
+  InputAdornment,
   Stack,
   TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
-import { Dns, NetworkCheck, Radar, Refresh, TravelExplore } from "@mui/icons-material";
+import {
+  Dns,
+  NetworkCheck,
+  Radar,
+  Refresh,
+  TravelExplore,
+  Visibility,
+  VisibilityOff,
+} from "@mui/icons-material";
 import { api } from "../api";
 import { ServiceDiscoveryDialog } from "./ServiceDiscoveryDialog";
 
 /** 可配置远程端点的第三方服务元数据（与后端检测口径一一对应）。
- *  四个服务均可选配访问密码：留空 = 无认证 / 保持已设密码不变。
+ *  各服务均可选配认证凭据：已保存的密码回显在框里（掩码 + 小眼睛切换明文）。
  *  GreptimeDB 是边缘计算的附属时序库（随 Edge Conductor 启动），同样只配端点做可达性检测。 */
 const SERVICES: {
   id: string;
   name: string;
   desc: string;
   defaultPort: number;
+  /** MQTT broker 还需要用户名才能握手，行内多展示一个用户名输入框 */
+  needUsername?: boolean;
 }[] = [
   { id: "redis", name: "Redis", desc: "缓存与键值存储", defaultPort: 6379 },
-  { id: "vernemq", name: "VerneMQ", desc: "MQTT 消息代理（兼容标准 1883）", defaultPort: 18830 },
+  {
+    id: "vernemq",
+    name: "VerneMQ",
+    desc: "MQTT 消息代理（RabbitMQ 等 broker 通用）",
+    defaultPort: 18830,
+    needUsername: true,
+  },
   { id: "minio", name: "MinIO", desc: "对象存储", defaultPort: 9000 },
   { id: "greptime", name: "GreptimeDB", desc: "时序数据库（随边缘计算启动）", defaultPort: 4000 },
 ];
@@ -42,7 +60,7 @@ export interface RemoteServicesPanelProps {
   onSaved?: () => void;
 }
 
-type EndpointState = { host: string; port: string; password: string };
+type EndpointState = { host: string; port: string; username: string; password: string };
 
 /**
  * 远程部署面板（网关地址配置）。
@@ -58,7 +76,8 @@ type EndpointState = { host: string; port: string; password: string };
 export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
   const [values, setValues] = useState<Record<string, EndpointState>>({});
   const [configured, setConfigured] = useState<Record<string, boolean>>({});
-  const [passwordSet, setPasswordSet] = useState<Record<string, boolean>>({});
+  /** 密码可见性（小眼睛）：按行独立切换，默认掩码显示 */
+  const [showPwd, setShowPwd] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState<string | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
@@ -78,25 +97,24 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
             const r = await api.serviceRemote(s.id);
             return [s.id, r] as const;
           } catch {
-            return [s.id, { host: null, port: null, password_set: false }] as const;
+            return [s.id, { host: null, port: null, username: "", password: "" }] as const;
           }
         }),
       );
       const nextValues: Record<string, EndpointState> = {};
       const nextConfigured: Record<string, boolean> = {};
-      const nextPwdSet: Record<string, boolean> = {};
       for (const [id, r] of results) {
         nextValues[id] = {
           host: r.host ?? "",
           port: String(r.port ?? SERVICES.find((s) => s.id === id)?.defaultPort ?? ""),
-          password: "",
+          username: r.username ?? "",
+          // 已存密码直接回显（掩码 + 眼睛可切换明文），不再用「留空不改」猜测语义
+          password: r.password ?? "",
         };
         nextConfigured[id] = r.host !== null;
-        nextPwdSet[id] = Boolean(r.password_set);
       }
       setValues(nextValues);
       setConfigured(nextConfigured);
-      setPasswordSet(nextPwdSet);
     } finally {
       setLoading(false);
     }
@@ -130,19 +148,18 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
     setSaving(id);
     setMsg(null);
     try {
-      const pwd = values[id].password.trim();
-      const r = await api.saveServiceRemote(id, input.host, input.port, pwd);
+      const v = values[id];
+      // 框里回显的就是当前凭据：显式传值 = 按所见覆盖（清空即删除密码）
+      const r = await api.saveServiceRemote(id, input.host, input.port, v.username.trim(), v.password);
       if (!r.ok) {
         setMsg({ severity: "error", text: r.error ?? "保存失败" });
         return;
       }
       setConfigured((c) => ({ ...c, [id]: true }));
-      setPasswordSet((m) => ({ ...m, [id]: pwd ? true : m[id] }));
       const svcName = SERVICES.find((s) => s.id === id)?.name ?? id;
-      const pwdNote = pwd ? "、访问密码已更新" : "";
       setMsg({
         severity: "success",
-        text: `${svcName} 远程地址已保存为 ${input.host}:${input.port}${pwdNote}——已写入配置文件持久化，重启应用后仍生效；服务状态即将按新地址检测。`,
+        text: `${svcName} 远程地址已保存为 ${input.host}:${input.port}（凭据已按当前填写更新）——已写入配置文件持久化，重启应用后仍生效；服务状态即将按新地址检测。`,
       });
       onSaved?.();
       void reload();
@@ -161,7 +178,8 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
     setTesting(id);
     setMsg(null);
     try {
-      const r = await api.testServiceRemote(id, input.host, input.port, values[id].password.trim());
+      const v = values[id];
+      const r = await api.testServiceRemote(id, input.host, input.port, v.username.trim(), v.password);
       const svcName = SERVICES.find((s) => s.id === id)?.name ?? id;
       if (!r.ok) {
         setMsg({ severity: "error", text: `${svcName} 连接失败：${r.error ?? "未知错误"}` });
@@ -292,13 +310,43 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
                     }
                     inputProps={{ inputMode: "numeric" }}
                   />
-                  <TextField
-                    size="small"
-                    type="password"
-                    placeholder={passwordSet[s.id] ? "已设置 · 留空不改" : "无密码可留空"}
-                    value={v.password}
-                    onChange={(e) => setValues((m) => ({ ...m, [s.id]: { ...v, password: e.target.value } }))}
-                  />
+                  <Stack spacing={0.75}>
+                    {s.needUsername && (
+                      <TextField
+                        size="small"
+                        placeholder="MQTT 用户名（如 guest）"
+                        value={v.username}
+                        onChange={(e) =>
+                          setValues((m) => ({ ...m, [s.id]: { ...v, username: e.target.value } }))
+                        }
+                      />
+                    )}
+                    <TextField
+                      size="small"
+                      type={showPwd[s.id] ? "text" : "password"}
+                      placeholder="访问密码（无则留空）"
+                      value={v.password}
+                      onChange={(e) =>
+                        setValues((m) => ({ ...m, [s.id]: { ...v, password: e.target.value } }))
+                      }
+                      InputProps={{
+                        endAdornment: (
+                          <InputAdornment position="end">
+                            <Tooltip title={showPwd[s.id] ? "隐藏密码" : "显示密码"}>
+                              <IconButton
+                                size="small"
+                                edge="end"
+                                aria-label="切换密码可见性"
+                                onClick={() => setShowPwd((m) => ({ ...m, [s.id]: !m[s.id] }))}
+                              >
+                                {showPwd[s.id] ? <VisibilityOff fontSize="small" /> : <Visibility fontSize="small" />}
+                              </IconButton>
+                            </Tooltip>
+                          </InputAdornment>
+                        ),
+                      }}
+                    />
+                  </Stack>
                   <Stack direction="row" spacing={0.75} justifyContent="flex-end">
                     <Tooltip title="用当前填写的地址和密码实际连接一次（不保存），立即知道配置对不对">
                       <Button

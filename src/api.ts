@@ -378,21 +378,27 @@ export const api = {
       body: JSON.stringify({ cidr }),
     }),
   serviceRemote: (id: string) =>
-    request<{ host: string | null; port: number | null; password_set: boolean }>(
+    request<{ host: string | null; port: number | null; username: string; password: string }>(
       `/api/services/${id}/remote`,
     ),
-  saveServiceRemote: (id: string, host: string, port: number, password = "") =>
-    request<{ ok: boolean; error?: string }>(`/api/services/${id}/remote`, {
+  // username/password 显式传值即覆盖（含清空）；不传（undefined）= 不改动已存凭据——
+  // 服务发现「采用」只确认地址，绝不能悄悄抹掉用户已保存的密码
+  saveServiceRemote: (id: string, host: string, port: number, username?: string, password?: string) => {
+    const body: Record<string, unknown> = { host, port };
+    if (username !== undefined) body.username = username;
+    if (password !== undefined) body.password = password;
+    return request<{ ok: boolean; error?: string }>(`/api/services/${id}/remote`, {
       method: "POST",
-      body: JSON.stringify({ host, port, password }),
-    }),
+      body: JSON.stringify(body),
+    });
+  },
   // 远程端点连通性测试（用表单当前值，不落盘）：warn=true 表示端口通但服务身份未确认
-  testServiceRemote: (id: string, host: string, port: number, password = "") =>
+  testServiceRemote: (id: string, host: string, port: number, username = "", password = "") =>
     request<{ ok: boolean; warn?: boolean; detail?: string; error?: string }>(
       `/api/services/${id}/remote-test`,
       {
         method: "POST",
-        body: JSON.stringify({ host, port, password }),
+        body: JSON.stringify({ host, port, username, password }),
       },
     ),
   scanConfig: () =>

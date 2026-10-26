@@ -903,7 +903,7 @@ mod tests {
         let def = def_of("gateway-console");
 
         // nginx 可用 → 运行方式 Pass（Node 缺失不影响）
-        let mut cache = ProbeCache::default();
+        let cache = ProbeCache::default();
         cache
             .map
             .lock()
@@ -915,7 +915,7 @@ mod tests {
         assert_eq!(runtime.status, CheckStatus::Pass, "nginx 可用即应判定可运行: {runtime:?}");
 
         // 两者都不可用 → Warn（提示可行的运行方式，非致命）
-        let mut cache = ProbeCache::default();
+        let cache = ProbeCache::default();
         cache.map.lock().unwrap().insert("nginx?-v".into(), None);
         cache.map.lock().unwrap().insert("node?-v".into(), None);
         let report = check_service_env_with(&def, &states(&[]), Some(&cache));
