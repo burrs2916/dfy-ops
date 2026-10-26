@@ -42,6 +42,7 @@ const DEFAULT_TARGETS: &[(u16, &str)] = &[
     (18830, "vernemq"),
     (1883, "vernemq"),
     (9000, "minio"),
+    (4000, "greptime"),
 ];
 
 // ===== 网卡枚举 =====
@@ -124,7 +125,7 @@ pub async fn discover(Json(req): Json<DiscoverReq>) -> Json<serde_json::Value> {
     if cidr.is_empty() {
         return Json(serde_json::json!({
             "ok": false,
-            "error": "尚未指定扫描网段：请先在上方选择本机网卡对应的网段，平台才能扫描发现其中的 Redis（6379）、VerneMQ（18830）、MinIO（9000）服务。",
+            "error": "尚未指定扫描网段：请先在上方选择本机网卡对应的网段，平台才能扫描发现其中的 Redis（6379）、VerneMQ（18830）、MinIO（9000）、GreptimeDB（4000）服务。",
             "missing": "cidr"
         }));
     }

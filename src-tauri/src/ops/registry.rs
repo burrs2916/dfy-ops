@@ -93,9 +93,10 @@ pub struct ServiceDef {
     /// Windows 服务管理器或容器运行时负责。
     #[serde(rename = "thirdParty", default)]
     pub third_party: bool,
-    /// 纯远程第三方（Redis）：本机不安装、不检测本地进程/端口，检测 =
-    /// 托管连接配置（redis_credential.json）指向的远程端点可达性。
-    /// 安装与维护不再提供该服务的本地安装/卸载入口。
+    /// 纯远程第三方（Redis/VerneMQ/MinIO/GreptimeDB）：本机不安装、不检测本地进程/端口，
+    /// 检测 = 「远程部署」配置页托管的远程端点可达性（Redis 存凭据文件、
+    /// 其余存 remote_endpoints.json）。
+    /// 安装与维护不再提供这些服务的本地安装/卸载入口。
     #[serde(rename = "remoteOnly", default)]
     pub remote_only: bool,
     /// 声明式依赖检查（环境检查按此探测，不在代码里硬编码路径/端口）
@@ -191,17 +192,14 @@ fn builtin() -> Vec<ServiceDef> {
             product_names: vec![],
             health_url: None,
             log_paths: vec!["C:/services/edge-conductor/logs".into()],
-            depends_on: vec!["dfy-backend".into(), "vernemq".into(), "minio".into()],
+            depends_on: vec!["dfy-backend".into(), "vernemq".into(), "minio".into(), "greptime".into()],
             is_daemon: true,
             third_party: false,
             remote_only: false,
-            requires: vec![RequiresCheck {
-                id: "greptime".into(),
-                label: "GreptimeDB 二进制".into(),
-                path: Some("greptimedb/greptime".into()),
-                port: None,
-            }],
-            description: "边缘计算后端，自身监听 8084/8085；依赖 VerneMQ（MQTT 18830）、MinIO（对象存储）与 DFY 后端 48085，依赖项均为独立注册的第三方/上游服务。".into(),
+            // GreptimeDB/VerneMQ/MinIO 均为远程部署：无任何本地二进制/路径检查项
+            //（曾经声明的 greptime 本地二进制检查已随远程化移除，勿再添加）。
+            requires: vec![],
+            description: "边缘计算后端，自身监听 8084/8085；依赖 VerneMQ（MQTT 18830）、MinIO（对象存储）与 GreptimeDB（时序库，端点由本服务自身配置），依赖项均为远程部署的独立服务。".into(),
         },
         ServiceDef {
             id: "biosphere-spatial".into(),
@@ -231,14 +229,13 @@ fn builtin() -> Vec<ServiceDef> {
             name: "VerneMQ (MQTT)".into(),
             kind: ServiceKind::MqttBroker,
             java_major: None,
-            install_dir: "C:/services/vernemq".into(),
+            // 纯远程部署：本机无安装目录，检测走「远程部署」配置页托管的端点
+            install_dir: String::new(),
             build_cmd: None,
             run_cmd: String::new(),
             ports: vec![18830],
-            // Windows 上 VerneMQ 是 Erlang/OTP 应用，实际进程为 beam.smp.exe——
-            // 与 RabbitMQ 等共用镜像名，不能按镜像名匹配；按命令行含 "vernemq" 匹配。
-            // 本机（macOS）由 OrbStack 容器提供，宿主机无此进程 → 降级走 18830 端口探测。
-            process_names: vec!["vernemq".into()],
+            // 本机无进程可查（跑在虚拟机/远程主机上），processNames 不适用
+            process_names: vec![],
             product_names: vec![],
             health_url: None,
             log_paths: vec![],
@@ -247,18 +244,20 @@ fn builtin() -> Vec<ServiceDef> {
             third_party: true,
             remote_only: true,
             requires: vec![],
-            description: "第三方 MQTT broker（Erlang/OTP），平台只检测不托管；实际监听端口由进程反查（MQTT 18830 / 状态页 8888 如实显示）。".into(),
+            description: "远程部署的 MQTT broker（Erlang/OTP）：平台不安装不托管，检测 = 「远程部署」配置页指向的端点可达性（MQTT 18830）。".into(),
         },
         ServiceDef {
             id: "minio".into(),
             name: "MinIO (对象存储)".into(),
             kind: ServiceKind::ObjectStorage,
             java_major: None,
-            install_dir: "C:/services/minio".into(),
+            // 纯远程部署：本机无安装目录，检测走「远程部署」配置页托管的端点
+            install_dir: String::new(),
             build_cmd: None,
             run_cmd: String::new(),
             ports: vec![9000],
-            process_names: vec!["minio".into(), "minio.exe".into()],
+            // 本机无进程可查（跑在虚拟机/远程主机上），processNames 不适用
+            process_names: vec![],
             product_names: vec![],
             health_url: None,
             log_paths: vec![],
@@ -267,7 +266,29 @@ fn builtin() -> Vec<ServiceDef> {
             third_party: true,
             remote_only: true,
             requires: vec![],
-            description: "第三方 S3 兼容对象存储，平台只检测不托管；minio.exe 进程反查实际端口（API 9000 + console 端口如实显示）。".into(),
+            description: "远程部署的 S3 兼容对象存储：平台不安装不托管，检测 = 「远程部署」配置页指向的端点可达性（API 9000）。".into(),
+        },
+        ServiceDef {
+            id: "greptime".into(),
+            name: "GreptimeDB (时序库)".into(),
+            kind: ServiceKind::Database,
+            java_major: None,
+            // 边缘计算的附属时序库：随 Edge Conductor 一同启动，平台不单独安装/托管
+            install_dir: String::new(),
+            build_cmd: None,
+            run_cmd: String::new(),
+            ports: vec![4000],
+            // 不按本机进程判定：启动由 Edge Conductor 负责，平台只做端点可达性检测
+            process_names: vec![],
+            product_names: vec![],
+            health_url: None,
+            log_paths: vec![],
+            depends_on: vec![],
+            is_daemon: true,
+            third_party: true,
+            remote_only: true,
+            requires: vec![],
+            description: "边缘计算的附属时序库：随 Edge Conductor 一同启动，平台不安装不托管，只做「远程部署」配置页指向的端点可达性检测（HTTP 4000）。".into(),
         },
         ServiceDef {
             id: "mysql".into(),
@@ -308,7 +329,7 @@ fn builtin() -> Vec<ServiceDef> {
             third_party: true,
             remote_only: true,
             requires: vec![],
-            description: "纯远程部署模式的缓存服务：本机不安装，检测目标为「运维中心 → Redis 管理 → 连接配置」托管的远程端点（默认 192.168.56.101:6379）；连接不可达时请在连接配置中检查主机/端口/密码。".into(),
+            description: "远程部署模式的缓存服务：本机不安装，检测目标为「运维中心 → 远程部署」配置页托管的远程端点（默认 192.168.56.101:6379）；连接不可达时请在远程部署配置中检查主机/端口/密码。".into(),
         },
     ]
 }
@@ -423,13 +444,14 @@ mod tests {
         assert!(d.ports.is_empty() && !d.process_names.is_empty());
     }
 
-    /// 回归：内置注册表必须包含第三方依赖 vernemq/minio/mysql/redis（thirdParty=true），
-    /// 且自研服务 thirdParty=false。Redis 额外声明 remoteOnly（纯远程部署模式：
-    /// 本机不安装，检测 = 托管连接配置指向的远程端点可达性）。
+    /// 回归：内置注册表必须包含第三方依赖 vernemq/minio/mysql/redis/greptime
+    /// （thirdParty=true），且自研服务 thirdParty=false。Redis/VerneMQ/MinIO/GreptimeDB
+    /// 额外声明 remoteOnly（纯远程部署模式：本机不安装，检测 = 「远程部署」配置页
+    /// 托管的端点可达性），且不残留本地安装目录/进程名——防止远程化后又混回本地安装语义。
     #[test]
     fn builtin_contains_third_party_dependencies() {
         let defs = builtin();
-        for id in ["vernemq", "minio", "mysql", "redis"] {
+        for id in ["vernemq", "minio", "mysql", "redis", "greptime"] {
             let d = defs.iter().find(|d| d.id == id).expect("第三方依赖必须内置");
             assert!(d.third_party, "{id} 应标记为 thirdParty");
             assert!(d.build_cmd.is_none() && d.run_cmd.is_empty(), "{id} 平台不托管启停");
@@ -439,12 +461,12 @@ mod tests {
             assert!(!d.third_party, "{id} 是自研服务");
             assert!(!d.remote_only, "{id} 不是纯远程服务");
         }
-        let redis = defs.iter().find(|d| d.id == "redis").unwrap();
-        assert!(redis.remote_only, "Redis 必须声明为 remoteOnly（安装与维护不再提供本地安装）");
-        assert!(
-            redis.process_names.is_empty(),
-            "纯远程模式不再按本机进程判定 Redis"
-        );
+        for id in ["redis", "vernemq", "minio", "greptime"] {
+            let d = defs.iter().find(|d| d.id == id).unwrap();
+            assert!(d.remote_only, "{id} 必须声明为 remoteOnly（安装与维护不再提供本地安装）");
+            assert!(d.install_dir.is_empty(), "{id} 纯远程模式不应残留本地安装目录");
+            assert!(d.process_names.is_empty(), "{id} 纯远程模式不按本机进程判定");
+        }
     }
 
     /// 回归：覆盖配置按 id 合并——同 id 替换、新 id 追加、内置定义不丢。

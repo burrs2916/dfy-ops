@@ -19,7 +19,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { ArrowBack, Close, ContentCopy, Download } from "@mui/icons-material";
+import { ArrowBack, Close, ContentCopy, DnsOutlined, Download } from "@mui/icons-material";
 import { api } from "../api";
 import type { LogsResponse, ServiceEnvReport, ServiceStatus } from "../types";
 import { StatusBadge } from "../components/StatusBadge";
@@ -286,7 +286,9 @@ export default function ServiceDetail() {
           )}
           {svc.thirdParty ? (
             <Alert severity="info" sx={{ mt: 2 }}>
-              第三方依赖：由 Windows 服务管理器 / 容器运行时管理，平台只检测运行状态，不提供启停与构建。
+              {svc.remoteOnly
+                ? "远程部署依赖：由虚拟机/远程主机承载，平台只检测远程端点可达性，不提供启停与构建。"
+                : "第三方依赖：由 Windows 服务管理器 / 容器运行时管理，平台只检测运行状态，不提供启停与构建。"}
             </Alert>
           ) : (
             <Stack direction="row" spacing={1} sx={{ mt: 2 }}>
@@ -332,10 +334,16 @@ export default function ServiceDetail() {
             以下为该服务在目标 Windows 主机上的预期安装位置与运行参数，仅作排障参考。平台不会自动创建目录或执行命令，请据此在运维中心手动补齐。
           </Typography>
           <Stack spacing={1}>
-            <ConfigRow label="安装目录" value={svc.installDir} onCopy={copyText} />
-            <ConfigRow label="启动命令" value={svc.runCmd} onCopy={copyText} />
-            {svc.buildCmd && (
-              <ConfigRow label="构建命令" value={svc.buildCmd} onCopy={copyText} />
+            {svc.remoteOnly ? (
+              <Alert severity="info" icon={<DnsOutlined fontSize="inherit" />}>
+                纯远程部署服务：本机无安装目录与运行命令，检测目标为「运维中心 → 远程部署」配置的远程端点。
+              </Alert>
+            ) : (
+              <>
+                <ConfigRow label="安装目录" value={svc.installDir} onCopy={copyText} />
+                <ConfigRow label="启动命令" value={svc.runCmd} onCopy={copyText} />
+                {svc.buildCmd && <ConfigRow label="构建命令" value={svc.buildCmd} onCopy={copyText} />}
+              </>
             )}
             {svc.healthUrl && (
               <ConfigRow label="健康检查" value={svc.healthUrl} onCopy={copyText} />

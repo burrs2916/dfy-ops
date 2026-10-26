@@ -103,16 +103,18 @@ function ackId(reportId: string, itemId: string) {
 }
 
 /** 与后端 ops/resource.rs 的 repair_target 口径一致：dep- 与 service- 前缀折叠后匹配。
- *  Redis 不在其中：纯远程部署模式不支持本地「一键修复」，问题项走「去连接配置」。 */
-const REPAIR_TARGETS = new Set(["java", "mysql", "vernemq", "minio", "greptime"]);
+ *  仅本地可装的软件：Redis/VerneMQ/MinIO/GreptimeDB 均为远程部署，问题项走「去远程部署」配置。 */
+const REPAIR_TARGETS = new Set(["java", "mysql"]);
 /** 纯远程部署的软件：不进待安装/已安装列表（本机不安装、无安装包可识别），
  *  集中在「远程部署」区配置地址与访问密码。与后端 ServiceDef.remoteOnly 同口径。 */
 const FIXED_REMOTE = new Set(["redis", "vernemq", "minio", "greptime"]);
+/** 有平台托管端点的远程服务（「远程部署」面板可配地址/密码）——与面板 SERVICES 同口径。 */
+const MANAGED_ENDPOINT_TARGETS = new Set(["redis", "vernemq", "minio", "greptime"]);
 function repairTarget(checkId: string): string | null {
   const c = checkId.replace(/^dep-/, "").replace(/^service-/, "");
   return REPAIR_TARGETS.has(c) ? c : null;
 }
-/** 折叠后命中的检查项 → 引导去对应配置页（Redis → 连接配置）。 */
+/** 折叠后命中的检查项 → 引导去「远程部署」配置页（地址/密码都在那里改）。 */
 function configTarget(checkId: string): string | null {
   const c = checkId.replace(/^dep-/, "").replace(/^service-/, "");
   return FIXED_REMOTE.has(c) ? c : null;
@@ -130,7 +132,7 @@ const TARGET_LABEL: Record<string, string> = {
 /** 安装与维护卡片的展示顺序：用户重点的数据库/运行时在前 */
 const SOFTWARE_ORDER = ["mysql", "java", "redis", "vernemq", "minio", "greptime"];
 /** 注册了 Windows 服务、可启停的软件（与后端 service_spec 口径一致；java 无服务） */
-const SERVICE_TARGETS = new Set(["mysql", "redis"]);
+const SERVICE_TARGETS = new Set(["mysql"]);
 /** 一句话说清每个软件是干嘛的（卡片副标题，消灭抽象概念） */
 const TARGET_DESC: Record<string, string> = {
   mysql: "数据库",
@@ -686,30 +688,35 @@ function RepairCenter({
   // 安装与维护的子页签（待安装/已安装/远程部署）
   const [instTab, setInstTab] = useState<"toInstall" | "installed" | "remote">("toInstall");
 
-  // 纯远程软件（Redis）的托管连接端点：远程部署卡片上直接展示检测目标，
-  // 与「Redis 管理 → 连接配置」同一可信源（后端 redis_credential.json）。
-  const [redisEndpoint, setRedisEndpoint] = useState<{ host: string; port: number } | null>(null);
+  // 固定远程服务的托管端点（远程部署卡片直接展示各自的检测目标）：
+  // 与「远程部署」配置面板同一可信源；未配置时值为 null（引导先去配置）。
+  const [remoteEndpoints, setRemoteEndpoints] = useState<
+    Record<string, { host: string; port: number } | null>
+  >({});
   useEffect(() => {
     let alive = true;
-    api
-      .redisCredential()
-      .then((c) => {
-        if (alive) setRedisEndpoint({ host: c.host, port: c.port });
-      })
-      .catch(() => {});
+    void Promise.all(
+      [...MANAGED_ENDPOINT_TARGETS].map((t) =>
+        api
+          .serviceRemote(t)
+          .then((r) =>
+            [t, r.host != null && r.port != null ? { host: r.host, port: r.port } : null] as const,
+          )
+          .catch(() => [t, null] as const),
+      ),
+    ).then((entries) => {
+      if (alive) setRemoteEndpoints(Object.fromEntries(entries));
+    });
     return () => {
       alive = false;
     };
   }, []);
 
-  /** 问题项「去连接配置」→ 跳转顶级「运维中心」的 Redis 管理，落地自动弹出连接配置
-   *  （跨页导向：pending 标记放全局 store，OpsCenter 消费后回调清除） */
-  const setRedisConfigPending = useOpsStore((s) => s.setRedisConfigPending);
+  /** 远程服务问题项「去远程部署」→ 跳转运维中心的远程部署配置页（地址/密码都在那里改） */
   const navigate = useNavigate();
-  const gotoRedisConfig = useCallback(() => {
-    setRedisConfigPending(true);
-    navigate("/ops");
-  }, [setRedisConfigPending, navigate]);
+  const gotoRemoteDeploy = useCallback(() => {
+    navigate("/ops?tab=deploy");
+  }, [navigate]);
 
   /** 软件卡片：状态机（执行中 > 检测中/探测不可用 > 已安装 > 残留 > 有包 > 无包）。
    *  探测（probing）不阻塞渲染——已装状态未知时如实显示「检测中」，结果回来自动归位，
@@ -974,10 +981,12 @@ function RepairCenter({
     );
   };
 
-  /** 远程部署卡片：灰色说明行。固定远程（Redis）= 托管端点说明 + 去配置入口；
+  /** 远程部署卡片：灰色说明行（本机一律不安装）。
+   *  托管端点服务（Redis/VerneMQ/MinIO/GreptimeDB）= 各自的检测目标 + 去配置入口；
    *  用户声明的远程 = 说明 + 改回本地的入口。 */
   const renderRemoteCard = (t: string) => {
-    const fixed = FIXED_REMOTE.has(t);
+    const managed = MANAGED_ENDPOINT_TARGETS.has(t);
+    const ep = managed ? remoteEndpoints[t] : undefined;
     return (
       <Paper key={t} variant="outlined" sx={{ px: 2, py: 1.25, bgcolor: "action.hover" }}>
         <Stack direction="row" spacing={2} alignItems="center" sx={{ flexWrap: "wrap" }}>
@@ -1005,16 +1014,16 @@ function RepairCenter({
             </Typography>
           </Box>
           <Box sx={{ flex: 1, minWidth: 260 }}>
-            {fixed ? (
+            {managed ? (
               <Typography variant="body2" color="text.secondary">
-                纯远程部署（本机不安装）：检测目标为托管连接端点
+                远程部署（本机不安装）：检测目标为托管端点
                 <Typography
                   component="span"
                   sx={{ fontFamily: MONO_STACK, fontWeight: 700, color: "text.primary", mx: 0.5 }}
                 >
-                  {redisEndpoint ? `${redisEndpoint.host}:${redisEndpoint.port}` : "…"}
+                  {ep ? `${ep.host}:${ep.port}` : ep === null ? "未配置" : "…"}
                 </Typography>
-                ；连接不可达时请在「运维中心 → Redis 管理 → 连接配置」检查设置
+                ；不可达时请在「运维中心 → 远程部署」检查地址与密码
               </Typography>
             ) : (
               <Typography variant="body2" color="text.secondary">
@@ -1023,15 +1032,15 @@ function RepairCenter({
             )}
           </Box>
           <Stack direction="row" spacing={1} alignItems="center" sx={{ flexShrink: 0 }}>
-            {fixed ? (
+            {managed ? (
               <Button
                 size="small"
                 variant="outlined"
                 startIcon={<SettingsEthernet />}
-                onClick={gotoRedisConfig}
+                onClick={gotoRemoteDeploy}
                 sx={{ textTransform: "none", whiteSpace: "nowrap" }}
               >
-                去 Redis 管理
+                去远程部署
               </Button>
             ) : (
               <Button size="small" variant="text" disabled={repairRunning} onClick={() => void toggleRemote(t, false)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
@@ -1284,12 +1293,10 @@ function RepairCenter({
                           <Button
                             size="small"
                             variant="outlined"
-                            onClick={() => {
-                              if (cfg === "redis") gotoRedisConfig();
-                            }}
+                            onClick={gotoRemoteDeploy}
                             sx={{ textTransform: "none", px: 1, whiteSpace: "nowrap" }}
                           >
-                            去连接配置
+                            去远程部署
                           </Button>
                         ) : (
                           <Typography variant="caption" color="text.secondary">

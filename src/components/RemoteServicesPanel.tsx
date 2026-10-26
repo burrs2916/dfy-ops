@@ -13,7 +13,8 @@ import { api } from "../api";
 import { ServiceDiscoveryDialog } from "./ServiceDiscoveryDialog";
 
 /** 可配置远程端点的第三方服务元数据（与后端检测口径一一对应）。
- *  三个服务均可选配访问密码：留空 = 无认证 / 保持已设密码不变。 */
+ *  四个服务均可选配访问密码：留空 = 无认证 / 保持已设密码不变。
+ *  GreptimeDB 是边缘计算的附属时序库（随 Edge Conductor 启动），同样只配端点做可达性检测。 */
 const SERVICES: {
   id: string;
   name: string;
@@ -23,10 +24,11 @@ const SERVICES: {
   { id: "redis", name: "Redis", desc: "缓存与键值存储", defaultPort: 6379 },
   { id: "vernemq", name: "VerneMQ", desc: "MQTT 消息代理（兼容标准 1883）", defaultPort: 18830 },
   { id: "minio", name: "MinIO", desc: "对象存储", defaultPort: 9000 },
+  { id: "greptime", name: "GreptimeDB", desc: "时序数据库（随边缘计算启动）", defaultPort: 4000 },
 ];
 
 /** 网格列布局：服务标识 | 主机 | 端口 | 访问密码 | 操作。
- *  固定模板保证三行的输入框纵向严格对齐，扫一眼就是一张配置表。 */
+ *  固定模板保证各行的输入框纵向严格对齐，扫一眼就是一张配置表。 */
 const ROW_GRID = {
   display: "grid",
   gridTemplateColumns: { xs: "1fr", sm: "minmax(180px, 220px) minmax(0, 1fr) 110px 190px 96px" },
@@ -44,7 +46,7 @@ type EndpointState = { host: string; port: string; password: string };
 /**
  * 远程部署面板（网关地址配置）。
  *
- * Redis / VerneMQ / MinIO 由外部环境（虚拟机 / 远程主机）承载，平台没有
+ * Redis / VerneMQ / MinIO / GreptimeDB 由外部环境（虚拟机 / 远程主机）承载，平台没有
  * 也不需要它们的本地安装包——这里集中查看与编辑各服务的远程地址与访问密码，
  * 服务状态检测随之切换到该地址。网络环境变化（网段迁移、虚拟机换 IP）
  * 时，直接改地址或重新扫描即可，全程无需重新编译。
@@ -123,10 +125,11 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
       }
       setConfigured((c) => ({ ...c, [id]: true }));
       setPasswordSet((m) => ({ ...m, [id]: pwd ? true : m[id] }));
+      const svcName = SERVICES.find((s) => s.id === id)?.name ?? id;
       const pwdNote = pwd ? "、访问密码已更新" : "";
       setMsg({
         severity: "success",
-        text: `${id} 远程地址已保存为 ${host}:${port}${pwdNote}——已写入配置文件持久化，重启应用后仍生效；服务状态即将按新地址检测。`,
+        text: `${svcName} 远程地址已保存为 ${host}:${port}${pwdNote}——已写入配置文件持久化，重启应用后仍生效；服务状态即将按新地址检测。`,
       });
       onSaved?.();
       void reload();
@@ -155,7 +158,7 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
             </Typography>
           </Stack>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-            Redis / VerneMQ / MinIO 部署在虚拟机或远程主机上（平台不提供本地安装），
+            Redis / VerneMQ / MinIO / GreptimeDB 部署在虚拟机或远程主机上（平台不提供本地安装），
             按此处地址监测服务可达性；保存即持久化，每个服务只配置一次。
           </Typography>
         </Box>
@@ -277,8 +280,8 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
           平台逐台探测 {SERVICES.map((s) => s.name).join(" / ")} 的端口并确认服务身份，一键采用。
         </Alert>
         <Alert severity="success" icon={<Refresh fontSize="inherit" />} variant="outlined">
-          所有配置保存即写入应用配置目录，重启后自动加载，无需重复配置；服务状态检测与 Redis
-          管理页连接共用同一份数据，改一处全局生效。
+          所有配置保存即写入应用配置目录，重启后自动加载，无需重复配置；服务状态检测共用同一份数据，
+          改一处全局生效。
         </Alert>
       </Stack>
 

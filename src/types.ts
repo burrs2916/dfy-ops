@@ -22,6 +22,8 @@ export interface ServiceStatus {
   isDaemon: boolean;
   /** 第三方依赖（VerneMQ/MinIO 等系统级中间件）：平台只检测不托管，UI 隐藏启停按钮并分组展示 */
   thirdParty: boolean;
+  /** 纯远程部署（Redis/VerneMQ/MinIO）：本机不安装，检测 = 托管端点可达性；UI 提示用远程承载语义 */
+  remoteOnly: boolean;
   /** 「已安装」（Windows 卸载注册表判定）。false=确认未安装；未声明 productNames 的服务恒为 true（不适用） */
   installed: boolean;
   description: string;

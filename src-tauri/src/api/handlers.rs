@@ -82,6 +82,10 @@ pub struct ServiceStatus {
     /// 第三方依赖（VerneMQ/MinIO 等）：平台只检测不托管，前端据此隐藏启停按钮并分组展示。
     #[serde(rename = "thirdParty")]
     pub third_party: bool,
+    /// 纯远程部署（Redis/VerneMQ/MinIO）：本机不安装，检测 = 托管端点可达性；
+    /// 前端据此把「Windows 服务管理器」类提示换成远程承载语义。
+    #[serde(rename = "remoteOnly")]
+    pub remote_only: bool,
     /// 「已安装」（Windows 卸载注册表判定）。三态语义：false = 确认未安装；
     /// true = 已安装或「不适用」（未声明 productNames 的服务一律 true，
     /// 维持既有「已停止/运行中」显示，不误报未安装）。
@@ -105,24 +109,15 @@ pub struct ServiceStatus {
     pub log_paths: Vec<String>,
 }
 
-/// 第三方服务的远程检测目标：
-/// - `remoteOnly`（Redis）：本机不安装也不检测本地进程/端口，一律走托管端点——
-///   凭据文件读取失败时回退默认值（192.168.56.101:6379），与
-///   服务详情页「Redis 管理 → 连接配置」同一可信源。
-/// - 其余第三方（VerneMQ / MinIO）：默认仍走本机进程/端口检测；
-///   用户通过「服务发现」或手动配置托管了远程端点后（remote_endpoints.json），
-///   远程端点优先——服务跑在虚拟机/局域网主机上时，本机检测必然误报 Down。
+/// 第三方服务的远程检测目标：全部路由到 service_remote 的统一口径——
+/// - Redis（remoteOnly）：端点在凭据文件 redis_credential.json；
+/// - VerneMQ / MinIO（remoteOnly + thirdParty）：端点在 remote_endpoints.json
+///   （「远程部署」配置面板统一保存）。
+/// 两者从未保存过地址时都返回 None → 状态转「待配置」，引导用户先完成设置，
+/// 绝不拿默认值兜底探测（会误导），也绝不回退本机进程/端口检测
+/// （服务跑在虚拟机/远程主机上时，本机检测必然误报 Down）。
 fn remote_of(state: &AppState, def: &ServiceDef) -> Option<(String, u16)> {
-    if def.remote_only {
-        // 先设置、后检测：从未保存过连接配置时不拿默认值兜底探测，
-        // 报告 needs-config 让前端引导用户先完成设置
-        if !crate::ops::redis_credential::is_configured(&state.config_dir) {
-            return None;
-        }
-        let cred = crate::ops::redis_credential::load(&state.config_dir);
-        return Some((cred.host, cred.port));
-    }
-    if def.third_party {
+    if def.remote_only || def.third_party {
         return crate::api::handlers_network::service_remote(state, &def.id);
     }
     None
@@ -173,6 +168,7 @@ fn to_status(
         depends_on: def.depends_on.clone(),
         is_daemon: def.is_daemon,
         third_party: def.third_party,
+        remote_only: def.remote_only,
         installed,
         description: def.description.clone(),
         install_dir: def.install_dir.clone(),

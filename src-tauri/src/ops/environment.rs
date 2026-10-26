@@ -62,9 +62,9 @@ pub struct DepState {
     pub running: bool,
     pub healthy: bool,
     pub ports: Vec<u16>,
-    /// 纯远程第三方（remoteOnly，如 Redis）的托管端点：本机无进程/端口可查，
+    /// 纯远程第三方（remoteOnly：Redis/VerneMQ/MinIO/GreptimeDB）的托管端点：本机无进程/端口可查，
     /// running/healthy 已是「托管端点 TCP 可达」的探测结果，端点值用于生成
-    /// 面向用户的提示文案（不可达时引导去连接配置）。
+    /// 面向用户的提示文案（不可达时引导去「远程部署」配置页）。
     pub remote: Option<(String, u16)>,
 }
 
@@ -197,7 +197,7 @@ fn fix_hint_for(id: &str) -> String {
             "托管部署：winget install -e --id nginx.nginx；dev 运行：从 https://nodejs.org 安装 Node.js",
             "托管部署：brew install nginx；dev 运行：brew install node",
         ),
-        "greptime" => "从 https://github.com/GreptimeTeam/greptimedb/releases 下载 greptime 二进制，放入 install_dir/greptimedb/".into(),
+        "greptime" | "service-greptime" | "dep-greptime" => "GreptimeDB 为远程部署模式（随 Edge Conductor 一同启动）：请确认边缘计算已启动，并到「运维中心 → 远程部署」检查端点设置后重新检测".into(),
         "webview2" => "在目标 Windows 主机安装 Microsoft Edge WebView2 Runtime：https://developer.microsoft.com/microsoft-edge/webview2/".into(),
         "service-vernemq" | "dep-vernemq" => "VerneMQ 为远程部署模式（本机不安装）：请到「运维中心 → 远程部署」配置虚拟机/远程主机地址后重新检测".into(),
         "service-minio" | "dep-minio" => "MinIO 为远程部署模式（本机不安装）：请到「运维中心 → 远程部署」配置虚拟机/远程主机地址后重新检测".into(),
@@ -206,7 +206,7 @@ fn fix_hint_for(id: &str) -> String {
             "brew install mysql   # 或用 OrbStack/Docker 容器提供",
         ),
         "service-redis" | "dep-redis" => {
-            "Redis 为远程部署模式（本机不安装）：请到「运维中心 → Redis 管理 → 连接配置」检查主机/端口/密码设置后重新检测".into()
+            "Redis 为远程部署模式（本机不安装）：请到「运维中心 → 远程部署」配置页检查主机/端口/密码设置后重新检测".into()
         }
         "dep-dfy-backend" => "在服务总览启动 DFY 后端（受管），或确认其已在外部运行".into(),
         _ => "请在运维中心根据上方“实际”信息排查并安装对应依赖".into(),
@@ -445,16 +445,16 @@ pub fn check_service_env_with(
             }
         }
         ServiceKind::MqttBroker | ServiceKind::ObjectStorage | ServiceKind::Database => {
-            // 第三方中间件（VerneMQ/MinIO/MySQL/Redis）：本身就是外部依赖，平台只检测不托管。
-            // 纯远程形态（remoteOnly，Redis）：检测 = 托管端点 TCP 可达；不可达时
-            // 明确引导用户去「Redis 管理 → 连接配置」完成设置（不再提示本地安装）。
+            // 第三方中间件（VerneMQ/MinIO/MySQL/Redis/GreptimeDB）：本身就是外部依赖，平台只检测不托管。
+            // 纯远程形态（remoteOnly：Redis/VerneMQ/MinIO/GreptimeDB）：检测 = 托管端点 TCP 可达；
+            // 不可达时统一引导用户去「远程部署」配置页（不再提示本地安装）。
             if let Some((host, port)) = states.get(&def.id).and_then(|s| s.remote.as_ref()) {
                 let ok = health::check_tcp(host, *port, 800);
                 let ep = format!("{host}:{port}");
                 let actual = if ok {
                     format!("远程端点 {ep} 可达（TCP 连通）")
                 } else {
-                    format!("远程端点 {ep} 不可达——请先在「运维中心 → Redis 管理 → 连接配置」完成设置")
+                    format!("远程端点 {ep} 不可达——请先在「运维中心 → 远程部署」配置页检查地址与密码设置")
                 };
                 items.push(item(
                     &format!("service-{}", def.id),
@@ -584,8 +584,8 @@ pub fn check_service_env_with(
     for dep_id in &def.depends_on {
         let it = match states.get(dep_id) {
             Some(dep) => {
-                // 纯远程依赖（remoteOnly，Redis）：状态即托管端点可达性，
-                // 提示引导到连接配置而非本地启动/安装。
+                // 纯远程依赖（remoteOnly：Redis/VerneMQ/MinIO/GreptimeDB）：状态即托管端点可达性，
+                // 提示引导到「远程部署」配置页而非本地启动/安装。
                 if let Some((host, port)) = &dep.remote {
                     let ep = format!("{host}:{port}");
                     let (status, actual) = if dep.running && dep.healthy {
@@ -596,7 +596,7 @@ pub fn check_service_env_with(
                     } else {
                         (
                             CheckStatus::Fail,
-                            format!("远程端点 {ep} 不可达——请先在「运维中心 → Redis 管理 → 连接配置」完成设置"),
+                            format!("远程端点 {ep} 不可达——请先在「运维中心 → 远程部署」配置页检查地址与密码设置"),
                         )
                     };
                     item(
@@ -924,16 +924,21 @@ mod tests {
         assert!(runtime.fix_hint.contains("nginx") || runtime.fix_hint.contains("Node"), "Warn 提示应给出运行方式指引: {runtime:?}");
     }
 
-    /// requires 声明检查：GreptimeDB 由 ServiceDef.requires 驱动（不再硬编码在代码里）。
+    /// 回归：GreptimeDB/VerneMQ/MinIO 远程部署后，edge-conductor 不得再有任何
+    /// 本地二进制/路径检查项（曾经的 greptime requires 检查已随远程化移除）——
+    /// 防止环境检查又冒出「下载二进制放入本地目录」这类误导性修复建议。
     #[test]
-    fn requires_declarations_drive_checks() {
+    fn remote_deps_have_no_local_binary_checks() {
         let def = def_of("edge-conductor");
-        assert!(def.requires.iter().any(|r| r.check_id() == "greptime"));
-        // 未提供状态视图时 running=false，但 requires 照常探测
+        assert!(
+            def.requires.is_empty(),
+            "依赖均为远程部署，不应残留本地路径检查项: {:?}",
+            def.requires
+        );
         let report = check_service_env_with(&def, &states(&[]), None);
         assert!(
-            report.items.iter().any(|i| i.id == "greptime"),
-            "requires 声明的检查项必须出现: {:?}",
+            !report.items.iter().any(|i| i.id == "greptime"),
+            "环境检查不得出现 greptime 本地检查项: {:?}",
             report.items
         );
     }
@@ -983,7 +988,7 @@ mod tests {
         let dep = report.items.iter().find(|i| i.id == "dep-redis").unwrap();
         assert_eq!(dep.status, CheckStatus::Pass, "远程端点连通时依赖应 Pass: {:?}", dep);
 
-        // 不可达端点（空闲端口）：Fail + 引导去连接配置，不提示本地安装
+        // 不可达端点（空闲端口）：Fail + 引导去「远程部署」配置页，不提示本地安装
         let free = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -997,8 +1002,8 @@ mod tests {
         let svc = report.items.iter().find(|i| i.id == "service-redis").unwrap();
         assert_eq!(svc.status, CheckStatus::Fail, "端点不可达应 Fail: {:?}", svc);
         assert!(
-            svc.fix_hint.contains("连接配置"),
-            "修复提示应引导去连接配置: {}",
+            svc.fix_hint.contains("远程部署"),
+            "修复提示应引导去远程部署配置页: {}",
             svc.fix_hint
         );
         assert!(
@@ -1010,6 +1015,6 @@ mod tests {
         let report = check_service_env_with(&be, &down, None);
         let dep = report.items.iter().find(|i| i.id == "dep-redis").unwrap();
         assert_eq!(dep.status, CheckStatus::Fail, "远程端点不可达时依赖应 Fail");
-        assert!(dep.fix_hint.contains("连接配置"), "依赖修复提示应引导去连接配置: {}", dep.fix_hint);
+        assert!(dep.fix_hint.contains("远程部署"), "依赖修复提示应引导去远程部署配置页: {}", dep.fix_hint);
     }
 }
