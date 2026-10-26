@@ -113,6 +113,7 @@ pub struct ServiceStatus {
 /// - Redis（remoteOnly）：端点在凭据文件 redis_credential.json；
 /// - VerneMQ / MinIO（remoteOnly + thirdParty）：端点在 remote_endpoints.json
 ///   （「远程部署」配置面板统一保存）。
+///
 /// 两者从未保存过地址时都返回 None → 状态转「待配置」，引导用户先完成设置，
 /// 绝不拿默认值兜底探测（会误导），也绝不回退本机进程/端口检测
 /// （服务跑在虚拟机/远程主机上时，本机检测必然误报 Down）。

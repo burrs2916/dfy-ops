@@ -686,10 +686,11 @@ mod tests {
             .collect()
     }
 
+    /// 远程端点服务的状态快照元组：(id, running, healthy, ports, remote_host_port)
+    type RemoteStatus<'a> = (&'a str, bool, bool, &'a [u16], Option<(&'a str, u16)>);
+
     /// 带托管远程端点的状态视图（remoteOnly 服务专用）。
-    fn states_with_remote(
-        list: &[(&str, bool, bool, &[u16], Option<(&str, u16)>)],
-    ) -> DepStates {
+    fn states_with_remote(list: &[RemoteStatus<'_>]) -> DepStates {
         list.iter()
             .map(|(id, running, healthy, ports, remote)| {
                 (

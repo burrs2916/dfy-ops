@@ -122,37 +122,38 @@ mod tests {
     /// 验证环境缺失 / 警告被正确转化为诊断发现项，并携带修复命令。
     #[test]
     fn diagnose_env_missing_becomes_finding() {
-        let mut items = Vec::new();
-        items.push(CheckItem {
-            id: "java-runtime".into(),
-            name: "Java 运行时".into(),
-            category: "工具链".into(),
-            status: CheckStatus::Fail,
-            expected: "JDK 8+".into(),
-            actual: "未检测到".into(),
-            is_fatal: true,
-            fix_hint: "winget install -e --id Microsoft.OpenJDK.17".into(),
-        });
-        items.push(CheckItem {
-            id: "nginx-hosting".into(),
-            name: "nginx 托管".into(),
-            category: "外部依赖".into(),
-            status: CheckStatus::Warn,
-            expected: "已安装".into(),
-            actual: "未检测到".into(),
-            is_fatal: false,
-            fix_hint: "winget install -e --id nginx.nginx".into(),
-        });
-        items.push(CheckItem {
-            id: "nodejs".into(),
-            name: "Node.js".into(),
-            category: "工具链".into(),
-            status: CheckStatus::Pass,
-            expected: "16+".into(),
-            actual: "v20.0.0".into(),
-            is_fatal: true,
-            fix_hint: String::new(),
-        });
+        let items = vec![
+            CheckItem {
+                id: "java-runtime".into(),
+                name: "Java 运行时".into(),
+                category: "工具链".into(),
+                status: CheckStatus::Fail,
+                expected: "JDK 8+".into(),
+                actual: "未检测到".into(),
+                is_fatal: true,
+                fix_hint: "winget install -e --id Microsoft.OpenJDK.17".into(),
+            },
+            CheckItem {
+                id: "nginx-hosting".into(),
+                name: "nginx 托管".into(),
+                category: "外部依赖".into(),
+                status: CheckStatus::Warn,
+                expected: "已安装".into(),
+                actual: "未检测到".into(),
+                is_fatal: false,
+                fix_hint: "winget install -e --id nginx.nginx".into(),
+            },
+            CheckItem {
+                id: "nodejs".into(),
+                name: "Node.js".into(),
+                category: "工具链".into(),
+                status: CheckStatus::Pass,
+                expected: "16+".into(),
+                actual: "v20.0.0".into(),
+                is_fatal: true,
+                fix_hint: String::new(),
+            },
+        ];
 
         let env = ServiceEnvReport {
             id: "svc-x".into(),

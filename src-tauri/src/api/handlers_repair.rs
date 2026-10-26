@@ -66,6 +66,7 @@ pub struct GenericRepairInput {
 /// 2. 有 MSI（java/vernemq/memurai 等）→ msiexec 静默安装；
 /// 3. 无包且 target=java → 在线下载 Adoptium 免安装版 zip（同 1 的解压管线）；
 /// 4. 无包且其他目标 → 提示配置资源目录或使用 AI 方案。
+///
 /// 任务状态复用 /api/env/repair/status（与 java 修复同一全局单例，前端轮询逻辑不变）。
 pub async fn start_generic_repair(
     State(state): State<Arc<AppState>>,
@@ -856,11 +857,8 @@ fn strip_sql_comments(text: &str) -> String {
     let mut i = 0;
     while i < n {
         let c = chars[i];
-        if c == '-' && i + 1 < n && chars[i + 1] == '-' {
-            while i < n && chars[i] != '\n' {
-                i += 1;
-            }
-        } else if c == '#' {
+        let is_line_comment = (c == '-' && i + 1 < n && chars[i + 1] == '-') || c == '#';
+        if is_line_comment {
             while i < n && chars[i] != '\n' {
                 i += 1;
             }
@@ -1181,7 +1179,7 @@ fn build_plan_prompt(
     if let Some(fq) = follow_up {
         p.push_str("\n[用户追问]\n");
         p.push_str(fq);
-        p.push_str("\n");
+        p.push('\n');
     }
     if files.is_empty() {
         p.push_str("\n[本地资源目录] 未配置或没有识别出的安装包。\n");
@@ -1365,10 +1363,10 @@ pub async fn repair_exec(
     #[cfg(not(target_os = "windows"))]
     {
         let _ = input;
-        return Json(ExecResult {
+        Json(ExecResult {
             ok: false,
             error: Some("代执行仅支持 Windows 目标机，请复制命令手动执行".into()),
-        });
+        })
     }
     #[cfg(target_os = "windows")]
     {
