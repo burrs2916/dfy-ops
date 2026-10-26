@@ -3,12 +3,13 @@ import {
   Alert,
   Box,
   Button,
+  CircularProgress,
   Stack,
   TextField,
   Tooltip,
   Typography,
 } from "@mui/material";
-import { Dns, Radar, Refresh, TravelExplore } from "@mui/icons-material";
+import { Dns, NetworkCheck, Radar, Refresh, TravelExplore } from "@mui/icons-material";
 import { api } from "../api";
 import { ServiceDiscoveryDialog } from "./ServiceDiscoveryDialog";
 
@@ -27,11 +28,11 @@ const SERVICES: {
   { id: "greptime", name: "GreptimeDB", desc: "时序数据库（随边缘计算启动）", defaultPort: 4000 },
 ];
 
-/** 网格列布局：服务标识 | 主机 | 端口 | 访问密码 | 操作。
+/** 网格列布局：服务标识 | 主机 | 端口 | 访问密码 | 操作（测试 + 保存）。
  *  固定模板保证各行的输入框纵向严格对齐，扫一眼就是一张配置表。 */
 const ROW_GRID = {
   display: "grid",
-  gridTemplateColumns: { xs: "1fr", sm: "minmax(180px, 220px) minmax(0, 1fr) 110px 190px 96px" },
+  gridTemplateColumns: { xs: "1fr", sm: "minmax(180px, 220px) minmax(0, 1fr) 110px 190px 178px" },
   gap: 1.5,
   alignItems: "center",
 } as const;
@@ -60,7 +61,11 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
   const [passwordSet, setPasswordSet] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState<string | null>(null);
-  const [msg, setMsg] = useState<{ severity: "success" | "error"; text: string } | null>(null);
+  const [testing, setTesting] = useState<string | null>(null);
+  const [msg, setMsg] = useState<{
+    severity: "success" | "warning" | "error";
+    text: string;
+  } | null>(null);
   const [discovering, setDiscovering] = useState(false);
   const msgAnchor = useRef<HTMLDivElement | null>(null);
 
@@ -102,23 +107,31 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const save = async (id: string) => {
+  /** 表单当前值校验（测试与保存共用）：返回规范化后的 host/port，不合法时弹提示返回 null */
+  const validateInput = (id: string): { host: string; port: number } | null => {
+    const svcName = SERVICES.find((s) => s.id === id)?.name ?? id;
     const v = values[id];
     const host = v.host.trim();
     if (!host) {
-      setMsg({ severity: "error", text: `${id} 的主机地址不能为空——请填写虚拟机/主机的 IP 地址` });
-      return;
+      setMsg({ severity: "error", text: `${svcName} 的主机地址不能为空——请填写虚拟机/主机的 IP 地址` });
+      return null;
     }
     const port = Number(v.port);
     if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-      setMsg({ severity: "error", text: `端口「${v.port}」无效：请填写 1~65535 的整数` });
-      return;
+      setMsg({ severity: "error", text: `${svcName} 端口「${v.port}」无效：请填写 1~65535 的整数` });
+      return null;
     }
+    return { host, port };
+  };
+
+  const save = async (id: string) => {
+    const input = validateInput(id);
+    if (!input) return;
     setSaving(id);
     setMsg(null);
     try {
-      const pwd = v.password.trim();
-      const r = await api.saveServiceRemote(id, host, port, pwd);
+      const pwd = values[id].password.trim();
+      const r = await api.saveServiceRemote(id, input.host, input.port, pwd);
       if (!r.ok) {
         setMsg({ severity: "error", text: r.error ?? "保存失败" });
         return;
@@ -129,7 +142,7 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
       const pwdNote = pwd ? "、访问密码已更新" : "";
       setMsg({
         severity: "success",
-        text: `${svcName} 远程地址已保存为 ${host}:${port}${pwdNote}——已写入配置文件持久化，重启应用后仍生效；服务状态即将按新地址检测。`,
+        text: `${svcName} 远程地址已保存为 ${input.host}:${input.port}${pwdNote}——已写入配置文件持久化，重启应用后仍生效；服务状态即将按新地址检测。`,
       });
       onSaved?.();
       void reload();
@@ -137,6 +150,30 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
       setMsg({ severity: "error", text: e instanceof Error ? e.message : String(e) });
     } finally {
       setSaving(null);
+    }
+  };
+
+  /** 连通性测试（用当前填写的值，不落盘）：配置对不对点一下就知道，
+   *  结果按「成功 / 端口通但身份未确认 / 失败」三档用不同颜色提示。 */
+  const test = async (id: string) => {
+    const input = validateInput(id);
+    if (!input) return;
+    setTesting(id);
+    setMsg(null);
+    try {
+      const r = await api.testServiceRemote(id, input.host, input.port, values[id].password.trim());
+      const svcName = SERVICES.find((s) => s.id === id)?.name ?? id;
+      if (!r.ok) {
+        setMsg({ severity: "error", text: `${svcName} 连接失败：${r.error ?? "未知错误"}` });
+      } else if (r.warn) {
+        setMsg({ severity: "warning", text: `${svcName}：${r.detail ?? "端口连通，但服务身份未确认"}` });
+      } else {
+        setMsg({ severity: "success", text: `${svcName} 连接成功：${r.detail ?? "端点可达"}` });
+      }
+    } catch (e) {
+      setMsg({ severity: "error", text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setTesting(null);
     }
   };
 
@@ -262,11 +299,29 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
                     value={v.password}
                     onChange={(e) => setValues((m) => ({ ...m, [s.id]: { ...v, password: e.target.value } }))}
                   />
-                  <Tooltip title="保存并立即持久化，服务状态按新地址检测">
-                    <Button variant="contained" disabled={saving === s.id} onClick={() => void save(s.id)}>
-                      {saving === s.id ? "保存中…" : "保存"}
-                    </Button>
-                  </Tooltip>
+                  <Stack direction="row" spacing={0.75} justifyContent="flex-end">
+                    <Tooltip title="用当前填写的地址和密码实际连接一次（不保存），立即知道配置对不对">
+                      <Button
+                        variant="outlined"
+                        disabled={testing === s.id || saving === s.id}
+                        onClick={() => void test(s.id)}
+                        startIcon={
+                          testing === s.id ? <CircularProgress size={14} color="inherit" /> : <NetworkCheck />
+                        }
+                      >
+                        {testing === s.id ? "测试中…" : "测试"}
+                      </Button>
+                    </Tooltip>
+                    <Tooltip title="保存并立即持久化，服务状态按新地址检测">
+                      <Button
+                        variant="contained"
+                        disabled={saving === s.id || testing === s.id}
+                        onClick={() => void save(s.id)}
+                      >
+                        {saving === s.id ? "保存中…" : "保存"}
+                      </Button>
+                    </Tooltip>
+                  </Stack>
                 </Box>
               );
             })}

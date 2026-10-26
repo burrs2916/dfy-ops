@@ -386,6 +386,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ host, port, password }),
     }),
+  // 远程端点连通性测试（用表单当前值，不落盘）：warn=true 表示端口通但服务身份未确认
+  testServiceRemote: (id: string, host: string, port: number, password = "") =>
+    request<{ ok: boolean; warn?: boolean; detail?: string; error?: string }>(
+      `/api/services/${id}/remote-test`,
+      {
+        method: "POST",
+        body: JSON.stringify({ host, port, password }),
+      },
+    ),
   scanConfig: () =>
     request<{ lastCidr: string }>("/api/network/scan-config"),
   saveScanConfig: (lastCidr: string) =>

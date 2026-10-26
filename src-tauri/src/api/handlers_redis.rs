@@ -30,7 +30,8 @@ const MAX_VALUE_CHARS: usize = 65536;
 
 /// 建立到托管凭据端点的连接：connect 3s / 读写 5s 超时，有密码时连接握手后
 /// 自动 AUTH。不可达主机不会把接口挂到 OS 级 TCP 超时（Windows 上 20s+）。
-fn open_conn(cred: &RedisCredential) -> Result<redis::Connection, String> {
+/// 远程端点测试（handlers_network::remote_test）复用同一套连接与错误映射。
+pub(crate) fn open_conn(cred: &RedisCredential) -> Result<redis::Connection, String> {
     let mut redis_info = redis::RedisConnectionInfo::default().set_db(0);
     // 空密码不发 AUTH——无密码实例收到 AUTH 会直接报错
     if !cred.password.is_empty() {
@@ -51,7 +52,7 @@ fn open_conn(cred: &RedisCredential) -> Result<redis::Connection, String> {
 
 /// 连接/命令错误 → 面向用户的中文提示：按错误类别给出「该去改哪里」的指引，
 /// 密码错 / 连接拒绝 / 超时 / 解析失败不再混为一谈。
-fn conn_err(e: redis::RedisError) -> String {
+pub(crate) fn conn_err(e: redis::RedisError) -> String {
     let msg = e.to_string();
     match e.kind() {
         redis::ErrorKind::AuthenticationFailed => {

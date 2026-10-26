@@ -401,6 +401,10 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/services/:id/remote",
             axum::routing::post(handlers_network::save_remote),
         )
+        .route(
+            "/api/services/:id/remote-test",
+            axum::routing::post(handlers_network::remote_test),
+        )
         .with_state(state)
         // 层的执行顺序是「后挂的在外层」：CORS 最外层，先裁决预检与来源白名单，
         // 通过后再由 require_client_header 校验自定义头。

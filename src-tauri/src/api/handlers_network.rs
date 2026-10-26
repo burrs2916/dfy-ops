@@ -9,7 +9,7 @@
 //! 不占用 tokio worker；单连接超时 500ms，/24 网段约 3~5 秒出全量结果。
 
 use std::collections::BTreeMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -465,6 +465,172 @@ pub async fn save_remote(
     match result {
         Ok(()) => Json(serde_json::json!({ "ok": true })),
         Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+// ===== 远程端点连通性测试 =====
+
+#[derive(Deserialize)]
+pub struct RemoteTestReq {
+    pub host: String,
+    pub port: u16,
+    #[serde(default)]
+    pub password: String,
+}
+
+/// 手动测试超时：测试按钮是用户显式等待的动作，比扫描的 500ms 宽裕
+///（跨 VPN / 高负载虚拟机场景），2s 内不通基本就是真不通。
+const TEST_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 远程端点测试（用表单当前值，不落盘）：用户填完地址点「测试」即可知道配置对不对，
+/// 不用先保存再盯着服务状态猜。各服务的验证深度与服务身份识别一致：
+/// - Redis：AUTH（有密码时）+ PING——密码错误/需要密码能明确报出（密码留空回退已保存凭据，与「留空不改」语义一致）
+/// - VerneMQ：MQTT CONNECT 握手确认 broker 身份；需认证的 broker 返回失败码，同样证明端口上是 MQTT 服务
+/// - MinIO：HTTP 特征确认（访问密钥需 S3 签名才能验证，纯探测做不到，如实说明）
+/// - GreptimeDB：HTTP GET /health 返回 2xx 确认
+pub async fn remote_test(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(service_id): axum::extract::Path<String>,
+    Json(req): Json<RemoteTestReq>,
+) -> Json<serde_json::Value> {
+    let host = req.host.trim().to_string();
+    if host.is_empty() {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "主机地址不能为空：请先填写虚拟机/远程主机的 IP 地址"
+        }));
+    }
+    let config_dir = state.config_dir.clone();
+    let res = tokio::task::spawn_blocking(move || {
+        run_remote_test(&service_id, &config_dir, &host, req.port, req.password.trim())
+    })
+    .await
+    .unwrap_or_else(|_| Err("测试任务执行失败".into()));
+    match res {
+        Ok((warn, detail)) => Json(serde_json::json!({ "ok": true, "warn": warn, "detail": detail })),
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e })),
+    }
+}
+
+/// 同步执行一次端点测试：Ok((warn, detail)) —— warn=true 表示端口通但服务身份未确认。
+fn run_remote_test(
+    service_id: &str,
+    config_dir: &Path,
+    host: &str,
+    port: u16,
+    password: &str,
+) -> Result<(bool, String), String> {
+    let started = Instant::now();
+    let (warn, detail) = match service_id {
+        "redis" => {
+            // 留空不改：回退已保存凭据的密码，测的才是「保存后」的真实状态
+            let mut pwd = password.to_string();
+            if pwd.is_empty() {
+                pwd = crate::ops::redis_credential::load(config_dir).password;
+            }
+            let cred = crate::ops::redis_credential::RedisCredential {
+                host: host.to_string(),
+                port,
+                password: pwd,
+            };
+            let mut conn = crate::api::handlers_redis::open_conn(&cred)?;
+            let pong: String = redis::cmd("PING")
+                .query(&mut conn)
+                .map_err(crate::api::handlers_redis::conn_err)?;
+            if pong != "PONG" {
+                return Err(format!("PING 未返回 PONG（收到：{pong}）"));
+            }
+            (false, "PING 已确认，认证通过".to_string())
+        }
+        "vernemq" => {
+            let addr = resolve_one(host, port)?;
+            match probe_mqtt(addr) {
+                Ok((_, d)) => (false, d),
+                Err(_) => (
+                    true,
+                    "端口连通，但 MQTT 握手未确认——请核对端口是否为 MQTT 服务端口".to_string(),
+                ),
+            }
+        }
+        "minio" => {
+            let addr = resolve_one(host, port)?;
+            match probe_minio(addr) {
+                Ok((_, d)) => (false, format!("{d}（访问密钥需登录后验证）")),
+                Err(_) => (
+                    true,
+                    "端口连通，但响应无 MinIO 特征——请核对端口是否为 MinIO API 端口".to_string(),
+                ),
+            }
+        }
+        "greptime" => match probe_http_status(host, port, "/health") {
+            Ok(status) => (false, format!("HTTP /health 返回 {status}，服务已确认")),
+            Err(_) => (
+                true,
+                "端口连通，但 /health 未返回正常状态——请核对端口是否为 GreptimeDB HTTP 端口"
+                    .to_string(),
+            ),
+        },
+        other => return Err(format!("服务「{other}」不支持远程端点测试")),
+    };
+    Ok((warn, format!("{detail}，耗时 {} ms", started.elapsed().as_millis())))
+}
+
+/// DNS 解析取第一个地址；解析失败给出面向用户的指引。
+fn resolve_one(host: &str, port: u16) -> Result<SocketAddr, String> {
+    (host, port)
+        .to_socket_addrs()
+        .map_err(|_| format!("主机名「{host}」无法解析——请检查地址拼写"))?
+        .next()
+        .ok_or_else(|| format!("主机名「{host}」没有可用的地址记录"))
+}
+
+/// TCP 连接 + 分类错误提示：拒绝 / 超时 / 其他，指向不同的排查方向。
+fn tcp_probe(host: &str, port: u16) -> Result<TcpStream, String> {
+    let addr = resolve_one(host, port)?;
+    match TcpStream::connect_timeout(&addr, TEST_TIMEOUT) {
+        Ok(s) => {
+            s.set_read_timeout(Some(TEST_TIMEOUT)).ok();
+            s.set_write_timeout(Some(TEST_TIMEOUT)).ok();
+            Ok(s)
+        }
+        Err(e) => {
+            let lower = e.to_string().to_ascii_lowercase();
+            if lower.contains("refused") {
+                Err(format!("连接被拒绝：{host}:{port} 没有服务在监听——请确认服务已启动、端口填写正确"))
+            } else if lower.contains("timed out") || lower.contains("timeout") {
+                Err(format!("连接超时：{host} 不可达——请检查主机 IP 与网络连通性（防火墙/网段）"))
+            } else {
+                Err(format!("连接失败：{e}"))
+            }
+        }
+    }
+}
+
+/// HTTP GET 探测：返回状态码文本（如 "200"）；非 2xx 视为失败。
+fn probe_http_status(host: &str, port: u16, path: &str) -> Result<String, String> {
+    use std::io::{Read, Write};
+    let mut s = tcp_probe(host, port)?;
+    let req = format!(
+        "GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: dfy-ops-remote-test\r\nConnection: close\r\n\r\n"
+    );
+    s.write_all(req.as_bytes())
+        .map_err(|e| format!("发送 HTTP 请求失败：{e}"))?;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 512];
+    while buf.len() < 4096 {
+        match s.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+        }
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let status = head.split_whitespace().nth(1).unwrap_or("").to_string();
+    if status.starts_with('2') {
+        Ok(status)
+    } else if status.is_empty() {
+        Err("响应不是 HTTP 协议".into())
+    } else {
+        Err(format!("HTTP {status}"))
     }
 }
 
