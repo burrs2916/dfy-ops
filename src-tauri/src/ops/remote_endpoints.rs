@@ -4,8 +4,8 @@
 //! redis_credential 同一套远程模式）：平台按这里托管的 host:port 做服务
 //! 状态探测（TCP 可达 = 运行中），不再依赖本机进程/端口。
 //!
-//! 与 redis_credential 的关系：Redis 的端点继续由 redis_credential 托管
-//! （密码在同一份凭据里），本文件只管 vernemq / minio 这类无需凭据的服务。
+//! 与 redis_credential 的关系：Redis 的端点与密码继续由 redis_credential
+//! 托管，本文件管 vernemq / minio 等服务，含可选访问密码（空 = 无认证）。
 //!
 //! 存储为明文 JSON：本机运维平台的信任边界就是本机磁盘（与 *_credential
 //! 同级保护），加密只增加伪安全感。
@@ -18,6 +18,10 @@ use std::path::Path;
 pub struct RemoteEndpoint {
     pub host: String,
     pub port: u16,
+    /// 可选访问密码（MinIO 等）：空 = 无认证。明文存储，信任边界与本机
+    /// 配置目录一致（与 *_credential 同级），加密只增加伪安全感。
+    #[serde(default)]
+    pub password: String,
 }
 
 fn path(config_dir: &Path) -> std::path::PathBuf {
@@ -57,11 +61,22 @@ mod tests {
         let ep = RemoteEndpoint {
             host: "192.168.56.101".into(),
             port: 18830,
+            password: String::new(),
         };
         save(&dir, "vernemq", &ep).unwrap();
         assert_eq!(load(&dir, "vernemq").unwrap().port, 18830);
         assert!(load(&dir, "minio").is_none());
-        save(&dir, "minio", &RemoteEndpoint { host: "10.0.0.5".into(), port: 9000 }).unwrap();
+        save(
+            &dir,
+            "minio",
+            &RemoteEndpoint {
+                host: "10.0.0.5".into(),
+                port: 9000,
+                password: "minio-secret".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(load(&dir, "minio").unwrap().password, "minio-secret");
         assert_eq!(load(&dir, "vernemq").unwrap().port, 18830);
         let _ = std::fs::remove_dir_all(&dir);
     }

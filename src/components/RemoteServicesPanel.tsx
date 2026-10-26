@@ -8,24 +8,24 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { Dns, Radar, Refresh, TravelExplore, VpnKey } from "@mui/icons-material";
+import { Dns, Radar, Refresh, TravelExplore } from "@mui/icons-material";
 import { api } from "../api";
 import { ServiceDiscoveryDialog } from "./ServiceDiscoveryDialog";
 
-/** 可配置远程端点的第三方服务元数据（与后端检测口径一一对应） */
+/** 可配置远程端点的第三方服务元数据（与后端检测口径一一对应）。
+ *  三个服务均可选配访问密码：留空 = 无认证 / 保持已设密码不变。 */
 const SERVICES: {
   id: string;
   name: string;
   desc: string;
   defaultPort: number;
-  needsPassword?: boolean;
 }[] = [
-  { id: "redis", name: "Redis", desc: "缓存与键值存储", defaultPort: 6379, needsPassword: true },
+  { id: "redis", name: "Redis", desc: "缓存与键值存储", defaultPort: 6379 },
   { id: "vernemq", name: "VerneMQ", desc: "MQTT 消息代理（兼容标准 1883）", defaultPort: 18830 },
   { id: "minio", name: "MinIO", desc: "对象存储", defaultPort: 9000 },
 ];
 
-/** 网格列布局：服务标识 | 主机 | 端口 | 密码（仅 Redis）| 操作。
+/** 网格列布局：服务标识 | 主机 | 端口 | 访问密码 | 操作。
  *  固定模板保证三行的输入框纵向严格对齐，扫一眼就是一张配置表。 */
 const ROW_GRID = {
   display: "grid",
@@ -55,7 +55,7 @@ type EndpointState = { host: string; port: string; password: string };
 export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
   const [values, setValues] = useState<Record<string, EndpointState>>({});
   const [configured, setConfigured] = useState<Record<string, boolean>>({});
-  const [redisHasPassword, setRedisHasPassword] = useState(false);
+  const [passwordSet, setPasswordSet] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState<string | null>(null);
   const [msg, setMsg] = useState<{ severity: "success" | "error"; text: string } | null>(null);
@@ -71,12 +71,13 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
             const r = await api.serviceRemote(s.id);
             return [s.id, r] as const;
           } catch {
-            return [s.id, { host: null, port: null }] as const;
+            return [s.id, { host: null, port: null, password_set: false }] as const;
           }
         }),
       );
       const nextValues: Record<string, EndpointState> = {};
       const nextConfigured: Record<string, boolean> = {};
+      const nextPwdSet: Record<string, boolean> = {};
       for (const [id, r] of results) {
         nextValues[id] = {
           host: r.host ?? "",
@@ -84,16 +85,11 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
           password: "",
         };
         nextConfigured[id] = r.host !== null;
+        nextPwdSet[id] = Boolean(r.password_set);
       }
       setValues(nextValues);
       setConfigured(nextConfigured);
-      // Redis 密码「是否已设置」只作占位提示，明文不回显
-      try {
-        const cred = await api.redisCredential();
-        setRedisHasPassword(Boolean(cred.password));
-      } catch {
-        setRedisHasPassword(false);
-      }
+      setPasswordSet(nextPwdSet);
     } finally {
       setLoading(false);
     }
@@ -119,21 +115,15 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
     setSaving(id);
     setMsg(null);
     try {
-      const r = await api.saveServiceRemote(id, host, port);
+      const pwd = v.password.trim();
+      const r = await api.saveServiceRemote(id, host, port, pwd);
       if (!r.ok) {
         setMsg({ severity: "error", text: r.error ?? "保存失败" });
         return;
       }
-      // Redis 访问密码在同一入口一次配完：填了才更新，留空表示保持不变
-      if (id === "redis" && v.password.trim()) {
-        const cr = await api.redisSaveCredential({ host, port, password: v.password.trim() });
-        if (!cr.ok) {
-          setMsg({ severity: "error", text: `地址已保存，但密码写入失败：${cr.error ?? "未知错误"}` });
-          return;
-        }
-      }
       setConfigured((c) => ({ ...c, [id]: true }));
-      const pwdNote = id === "redis" && v.password.trim() ? "、访问密码已更新" : "";
+      setPasswordSet((m) => ({ ...m, [id]: pwd ? true : m[id] }));
+      const pwdNote = pwd ? "、访问密码已更新" : "";
       setMsg({
         severity: "success",
         text: `${id} 远程地址已保存为 ${host}:${port}${pwdNote}——已写入配置文件持久化，重启应用后仍生效；服务状态即将按新地址检测。`,
@@ -218,11 +208,7 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
                   }}
                 >
                   <Box sx={{ display: "flex", alignItems: "center", gap: 1, minWidth: 0 }}>
-                    {s.needsPassword ? (
-                      <VpnKey fontSize="small" sx={{ color: "primary.main", flexShrink: 0 }} />
-                    ) : (
-                      <Dns fontSize="small" sx={{ color: "text.secondary", flexShrink: 0 }} />
-                    )}
+                    <Dns fontSize="small" sx={{ color: "primary.main", flexShrink: 0 }} />
                     <Box sx={{ minWidth: 0 }}>
                       <Stack direction="row" spacing={0.75} alignItems="center">
                         <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
@@ -266,19 +252,13 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
                     }
                     inputProps={{ inputMode: "numeric" }}
                   />
-                  {s.needsPassword ? (
-                    <TextField
-                      size="small"
-                      type="password"
-                      placeholder={redisHasPassword ? "已设置 · 留空不改" : "无密码可留空"}
-                      value={v.password}
-                      onChange={(e) => setValues((m) => ({ ...m, [s.id]: { ...v, password: e.target.value } }))}
-                    />
-                  ) : (
-                    <Typography variant="caption" color="text.disabled" sx={{ textAlign: "center" }}>
-                      —
-                    </Typography>
-                  )}
+                  <TextField
+                    size="small"
+                    type="password"
+                    placeholder={passwordSet[s.id] ? "已设置 · 留空不改" : "无密码可留空"}
+                    value={v.password}
+                    onChange={(e) => setValues((m) => ({ ...m, [s.id]: { ...v, password: e.target.value } }))}
+                  />
                   <Tooltip title="保存并立即持久化，服务状态按新地址检测">
                     <Button variant="contained" disabled={saving === s.id} onClick={() => void save(s.id)}>
                       {saving === s.id ? "保存中…" : "保存"}

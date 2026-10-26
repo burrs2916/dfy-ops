@@ -395,13 +395,29 @@ pub fn service_remote(state: &AppState, service_id: &str) -> Option<(String, u16
 }
 
 /// 查询服务当前远程端点（未配置返回 null，前端据此显示「未配置」引导）。
+/// 密码不回显明文，只返回是否已设置。
 pub async fn get_remote(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(service_id): axum::extract::Path<String>,
 ) -> Json<serde_json::Value> {
-    match service_remote(&state, &service_id) {
-        Some((host, port)) => Json(serde_json::json!({ "host": host, "port": port })),
-        None => Json(serde_json::json!({ "host": null, "port": null })),
+    if service_id == "redis" {
+        if !crate::ops::redis_credential::is_configured(&state.config_dir) {
+            return Json(serde_json::json!({ "host": null, "port": null, "password_set": false }));
+        }
+        let cred = crate::ops::redis_credential::load(&state.config_dir);
+        return Json(serde_json::json!({
+            "host": cred.host,
+            "port": cred.port,
+            "password_set": !cred.password.is_empty(),
+        }));
+    }
+    match crate::ops::remote_endpoints::load(&state.config_dir, &service_id) {
+        Some(e) => Json(serde_json::json!({
+            "host": e.host,
+            "port": e.port,
+            "password_set": !e.password.is_empty(),
+        })),
+        None => Json(serde_json::json!({ "host": null, "port": null, "password_set": false })),
     }
 }
 
@@ -409,10 +425,14 @@ pub async fn get_remote(
 pub struct SaveRemoteReq {
     pub host: String,
     pub port: u16,
+    /// 可选访问密码：空 = 无认证 / 保持 Redis 已有密码不变
+    #[serde(default)]
+    pub password: String,
 }
 
 /// 保存服务远程端点：服务发现「采用」与手动配置共用入口。
-/// Redis 写 redis_credential（保留已托管密码），其余写 remote_endpoints。
+/// Redis 写 redis_credential（密码仅在填写时更新），其余写 remote_endpoints
+/// （密码为可选字段，空 = 无认证）。
 pub async fn save_remote(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(service_id): axum::extract::Path<String>,
@@ -426,6 +446,9 @@ pub async fn save_remote(
         let mut cred = crate::ops::redis_credential::load(&state.config_dir);
         cred.host = host;
         cred.port = req.port;
+        if !req.password.trim().is_empty() {
+            cred.password = req.password.trim().to_string();
+        }
         crate::ops::redis_credential::save(&state.config_dir, &cred)
     } else {
         crate::ops::remote_endpoints::save(
@@ -434,6 +457,7 @@ pub async fn save_remote(
             &crate::ops::remote_endpoints::RemoteEndpoint {
                 host,
                 port: req.port,
+                password: req.password.trim().to_string(),
             },
         )
     };

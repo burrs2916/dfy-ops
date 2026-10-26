@@ -378,13 +378,13 @@ export const api = {
       body: JSON.stringify({ cidr }),
     }),
   serviceRemote: (id: string) =>
-    request<{ host: string | null; port: number | null }>(
+    request<{ host: string | null; port: number | null; password_set: boolean }>(
       `/api/services/${id}/remote`,
     ),
-  saveServiceRemote: (id: string, host: string, port: number) =>
+  saveServiceRemote: (id: string, host: string, port: number, password = "") =>
     request<{ ok: boolean; error?: string }>(`/api/services/${id}/remote`, {
       method: "POST",
-      body: JSON.stringify({ host, port }),
+      body: JSON.stringify({ host, port, password }),
     }),
   scanConfig: () =>
     request<{ lastCidr: string }>("/api/network/scan-config"),

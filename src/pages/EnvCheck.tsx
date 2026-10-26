@@ -105,10 +105,9 @@ function ackId(reportId: string, itemId: string) {
 /** 与后端 ops/resource.rs 的 repair_target 口径一致：dep- 与 service- 前缀折叠后匹配。
  *  Redis 不在其中：纯远程部署模式不支持本地「一键修复」，问题项走「去连接配置」。 */
 const REPAIR_TARGETS = new Set(["java", "mysql", "vernemq", "minio", "greptime"]);
-/** 纯远程部署的软件（本机不安装，检测 = 托管连接配置指向的远程端点可达）。
- *  与后端 ServiceDef.remoteOnly 同口径：待安装/已安装列表不再出现，
- *  问题项的操作入口是「去连接配置」而非一键修复。 */
-const FIXED_REMOTE = new Set(["redis"]);
+/** 纯远程部署的软件：不进待安装/已安装列表（本机不安装、无安装包可识别），
+ *  集中在「远程部署」区配置地址与访问密码。与后端 ServiceDef.remoteOnly 同口径。 */
+const FIXED_REMOTE = new Set(["redis", "vernemq", "minio", "greptime"]);
 function repairTarget(checkId: string): string | null {
   const c = checkId.replace(/^dep-/, "").replace(/^service-/, "");
   return REPAIR_TARGETS.has(c) ? c : null;
