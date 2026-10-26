@@ -43,10 +43,13 @@ jobs:
       - name: Build frontend (dist)
         run: pnpm build
 
+      - name: TypeScript type check
+        run: pnpm exec tsc --noEmit
+
       - name: Clippy
         # Windows 专属代码路径此前从未被 clippy 检查过，先观察输出不阻断，
         # 待 Windows 路径告警清零后再收紧为 -D warnings。
-        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --manifest-path src-tauri/Cargo.toml
