@@ -368,12 +368,16 @@ pub async fn server_health(State(state): State<Arc<AppState>>) -> Json<serde_jso
 /// 应用诊断：真实版本号 + debug.log 注册路径与存在性。
 /// 应用在「设置 → 关于」里自己报告日志写在哪、生成没有——用户不用再翻目录猜。
 pub async fn diagnostics() -> Json<serde_json::Value> {
+    let errors = crate::debug_log::last_errors();
     let logs: Vec<serde_json::Value> = crate::debug_log::registered_paths()
         .iter()
         .map(|p| {
+            let key = p.display().to_string();
+            let last_error = errors.iter().find(|(k, _)| *k == key).map(|(_, v)| v.clone());
             serde_json::json!({
-                "path": p.display().to_string(),
+                "path": key,
                 "exists": p.exists(),
+                "last_error": last_error,
             })
         })
         .collect();
@@ -382,6 +386,17 @@ pub async fn diagnostics() -> Json<serde_json::Value> {
         "version": env!("CARGO_PKG_VERSION"),
         "log_paths": logs,
     }))
+}
+
+/// 直接返回 debug.log 内容（最多 16KB）——「关于」页内嵌展示，用户无需打开文件夹。
+pub async fn diagnostics_log_content() -> Json<serde_json::Value> {
+    match crate::debug_log::read_log_head(16 * 1024) {
+        Some(content) => Json(serde_json::json!({ "ok": true, "content": content })),
+        None => Json(serde_json::json!({
+            "ok": false,
+            "error": "没有任何一个注册路径下的 debug.log 存在——日志从未成功写入",
+        })),
+    }
 }
 
 /// 在系统文件管理器中打开 debug.log 所在目录。

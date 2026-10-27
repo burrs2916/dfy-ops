@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Alert, Button, Divider, MenuItem, Paper, Select, Snackbar, Stack, Table, TableBody, TableCell, TableRow, TextField, Typography } from "@mui/material";
+import { Alert, Box, Button, Divider, MenuItem, Paper, Select, Snackbar, Stack, Table, TableBody, TableCell, TableRow, TextField, Typography } from "@mui/material";
 import { MONO_STACK } from "../theme";
 import { Tune, Storage, Info, FolderOpen } from "@mui/icons-material";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -26,7 +26,7 @@ const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 type DiagInfo = {
   ok: boolean;
   version: string;
-  log_paths: { path: string; exists: boolean }[];
+  log_paths: { path: string; exists: boolean; last_error?: string | null }[];
 };
 
 export default function Settings() {
@@ -36,6 +36,7 @@ export default function Settings() {
   const [scan, setScan] = useState<ResourceScan | null>(null);
   const [scanning, setScanning] = useState(false);
   const [diag, setDiag] = useState<DiagInfo | null>(null);
+  const [logContent, setLogContent] = useState<string | null>(null);
   const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" }>({
     open: false,
     msg: "",
@@ -46,10 +47,16 @@ export default function Settings() {
     if (loaded) setDraft(settings);
   }, [loaded, settings]);
 
-  // 诊断信息（真实版本 + debug.log 路径/存在性）：进「设置」页即加载
+  // 诊断信息（真实版本 + debug.log 路径/存在性/写错误/内容）：进「设置」页即加载
   useEffect(() => {
     api.diagnostics().then(setDiag).catch(() => {
       /* 后端未就绪时静默，「关于」页显示占位 */
+    });
+    api.diagnosticsLogContent().then((r) => {
+      if (r.ok && r.content != null) setLogContent(r.content);
+      else setLogContent(r.error ?? null);
+    }).catch(() => {
+      /* 同上 */
     });
   }, []);
 
@@ -327,7 +334,7 @@ export default function Settings() {
                 <Divider />
                 <SettingRow
                   label="诊断日志（debug.log）"
-                  description="应用自动写入的诊断文件，记录 MQTT 探测等链路轨迹。应用每一步都报告日志写到哪、生成没有，无需手动翻找"
+                  description="应用自动写入的诊断文件。日志内容直接显示在下方——写不进或没生成也会给出原因"
                 >
                   <Stack spacing={0.75} sx={{ alignItems: "flex-end" }}>
                     {(diag?.log_paths ?? []).map((lp) => (
@@ -337,12 +344,13 @@ export default function Settings() {
                         sx={{
                           fontFamily: MONO_STACK,
                           fontSize: 12,
-                          color: lp.exists ? "success.main" : "text.secondary",
+                          color: lp.exists ? "success.main" : "error.main",
                           wordBreak: "break-all",
                           textAlign: "right",
                         }}
                       >
                         {lp.exists ? "已生成" : "未生成"} · {lp.path}
+                        {lp.last_error ? ` · 写入错误：${lp.last_error}` : ""}
                       </Typography>
                     ))}
                     {!diag && (
@@ -355,6 +363,24 @@ export default function Settings() {
                     </Button>
                   </Stack>
                 </SettingRow>
+                <Divider />
+                <Box sx={{ p: 2, bgcolor: "action.hover" }}>
+                  <Typography variant="caption" sx={{ color: "text.secondary", display: "block", mb: 1 }}>
+                    debug.log 内容（前 16KB）
+                  </Typography>
+                  <Box
+                    sx={{
+                      maxHeight: 260,
+                      overflow: "auto",
+                      fontFamily: MONO_STACK,
+                      fontSize: 12,
+                      whiteSpace: "pre-wrap",
+                      wordBreak: "break-all",
+                    }}
+                  >
+                    {logContent ?? "（读取中……）"}
+                  </Box>
+                </Box>
                 <Divider />
                 <SettingRow label="运维 API 地址" description="内嵌 Axum 后端，仅监听本机回环地址，外部不可达">
                   <Typography variant="body2" sx={{ fontFamily: MONO_STACK }}>

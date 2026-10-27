@@ -75,8 +75,12 @@ export const api = {
     request<{
       ok: boolean;
       version: string;
-      log_paths: { path: string; exists: boolean }[];
+      log_paths: { path: string; exists: boolean; last_error?: string | null }[];
     }>("/api/diagnostics"),
+  diagnosticsLogContent: () =>
+    request<{ ok: boolean; content?: string; error?: string }>(
+      "/api/diagnostics/log-content",
+    ),
   openLogDir: () =>
     request<{ ok: boolean; dir?: string; error?: string }>(
       "/api/diagnostics/open-log-dir",
