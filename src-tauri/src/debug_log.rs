@@ -16,7 +16,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 
 pub const DEBUG_LOG_MAX_SIZE: u64 = 5 * 1024 * 1024; // 5 MB 截断
 const MAX_DETAIL_LEN: usize = 4096;
@@ -25,9 +25,6 @@ pub type DebugLogPaths = Arc<Vec<PathBuf>>;
 
 static PATHS: OnceLock<DebugLogPaths> = OnceLock::new();
 static SEQ: AtomicU64 = AtomicU64::new(0);
-/// 每个路径最近一次写入失败的错误（路径 -> 错误文本）。
-/// 供 /api/diagnostics 上报——写不进去了要让用户在界面上直接看到原因。
-static LAST_ERRORS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 /// 注册所有 debug.log 写入路径，进程启动时调用一次。后续调用忽略。
 pub fn init_paths(paths: DebugLogPaths) {
@@ -69,40 +66,14 @@ pub fn write_line(path: &Path, message: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 追加到**所有**已注册路径。内部逐条写，错误记入 LAST_ERRORS（界面上报）。
+/// 追加到**所有**已注册路径。内部逐条写，错了不影响其他路径。
 pub fn write_to(paths: &DebugLogPaths, message: &str) {
     for path in paths.iter() {
         if let Err(e) = write_line(path, message) {
-            let key = path.display().to_string();
-            let mut errs = LAST_ERRORS.lock().unwrap_or_else(|p| p.into_inner());
-            if let Some(slot) = errs.iter_mut().find(|(k, _)| *k == key) {
-                slot.1 = e.to_string();
-            } else {
-                errs.push((key, e.to_string()));
-            }
             // Windows GUI 子系统下 stderr 无效，eprintln 会 panic——只在 debug 构建打
             #[cfg(debug_assertions)]
             eprintln!("[debug_log] 写入失败 {}: {e}", path.display());
         }
-    }
-}
-
-/// 各路径最近一次写入错误（路径, 错误）。
-pub fn last_errors() -> Vec<(String, String)> {
-    LAST_ERRORS.lock().unwrap_or_else(|p| p.into_inner()).clone()
-}
-
-/// 读取第一个已存在的日志文件内容（最多 max 字节，从头截取）。
-/// 供「关于」页直接展示日志内容——用户连文件夹都不用打开。
-pub fn read_log_head(max: usize) -> Option<String> {
-    let paths = PATHS.get()?;
-    let path = paths.iter().find(|p| p.exists())?;
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let slice = &bytes[..bytes.len().min(max)];
-            Some(String::from_utf8_lossy(slice).to_string())
-        }
-        Err(e) => Some(format!("<读取失败：{e}>")),
     }
 }
 
