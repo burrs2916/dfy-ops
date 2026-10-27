@@ -23,6 +23,7 @@ import { ArrowBack, Close, ContentCopy, DnsOutlined, Download } from "@mui/icons
 import { api } from "../api";
 import type { LogsResponse, ServiceEnvReport, ServiceStatus } from "../types";
 import { StatusBadge } from "../components/StatusBadge";
+import ExternalConfigPanel from "../components/ExternalConfigPanel";
 
 /** 单行配置展示：标签 + 等宽值 + 复制按钮。纯展示，不做任何系统变更。 */
 function ConfigRow({
@@ -363,6 +364,9 @@ export default function ServiceDetail() {
           </Stack>
         </CardContent>
       </Card>
+
+      {/* 云端 Java 服务：外部化配置运维（端口/MySQL/Redis/VerneMQ，优先级高于 jar 内） */}
+      {id === "dfy-backend" && <ExternalConfigPanel serviceId={id} />}
 
       <Card variant="outlined">
         <CardContent>

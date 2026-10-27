@@ -34,6 +34,9 @@ import type {
   RedisOverview,
   SqlResult,
   UninstallTargetStatus,
+  ExternalConfig,
+  ExternalConfigResponse,
+  ExternalConfigWriteResult,
 } from "./types";
 
 // 运维后端（内嵌 Axum）监听本地 18721。
@@ -518,6 +521,14 @@ export const api = {
         body: JSON.stringify({ modelId }),
       }),
     ),
+  // 云端服务外部化配置（config/application-local.yaml）：读 / 原子写回
+  getExternalConfig: (id: string) =>
+    request<ExternalConfigResponse>(`/api/services/${id}/external-config`),
+  updateExternalConfig: (id: string, config: ExternalConfig) =>
+    request<ExternalConfigWriteResult>(`/api/services/${id}/external-config`, {
+      method: "POST",
+      body: JSON.stringify(config),
+    }),
 };
 
 /** 保存类接口的统一解包：失败直接抛错，成功返回最新配置。 */

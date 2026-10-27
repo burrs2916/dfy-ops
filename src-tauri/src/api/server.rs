@@ -168,6 +168,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/services/:id/refresh",
             axum::routing::get(handlers::service_refresh),
         )
+        // 云端服务外部化配置（config/application-local.yaml）：读 / 原子写回
+        .route(
+            "/api/services/:id/external-config",
+            axum::routing::get(handlers::external_config_get).post(handlers::external_config_update),
+        )
         // 环境修复：POST 启动（分级：无需修复/配置指引/自动安装），GET 轮询任务状态
         .route(
             "/api/env/repair",

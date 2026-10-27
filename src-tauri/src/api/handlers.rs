@@ -743,6 +743,55 @@ pub async fn env_check(
     Ok(Json(report))
 }
 
+// ===== 云端服务外部配置（config/application-local.yaml）运维 =====
+
+/// 读取云端 Java 服务的外部化配置（Spring Boot 2.4+ config/ 目录覆盖机制）。
+/// 文件不存在时 exists=false 返回模板指引——部署目录尚未初始化外部配置。
+pub async fn external_config_get(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
+    let install_dir = std::path::PathBuf::from(&def.install_dir);
+    let path = crate::ops::external_config::config_path(&install_dir);
+    let cfg = blocking(move || crate::ops::external_config::read(&install_dir)).await;
+    match cfg {
+        Ok(Some(c)) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "exists": true,
+            "configPath": path.display().to_string(),
+            "config": c,
+        }))),
+        Ok(None) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "exists": false,
+            "configPath": path.display().to_string(),
+            "hint": "外部配置不存在：服务使用 jar 内置默认配置。在部署目录创建 config/application-local.yaml 即可覆盖。",
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({ "ok": false, "error": e }))),
+    }
+}
+
+/// 更新云端服务外部化配置（端口/MySQL/Redis/VerneMQ 连接），原子写回。
+/// 修改后需重启服务生效。
+pub async fn external_config_update(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<crate::ops::external_config::ExternalConfig>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
+    let install_dir = std::path::PathBuf::from(&def.install_dir);
+    let written = blocking(move || crate::ops::external_config::write(&install_dir, &body)).await;
+    match written {
+        Ok(p) => Ok(Json(serde_json::json!({
+            "ok": true,
+            "configPath": p.display().to_string(),
+            "hint": "已写入。重启服务后生效。",
+        }))),
+        Err(e) => Ok(Json(serde_json::json!({ "ok": false, "error": e }))),
+    }
+}
+
 /// 环境检查全量结果的缓存有效期：全量探测含多次子进程调用（java/-version 等），开销大。
 const ENV_CACHE_TTL: Duration = Duration::from_secs(60);
 

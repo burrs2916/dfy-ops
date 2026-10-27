@@ -245,6 +245,39 @@ export interface UninstallTargetStatus {
   canUninstall: boolean;
 }
 
+/** 云端 Java 服务外部化配置（config/application-local.yaml 运维字段） */
+export interface ExternalConfig {
+  serverPort: string;
+  mysqlMasterUrl: string;
+  mysqlUsername: string;
+  mysqlPassword: string;
+  mysqlSlaveUrl: string;
+  redisHost: string;
+  redisPort: string;
+  redisPassword: string;
+  vernemqHostUrl: string;
+  vernemqUsername: string;
+  vernemqPassword: string;
+}
+
+/** GET /api/services/:id/external-config 响应 */
+export interface ExternalConfigResponse {
+  ok: boolean;
+  exists: boolean;
+  configPath: string;
+  config?: ExternalConfig;
+  hint?: string;
+  error?: string;
+}
+
+/** POST /api/services/:id/external-config 响应 */
+export interface ExternalConfigWriteResult {
+  ok: boolean;
+  configPath?: string;
+  hint?: string;
+  error?: string;
+}
+
 /** POST /api/env/repair/uninstall 启动结果 */
 export interface GenericUninstallStart {
   ok: boolean;
