@@ -289,15 +289,17 @@ fn probe_minio(addr: SocketAddr) -> Result<(String, String), String> {
     }
 }
 
-/// MQTT CONNECT 握手：用 rumqttc 同步 Client（真实 MQTT 客户端）完成连接并解析 CONNACK。
+/// MQTT CONNECT 握手：用 rumqttc 真实 MQTT 客户端完成连接并解析 CONNACK。
 /// 返回 (是否握手成功, 反馈详情)：收到 CONNACK（无论接受与否）即证明端口上是
-/// MQTT 服务；Err 表示连 MQTT 反馈都没有（连接被关闭 / 非 MQTT 响应 / 超时）。
+/// MQTT 服务；Ok((false, ..)) 表示 Broker 在线但拒绝/依赖不可用（如 WebHook
+/// 未联通）；Err 仅表示 TCP 之外的基础失败（运行时构建失败等）。
 ///
-/// connection_timeout = 7s：VerneMQ 的 auth_on_register webhook 默认 response_timeout = 5s，
-/// Broker 等 webhook 后端回复完才发 CONNACK；5s 绰绰有余，留 2s 余量给网络。
+/// 超时层级：连接超时 15s（NetworkOptions）> VerneMQ auth webhook 5s
+/// response_timeout；总上限 20s（poll deadline）。三层互不抢跑，webhook
+/// 超时后 Broker 的拒绝/断开一定能在 20s 内被观测到。
 fn probe_mqtt(addr: SocketAddr, username: &str, password: &str) -> Result<(bool, String), String> {
     use crate::debug_log as dl;
-    use rumqttc::{Client, ConnectReturnCode, MqttOptions, Packet};
+    use rumqttc::{AsyncClient, ConnectReturnCode, Event, MqttOptions, Packet};
 
     let t_start = Instant::now();
     dl::entry(
@@ -311,63 +313,86 @@ fn probe_mqtt(addr: SocketAddr, username: &str, password: &str) -> Result<(bool,
 
     let mut opts = MqttOptions::new("dfy-ops-probe", addr.ip().to_string(), addr.port());
     opts.set_keep_alive(Duration::from_secs(5));
-    // 连接超时必须 > Broker 的 auth webhook response_timeout（VerneMQ 默认 5s）：
-    // VerneMQ 收到 CONNECT 先等 auth_on_register webhook 回来才发 CONNACK，
-    // rumqttc 默认 5s 连接超时恰好和 webhook 等待同时到点，webhook 慢一拍就
-    // 客户端先报 Network timeout、收不到本该有的 CONNACK。留 3 倍余量。
-    opts.set_connection_timeout(15);
     if !username.is_empty() || !password.is_empty() {
         opts.set_credentials(username, password);
     }
 
-    dl::entry(dl::MQTT_SCOPE, "DEBUG", "connect", "client.new.start", "调用 rumqttc Client::new()");
-    let (client, mut connection) = Client::new(opts, 10);
+    dl::entry(dl::MQTT_SCOPE, "DEBUG", "connect", "client.new.start", "调用 rumqttc AsyncClient::new()");
+    let (client, mut eventloop) = AsyncClient::new(opts, 10);
+    // rumqttc 0.25：连接超时挂在 NetworkOptions 上（默认 5s）。VerneMQ 的
+    // auth_on_register webhook 默认 response_timeout 也是 5s——两者同时到点，
+    // webhook 慢一拍客户端就先报 Network timeout，收不到本该到达的 CONNACK。
+    // 提到 15s，给 webhook 超时→Broker 回拒绝码/断开留足时间。
+    eventloop.network_options.set_connection_timeout(15);
     dl::entry(
         dl::MQTT_SCOPE, "DEBUG", "connect", "client.new.ok",
-        &format!("Client::new() 返回，已过 {}ms", t_start.elapsed().as_millis()),
+        &format!("AsyncClient::new() 返回，连接超时已设 15s，已过 {}ms", t_start.elapsed().as_millis()),
     );
 
-    // 等 CONNACK 最多 20s（> 连接超时 15s）：Broker 侧 auth webhook 最多等 5s，
-    // 加上排队重试，20s 内没回基本就是 webhook 目标不通
+    // 自驱 poll 等首个事件：一次性 current-thread runtime，总上限 20s
+    // （> 连接超时 15s > webhook response_timeout 5s，层级清晰互不抢跑）
     dl::entry(
         dl::MQTT_SCOPE, "INFO", "connect", "recv.start",
-        "阻塞等 CONNACK，timeout=20s（连接超时 15s，容忍 Broker auth webhook 5s 等待）",
+        "等首个 MQTT 事件（CONNACK/错误），连接超时 15s、总上限 20s",
     );
-    let first_event = match connection.recv_timeout(Duration::from_secs(20)) {
-        Ok(Ok(ev)) => {
-            dl::entry(
-                dl::MQTT_SCOPE, "DEBUG", "connect", "recv.event",
-                &format!("收到事件：{ev:?}"),
-            );
-            ev
+    enum FirstEvent {
+        ConnAck(Box<rumqttc::ConnAck>),
+        ConnErr(rumqttc::ConnectionError),
+        Timeout,
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("构建 MQTT 探测运行时失败：{e}"))?;
+    let first = rt.block_on(async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            match tokio::time::timeout_at(deadline, eventloop.poll()).await {
+                Ok(Ok(Event::Incoming(Packet::ConnAck(c)))) => {
+                    dl::entry(
+                        dl::MQTT_SCOPE, "INFO", "connect", "recv.connack",
+                        &format!("收到 CONNACK，elapsed {}ms", t_start.elapsed().as_millis()),
+                    );
+                    return FirstEvent::ConnAck(Box::new(c));
+                }
+                Ok(Ok(_)) => continue, // Outgoing 回显或其他包，继续等
+                Ok(Err(e)) => {
+                    dl::entry(
+                        dl::MQTT_SCOPE, "ERROR", "connect", "recv.connerror",
+                        &format!("rumqttc ConnectionError：{e}（elapsed {}ms）", t_start.elapsed().as_millis()),
+                    );
+                    return FirstEvent::ConnErr(e);
+                }
+                Err(_) => {
+                    dl::entry(
+                        dl::MQTT_SCOPE, "ERROR", "connect", "recv.timeout",
+                        &format!("20s 内未收到任何 MQTT 反馈（elapsed {}ms）", t_start.elapsed().as_millis()),
+                    );
+                    return FirstEvent::Timeout;
+                }
+            }
         }
-        Ok(Err(conn_err)) => {
-            dl::entry(
-                dl::MQTT_SCOPE, "ERROR", "connect", "recv.connerror",
-                &format!("rumqttc ConnectionError：{conn_err}（elapsed {}ms）", t_start.elapsed().as_millis()),
-            );
-            let _ = client.try_disconnect();
-            return Err(format!("Broker 反馈失败：{conn_err}"));
-        }
-        Err(timeout_err) => {
-            dl::entry(
-                dl::MQTT_SCOPE, "ERROR", "connect", "recv.timeout",
-                &format!("recv_timeout 返回 RecvTimeoutError：{timeout_err:?}（elapsed {}ms）", t_start.elapsed().as_millis()),
-            );
-            let _ = client.try_disconnect();
-            return Err(format!("Broker 反馈超时：{timeout_err:?}"));
-        }
-    };
+    });
+    drop(client); // 触发连接清理
 
-    let _ = client.try_disconnect();
-    let connack = match first_event {
-        rumqttc::Event::Incoming(Packet::ConnAck(c)) => c,
-        other => {
+    // ---- 结果分类：文案精确对应「端口通 / Broker 活 / WebHook 联没联通」----
+    let connack = match first {
+        FirstEvent::ConnAck(c) => c,
+        FirstEvent::Timeout => {
+            // TCP 已在 run_remote_test 探通；20s 零反馈 = Broker 挂着 webhook 等后端
             dl::entry(
-                dl::MQTT_SCOPE, "WARN", "connect", "recv.not.connack",
-                &format!("首个事件不是 CONNACK：{other:?}（elapsed {}ms）", t_start.elapsed().as_millis()),
+                dl::MQTT_SCOPE, "WARN", "run", "mqtt.webhook.silent",
+                "端口通但 20s 零 MQTT 反馈 → 判定认证 WebHook 未联通",
             );
-            return Err(format!("未收到 CONNACK，而是：{other:?}"));
+            return Ok((false, "端口是通的，但认证 WebHook 没有联通：Broker 一直未回应 MQTT 握手（等待 auth_on_register 后端回复超时）。请启动后端认证应用、确认 VerneMQ 虚拟机可访问 192.168.56.1 的后端端口，或暂时关闭 WebHook 认证".into()));
+        }
+        FirstEvent::ConnErr(e) => {
+            // 15s 连接超时 / Broker 主动断开：webhook 超时后 Broker fail closed 的典型表现
+            dl::entry(
+                dl::MQTT_SCOPE, "WARN", "run", "mqtt.webhook.connerr",
+                "端口通但 MQTT 连接被断开/超时 → 判定认证 WebHook 未联通（或 Broker 拒绝）",
+            );
+            return Ok((false, format!("端口是通的，但认证 WebHook 没有联通：MQTT 连接未能完成握手（{e}）。最常见原因：auth_on_register 指向的后端服务未启动或不可达——请启动后端应用，或暂时关闭 VerneMQ 的 WebHook 认证")));
         }
     };
 
@@ -402,7 +427,7 @@ fn probe_mqtt(addr: SocketAddr, username: &str, password: &str) -> Result<(bool,
             Ok((false, "端口确认是 MQTT 服务，但认证被拒：用户名或密码不正确".into()))
         }
         ConnectReturnCode::NotAuthorized => {
-            Ok((false, "端口确认是 MQTT 服务，但该账号未获授权连接".into()))
+            Ok((false, "Broker 在线并明确拒绝了授权：auth_on_register 认证未通过——账号被 WebHook 认证策略拒绝，或后端认证服务返回失败。请检查后端认证应用与账号配置".into()))
         }
     }
 }
