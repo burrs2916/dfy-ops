@@ -1,21 +1,17 @@
 //! dfy-ops 会话级诊断日志。
 //!
 //! 独立于 tracing 管道（tracing 打 stdout 用于开发期），debug.log 是 plain-text、
-//! 启动时截断的诊断文件——用户提交 bug 时要附这个文件。结构参考
-//! biospehere-terminal-app 的 infra/logging/debug_log.rs，简化到够用即可。
+//! 启动时截断的诊断文件——用户提交 bug 时要附这个文件。
 //!
-//! 多路径写入（参考 biosphere 的 resolve_debug_log_paths）：
-//!     1. Tauri app_data_dir（Windows = C:\Users\<user>\AppData\Local\<identifier>\debug.log，
-//!        macOS = ~/Library/Application Support/<identifier>/debug.log）——**永远有写权限**
-//!     2. exe 同级目录（debug 构建用户最容易找到；release 装 Program Files 可能无权限）
-//!     3. 项目 target/debug/debug.log（dev 构建用户最直接能看到的）
-//! 三处都写，用户随便找一个就行。
+//! 参考 biosphere-terminal-app 的 infra/logging/debug_log.rs。
 //!
-//! 格式：
-//!     [1735345678] #000001 12:34:56.789 INFO  MQTT  phase=connect evt=enter
-//!         | host=192.168.56.1 port=18830 user=guest pwd=set(len=6)
-//!
-//! 单条记录独占一行（换行/制表符转义为 \\n / \\t），方便 tail -f / grep。
+//! 多路径写入（和 biosphere 完全一致的策略）：
+//!     1. dirs_next::data_local_dir  （Windows = %LOCALAPPDATA%\identifier\debug.log，
+//!        macOS = ~/Library/Application Support/identifier/debug.log）——永远有写权限
+//!     2. APPDATA 兜底（Windows）
+//!     3. exe 同级目录——用户最直觉找的位置，但 Program Files 下可能无权限
+//! 三处都写，总有一处成功。用户看 stdout 里 tracing 输出的路径也行，
+//! 找 exe 旁边也行。
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -23,35 +19,22 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 pub const DEBUG_LOG_MAX_SIZE: u64 = 5 * 1024 * 1024; // 5 MB 截断
-const MAX_DETAIL_LEN: usize = 4096; // 单条详情上限，防止一条噪音淹没整个会话
+const MAX_DETAIL_LEN: usize = 4096;
 
-type DebugLogPaths = Arc<Vec<PathBuf>>;
+pub type DebugLogPaths = Arc<Vec<PathBuf>>;
 
 static PATHS: OnceLock<DebugLogPaths> = OnceLock::new();
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 进程启动时调用一次，注册 debug.log 写入路径。后续调用忽略。
-/// 只接一个路径：**exe 同级目录下的 debug.log**。
-pub fn init(path: PathBuf) {
-    let _ = PATHS.set(Arc::new(vec![path]));
+/// 注册所有 debug.log 写入路径，进程启动时调用一次。后续调用忽略。
+pub fn init_paths(paths: DebugLogPaths) {
+    let _ = PATHS.set(paths);
 }
 
-/// 追加一行到**所有**已注册路径下的 debug.log。
-/// Best-effort：错了静默丢弃——debug.log 挂了不能拖垮主流程。
+/// 追加一行到单个 debug.log 文件。
+/// Best-effort：返回 Result 但调用方可以 `.ok()` 忽略——debug.log 挂了不能拖垮主流程。
 /// 文件超过 5MB 时先截断再写。
-fn write_line_all(message: &str) {
-    let Some(paths) = PATHS.get() else {
-        #[cfg(debug_assertions)]
-        eprintln!("[debug_log:uninit] {message}");
-        return;
-    };
-    for path in paths.iter() {
-        let _ = write_line(path, message);
-    }
-}
-
-/// 追加一行到单个 debug.log。内部：创建目录、超 5MB 截断、追加写入。
-fn write_line(path: &Path, message: &str) -> std::io::Result<()> {
+pub fn write_line(path: &Path, message: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -77,20 +60,48 @@ fn write_line(path: &Path, message: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 启动标记：打一行启动标记。只有一个路径（exe 同级 debug.log）。
-pub fn on_app_start() {
-    write_line_all("===== DFY Ops debug.log 启动 =====");
+/// 追加到**所有**已注册路径。内部逐条写，错了不影响其他路径。
+pub fn write_to(paths: &DebugLogPaths, message: &str) {
+    for path in paths.iter() {
+        if let Err(e) = write_line(path, message) {
+            // 这里不能再用 debug_log 自己打日志（会死循环），用 eprintln
+            eprintln!("[debug_log] 写入失败 {}: {e}", path.display());
+        }
+    }
 }
 
-// ── 便捷 API ────────────────────────────────────────────────────
+/// 追加到进程全局 debug.log 位置。init_paths 之前调用会静默丢弃。
+pub fn write(message: &str) {
+    match PATHS.get() {
+        Some(paths) => write_to(paths, message),
+        None => {
+            #[cfg(debug_assertions)]
+            eprintln!("[debug_log:uninit] {message}");
+        }
+    }
+}
 
-/// 结构化 entry：scope / level / phase / evt 都很短，详情可长（会被 clamp + 换行转义）。
+// ── 结构化 entry（仿 biosphere 的 structured，但简化成我们需要的 scope）───
+
+pub const MQTT_SCOPE: &str = "MQTT";
+#[allow(dead_code)]
+pub const REDIS_SCOPE: &str = "Redis";
+#[allow(dead_code)]
+pub const HTTP_SCOPE: &str = "HTTP";
+#[allow(dead_code)]
+pub const APP_SCOPE: &str = "App";
+
+/// 结构化 entry：scope + level + phase + evt + detail
+/// 格式：
+///     [MQTT] #000042 12:34:56.789 INFO  phase=connect evt=enter | host=192.168.56.1 port=18830 ...
 pub fn entry(scope: &str, level: &str, phase: &str, evt: &str, detail: &str) {
-    let msg = format!(
-        "{level:<5} {scope:<6} phase={phase} evt={evt} | {}",
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let time_ms = chrono::Local::now().format("%H:%M:%S%.3f");
+    let line = format!(
+        "[{scope}] #{seq:06} {time_ms} {level:<5} phase={phase} evt={evt} | {}",
         clamp(&one_line(detail), MAX_DETAIL_LEN)
     );
-    write_line_all(&msg);
+    write(&line);
 }
 
 // ── 工具函数 ────────────────────────────────────────────────────
@@ -116,16 +127,6 @@ fn clamp(value: &str, max: usize) -> String {
     let head: String = value.chars().take(max).collect();
     format!("{head}…<truncated, total {total} chars>")
 }
-
-// ── 便捷 scope 常量 ─────────────────────────────────────────────
-
-pub const MQTT_SCOPE: &str = "MQTT";
-#[allow(dead_code)]
-pub const REDIS_SCOPE: &str = "Redis";
-#[allow(dead_code)]
-pub const HTTP_SCOPE: &str = "HTTP";
-#[allow(dead_code)]
-pub const APP_SCOPE: &str = "App";
 
 // ── 秘密值脱敏 ───────────────────────────────────────────────────
 

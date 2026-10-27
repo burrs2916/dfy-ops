@@ -50,6 +50,49 @@ fn uses_custom_titlebar() -> bool {
     cfg!(target_os = "windows")
 }
 
+/// 解析 debug.log 写入路径（和 biosphere-terminal-app 的 resolve_debug_log_paths 完全同策略）：
+/// 多路径写入，总有一处能写。
+///
+/// 1. dirs_next::data_local_dir()
+///    跨平台主路径，永远可写
+///    Windows: %LOCALAPPDATA%\dfy-ops\debug.log
+///    macOS:   ~/Library/Application Support/dfy-ops/debug.log
+/// 2. APPDATA 兜底
+///    Windows 仅当 data_local_dir 失败时用
+/// 3. exe 同级目录
+///    用户直觉找的位置，Program Files 下可能无权限
+fn resolve_debug_log_paths() -> debug_log::DebugLogPaths {
+    let mut paths: Vec<PathBuf> = Vec::new();
+
+    // 1. data_local_dir（最稳的主路径）
+    if let Some(local) = dirs_next::data_local_dir() {
+        paths.push(local.join("dfy-ops").join("debug.log"));
+    }
+
+    // 2. APPDATA 兜底（Windows）
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let p = PathBuf::from(&appdata).join("dfy-ops").join("debug.log");
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
+    }
+
+    // 3. exe 同级目录
+    if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
+        let p = exe_dir.join("debug.log");
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
+    }
+
+    // 4. 兜底：当前工作目录
+    if paths.is_empty() {
+        paths.push(PathBuf::from("debug.log"));
+    }
+
+    std::sync::Arc::new(paths)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -60,15 +103,24 @@ pub fn run() {
         // 原生目录/文件选择对话框（设置 → 资源目录「浏览」）
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // debug.log：**exe 同级目录**，跨平台通用，用户一眼就能找到。
-            let exe_dir = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-                .unwrap_or_else(|| PathBuf::from("."));
-            let log_path = exe_dir.join("debug.log");
-            debug_log::init(log_path.clone());
-            debug_log::on_app_start();
-            tracing::info!("debug.log 路径：{}", log_path.display());
+            // debug.log：多路径写入（和 biosphere-terminal-app 同策略）。
+            // 总有一处能写——Windows Program Files 下 exe 旁边可能没权限，
+            // 但 data_local_dir（%LOCALAPPDATA%）一定能写。
+            let paths = resolve_debug_log_paths();
+            debug_log::init_paths(paths.clone());
+            // 在 tracing 里打出所有路径，用户从 stdout 就能看到写哪了
+            for (i, p) in paths.iter().enumerate() {
+                tracing::info!("[debug.log] 路径 {}：{}", i + 1, p.display());
+            }
+            debug_log::write("===== DFY Ops debug.log 启动 =====");
+
+            // panic hook：panic 时也写入 debug.log，用户能拿到崩溃上下文
+            let paths_for_panic = paths.clone();
+            std::panic::set_hook(Box::new(move |info| {
+                let msg = format!("[panic] {info}");
+                debug_log::write_to(&paths_for_panic, &msg);
+                eprintln!("{msg}");
+            }));
 
             #[cfg(all(target_os = "macos", debug_assertions))]
             set_dock_icon_dev();
