@@ -311,6 +311,11 @@ fn probe_mqtt(addr: SocketAddr, username: &str, password: &str) -> Result<(bool,
 
     let mut opts = MqttOptions::new("dfy-ops-probe", addr.ip().to_string(), addr.port());
     opts.set_keep_alive(Duration::from_secs(5));
+    // 连接超时必须 > Broker 的 auth webhook response_timeout（VerneMQ 默认 5s）：
+    // VerneMQ 收到 CONNECT 先等 auth_on_register webhook 回来才发 CONNACK，
+    // rumqttc 默认 5s 连接超时恰好和 webhook 等待同时到点，webhook 慢一拍就
+    // 客户端先报 Network timeout、收不到本该有的 CONNACK。留 3 倍余量。
+    opts.set_connection_timeout(15);
     if !username.is_empty() || !password.is_empty() {
         opts.set_credentials(username, password);
     }
@@ -322,13 +327,13 @@ fn probe_mqtt(addr: SocketAddr, username: &str, password: &str) -> Result<(bool,
         &format!("Client::new() 返回，已过 {}ms", t_start.elapsed().as_millis()),
     );
 
-    // 等 CONNACK 最多 10s：VerneMQ auth_on_register webhook 默认 5s 响应超时，
-    // Broker 等完才发 CONNACK。Connection::recv_timeout 是阻塞等首个 MQTT 事件
+    // 等 CONNACK 最多 20s（> 连接超时 15s）：Broker 侧 auth webhook 最多等 5s，
+    // 加上排队重试，20s 内没回基本就是 webhook 目标不通
     dl::entry(
         dl::MQTT_SCOPE, "INFO", "connect", "recv.start",
-        "阻塞等 CONNACK，timeout=10s",
+        "阻塞等 CONNACK，timeout=20s（连接超时 15s，容忍 Broker auth webhook 5s 等待）",
     );
-    let first_event = match connection.recv_timeout(Duration::from_secs(10)) {
+    let first_event = match connection.recv_timeout(Duration::from_secs(20)) {
         Ok(Ok(ev)) => {
             dl::entry(
                 dl::MQTT_SCOPE, "DEBUG", "connect", "recv.event",
