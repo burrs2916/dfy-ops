@@ -535,14 +535,14 @@ fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
                 let bin = format!("{home}\\bin");
                 match ensure_user_path_entry(&bin) {
                     Ok(true) => {
-                        return Ok(format!(
+                        Ok(format!(
                             "已写入用户级 JAVA_HOME={home}，并把 {bin} 加入用户 PATH（重开命令行窗口生效）"
-                        ));
+                        ))
                     }
                     Ok(false) => {
-                        return Ok(format!("已写入用户级 JAVA_HOME={home}（PATH 中已存在 {bin}，未重复添加）"));
+                        Ok(format!("已写入用户级 JAVA_HOME={home}（PATH 中已存在 {bin}，未重复添加）"))
                     }
-                    Err(e) => return Err(format!("PATH 追加失败：{e}")),
+                    Err(e) => Err(format!("PATH 追加失败：{e}")),
                 }
             }
             #[cfg(not(target_os = "windows"))]
@@ -562,13 +562,11 @@ fn register_and_start(target: &str, home: &str) -> Result<(), String> {
     let (svc, _port) = service_spec(target).unwrap();
     let script = match target {
         "mysql" => format!(
-            "net stop {svc} & taskkill /f /im mysqld.exe & ping -n 3 127.0.0.1 >nul & sc delete {svc} & \"{}\" --install {svc} --defaults-file=\"{}\" & net start {svc}",
-            format!("{home}\\bin\\mysqld.exe"),
+            "net stop {svc} & taskkill /f /im mysqld.exe & ping -n 3 127.0.0.1 >nul & sc delete {svc} & \"{home}\\bin\\mysqld.exe\" --install {svc} --defaults-file=\"{}\" & net start {svc}",
             mysql_ini_path(home)
         ),
         "redis" => format!(
-            "net stop {svc} & taskkill /f /im redis-server.exe & ping -n 3 127.0.0.1 >nul & sc delete {svc} & \"{}\" --service-install \"{}\" --service-name {svc} & net start {svc}",
-            format!("{home}\\redis-server.exe"),
+            "net stop {svc} & taskkill /f /im redis-server.exe & ping -n 3 127.0.0.1 >nul & sc delete {svc} & \"{home}\\redis-server.exe\" --service-install \"{}\" --service-name {svc} & net start {svc}",
             redis_conf_path(home)
         ),
         _ => return Err("该目标没有服务注册管线".into()),

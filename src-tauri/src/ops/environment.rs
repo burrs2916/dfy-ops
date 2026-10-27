@@ -376,7 +376,7 @@ fn detect_webview2() -> Option<String> {
     for hive in [HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER] {
         for sub in SUBKEYS {
             for flags in [KEY_READ, KEY_READ | KEY_WOW64_32KEY] {
-                if let Ok(k) = RegKey::predef(hive).open_subkey_with_flags(&format!(r"{sub}\{GUID}"), flags) {
+                if let Ok(k) = RegKey::predef(hive).open_subkey_with_flags(format!(r"{sub}\{GUID}"), flags) {
                     if let Ok(pv) = k.get_value::<String, _>("pv") {
                         if !pv.is_empty() {
                             return Some(pv);

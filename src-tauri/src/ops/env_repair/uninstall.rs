@@ -582,7 +582,7 @@ fn backup_mysql_before_delete(install_dir: &str, config_dir: &str) -> Result<Opt
     // 2. 确保服务在运行（mysqldump 需要连接实例；未运行则 UAC 启动后等就绪）
     if !crate::ops::health::check_tcp("127.0.0.1", 3306, 800) {
         let (svc, _) = service_spec("mysql").unwrap();
-        if !service_exists(&svc) {
+        if !service_exists(svc) {
             return Err(format!("MySQL 服务 {svc} 不存在且端口未监听，无实例可备份"));
         }
         runas_wait("cmd.exe", &format!("/c net start {svc}"))
