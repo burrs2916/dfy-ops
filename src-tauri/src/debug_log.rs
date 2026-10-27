@@ -30,20 +30,10 @@ type DebugLogPaths = Arc<Vec<PathBuf>>;
 static PATHS: OnceLock<DebugLogPaths> = OnceLock::new();
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 进程启动时调用一次，注册所有 debug.log 写入路径。后续调用忽略。
-/// 建议在 `.setup(|app|)` 里调用——由 lib.rs 负责用 Tauri API 解析出多条路径
-/// （app_data_dir 为主，避开 Windows Program Files 权限问题），再传给这里。
-pub fn init(paths: Vec<PathBuf>) {
-    if paths.is_empty() {
-        return;
-    }
-    let mut unique: Vec<PathBuf> = Vec::new();
-    for p in paths {
-        if !unique.contains(&p) {
-            unique.push(p);
-        }
-    }
-    let _ = PATHS.set(Arc::new(unique));
+/// 进程启动时调用一次，注册 debug.log 写入路径。后续调用忽略。
+/// 只接一个路径：**exe 同级目录下的 debug.log**。
+pub fn init(path: PathBuf) {
+    let _ = PATHS.set(Arc::new(vec![path]));
 }
 
 /// 追加一行到**所有**已注册路径下的 debug.log。
@@ -87,16 +77,9 @@ fn write_line(path: &Path, message: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// 启动标记：在所有路径下打印启动行 + 路径信息。
+/// 启动标记：打一行启动标记。只有一个路径（exe 同级 debug.log）。
 pub fn on_app_start() {
     write_line_all("===== DFY Ops debug.log 启动 =====");
-    if let Some(paths) = PATHS.get() {
-        write_line_all(&format!(
-            "写入路径（{} 个）：{}",
-            paths.len(),
-            paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" | ")
-        ));
-    }
 }
 
 // ── 便捷 API ────────────────────────────────────────────────────

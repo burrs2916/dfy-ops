@@ -60,25 +60,15 @@ pub fn run() {
         // 原生目录/文件选择对话框（设置 → 资源目录「浏览」）
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
-            // debug.log：会话级诊断文件，多路径写入（app_data_dir 为主，
-            // 永远有写权限，避开 Windows Program Files 的权限限制）。
-            // tracing 打 stdout 给开发看，debug.log 打持久文件给用户提交 bug。
-            let mut log_paths: Vec<PathBuf> = Vec::new();
-            // 1. Tauri app_data_dir：跨平台主路径，永远可写
-            if let Ok(dir) = app.path().app_data_dir() {
-                log_paths.push(dir.join("debug.log"));
-            }
-            // 2. exe 同级目录
-            if let Some(exe_dir) = std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.to_path_buf())) {
-                log_paths.push(exe_dir.join("debug.log"));
-            }
-            // 3. 项目 target/debug/（dev 构建时用户最容易找到）
-            let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            if let Some(proj_root) = manifest_dir.parent() {
-                log_paths.push(proj_root.join("target").join("debug").join("debug.log"));
-            }
-            debug_log::init(log_paths);
+            // debug.log：**exe 同级目录**，跨平台通用，用户一眼就能找到。
+            let exe_dir = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+                .unwrap_or_else(|| PathBuf::from("."));
+            let log_path = exe_dir.join("debug.log");
+            debug_log::init(log_path.clone());
             debug_log::on_app_start();
+            tracing::info!("debug.log 路径：{}", log_path.display());
 
             #[cfg(all(target_os = "macos", debug_assertions))]
             set_dock_icon_dev();
