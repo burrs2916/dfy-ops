@@ -115,6 +115,11 @@ pub fn router(state: Arc<AppState>) -> Router {
 
     Router::new()
         .route("/api/health", axum::routing::get(handlers::server_health))
+        .route("/api/diagnostics", axum::routing::get(handlers::diagnostics))
+        .route(
+            "/api/diagnostics/open-log-dir",
+            axum::routing::post(handlers::diagnostics_open_log_dir),
+        )
         .route("/api/services", axum::routing::get(handlers::list_services))
         .route(
             "/api/services/:id",

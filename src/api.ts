@@ -71,6 +71,17 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<{ status: string; services: number }>("/api/health"),
+  diagnostics: () =>
+    request<{
+      ok: boolean;
+      version: string;
+      log_paths: { path: string; exists: boolean }[];
+    }>("/api/diagnostics"),
+  openLogDir: () =>
+    request<{ ok: boolean; dir?: string; error?: string }>(
+      "/api/diagnostics/open-log-dir",
+      { method: "POST" },
+    ),
   listServices: () => request<ServiceStatus[]>("/api/services"),
   getService: (id: string) =>
     request<ServiceStatus>(`/api/services/${id}`),

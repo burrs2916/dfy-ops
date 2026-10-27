@@ -363,6 +363,69 @@ pub async fn server_health(State(state): State<Arc<AppState>>) -> Json<serde_jso
     }))
 }
 
+// ===== 应用诊断（debug.log 自证） =====
+
+/// 应用诊断：真实版本号 + debug.log 注册路径与存在性。
+/// 应用在「设置 → 关于」里自己报告日志写在哪、生成没有——用户不用再翻目录猜。
+pub async fn diagnostics() -> Json<serde_json::Value> {
+    let logs: Vec<serde_json::Value> = crate::debug_log::registered_paths()
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "path": p.display().to_string(),
+                "exists": p.exists(),
+            })
+        })
+        .collect();
+    Json(serde_json::json!({
+        "ok": true,
+        "version": env!("CARGO_PKG_VERSION"),
+        "log_paths": logs,
+    }))
+}
+
+/// 在系统文件管理器中打开 debug.log 所在目录。
+/// 优先选第一个已存在的日志文件；都不存在时打开第一个注册路径的父目录并顺带建目录。
+pub async fn diagnostics_open_log_dir() -> Json<serde_json::Value> {
+    let paths = crate::debug_log::registered_paths();
+    let dir = paths
+        .iter()
+        .find(|p| p.exists())
+        .or_else(|| paths.first())
+        .and_then(|p| p.parent())
+        .map(|d| d.to_path_buf());
+    let Some(dir) = dir else {
+        return Json(serde_json::json!({ "ok": false, "error": "日志路径尚未注册" }));
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    match open_in_file_manager(&dir) {
+        Ok(_) => Json(serde_json::json!({ "ok": true, "dir": dir.display().to_string() })),
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": format!("打开失败：{e}"),
+            "dir": dir.display().to_string(),
+        })),
+    }
+}
+
+/// 跨平台调用系统文件管理器打开目录。
+fn open_in_file_manager(
+    dir: &std::path::Path,
+) -> std::io::Result<std::process::Child> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer").arg(dir).spawn()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(dir).spawn()
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        std::process::Command::new("xdg-open").arg(dir).spawn()
+    }
+}
+
 /// 全量状态探测：一次进程快照 + 并行逐服务检测。
 ///
 /// 服务间无共享可变状态，各自的 TCP 探测/注册表查询完全独立——此前串行

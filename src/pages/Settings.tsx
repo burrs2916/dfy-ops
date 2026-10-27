@@ -23,12 +23,19 @@ const intervalLabel = (v: number) => (v === 0 ? "关闭" : `${v} 秒`);
 
 const mb = (bytes: number) => `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 
+type DiagInfo = {
+  ok: boolean;
+  version: string;
+  log_paths: { path: string; exists: boolean }[];
+};
+
 export default function Settings() {
   const { settings, loaded, apply } = useAppSettingsStore();
   const [draft, setDraft] = useState<AppSettings>(settings);
   const [saving, setSaving] = useState(false);
   const [scan, setScan] = useState<ResourceScan | null>(null);
   const [scanning, setScanning] = useState(false);
+  const [diag, setDiag] = useState<DiagInfo | null>(null);
   const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" }>({
     open: false,
     msg: "",
@@ -38,6 +45,28 @@ export default function Settings() {
   useEffect(() => {
     if (loaded) setDraft(settings);
   }, [loaded, settings]);
+
+  // 诊断信息（真实版本 + debug.log 路径/存在性）：进「设置」页即加载
+  useEffect(() => {
+    api.diagnostics().then(setDiag).catch(() => {
+      /* 后端未就绪时静默，「关于」页显示占位 */
+    });
+  }, []);
+
+  const openLogDir = async () => {
+    try {
+      const r = await api.openLogDir();
+      if (!r.ok) {
+        setSnack({ open: true, msg: r.error ?? "无法打开日志目录", severity: "error" });
+      }
+    } catch (e) {
+      setSnack({
+        open: true,
+        msg: "无法打开日志目录：" + (e instanceof Error ? e.message : String(e)),
+        severity: "error",
+      });
+    }
+  };
 
   const save = async () => {
     setSaving(true);
@@ -292,8 +321,39 @@ export default function Settings() {
               <Paper variant="outlined" sx={{ overflow: "hidden" }}>
                 <SettingRow label="版本" description="DFY 运维平台">
                   <Typography variant="body2" sx={{ fontFamily: MONO_STACK }}>
-                    0.1.0
+                    {diag?.version ?? "…"}
                   </Typography>
+                </SettingRow>
+                <Divider />
+                <SettingRow
+                  label="诊断日志（debug.log）"
+                  description="应用自动写入的诊断文件，记录 MQTT 探测等链路轨迹。应用每一步都报告日志写到哪、生成没有，无需手动翻找"
+                >
+                  <Stack spacing={0.75} sx={{ alignItems: "flex-end" }}>
+                    {(diag?.log_paths ?? []).map((lp) => (
+                      <Typography
+                        key={lp.path}
+                        variant="body2"
+                        sx={{
+                          fontFamily: MONO_STACK,
+                          fontSize: 12,
+                          color: lp.exists ? "success.main" : "text.secondary",
+                          wordBreak: "break-all",
+                          textAlign: "right",
+                        }}
+                      >
+                        {lp.exists ? "已生成" : "未生成"} · {lp.path}
+                      </Typography>
+                    ))}
+                    {!diag && (
+                      <Typography variant="body2" sx={{ color: "text.secondary" }}>
+                        后端未就绪，诊断信息不可用
+                      </Typography>
+                    )}
+                    <Button size="small" variant="outlined" onClick={openLogDir} disabled={!diag}>
+                      打开日志文件夹
+                    </Button>
+                  </Stack>
                 </SettingRow>
                 <Divider />
                 <SettingRow label="运维 API 地址" description="内嵌 Axum 后端，仅监听本机回环地址，外部不可达">

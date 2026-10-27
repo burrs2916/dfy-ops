@@ -31,6 +31,12 @@ pub fn init_paths(paths: DebugLogPaths) {
     let _ = PATHS.set(paths);
 }
 
+/// 返回已注册路径的副本；init_paths 之前调用返回空。
+/// 供 /api/diagnostics 上报给前端——应用自己报告日志写在哪，用户不用猜。
+pub fn registered_paths() -> Vec<PathBuf> {
+    PATHS.get().map(|p| p.as_ref().clone()).unwrap_or_default()
+}
+
 /// 追加一行到单个 debug.log 文件。
 /// Best-effort：返回 Result 但调用方可以 `.ok()` 忽略——debug.log 挂了不能拖垮主流程。
 /// 文件超过 5MB 时先截断再写。
