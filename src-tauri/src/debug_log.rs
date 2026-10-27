@@ -4,49 +4,64 @@
 //! 启动时截断的诊断文件——用户提交 bug 时要附这个文件。结构参考
 //! biospehere-terminal-app 的 infra/logging/debug_log.rs，简化到够用即可。
 //!
+//! 多路径写入（参考 biosphere 的 resolve_debug_log_paths）：
+//!     1. Tauri app_data_dir（Windows = C:\Users\<user>\AppData\Local\<identifier>\debug.log，
+//!        macOS = ~/Library/Application Support/<identifier>/debug.log）——**永远有写权限**
+//!     2. exe 同级目录（debug 构建用户最容易找到；release 装 Program Files 可能无权限）
+//!     3. 项目 target/debug/debug.log（dev 构建用户最直接能看到的）
+//! 三处都写，用户随便找一个就行。
+//!
 //! 格式：
-//!     [1735345678] #000001 12:34:56.789 MQTT  phase=connect  evt=tcp.start
-//!         | host=192.168.56.1 port=18830 timeout=10s
+//!     [1735345678] #000001 12:34:56.789 INFO  MQTT  phase=connect evt=enter
+//!         | host=192.168.56.1 port=18830 user=guest pwd=set(len=6)
 //!
 //! 单条记录独占一行（换行/制表符转义为 \\n / \\t），方便 tail -f / grep。
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 pub const DEBUG_LOG_MAX_SIZE: u64 = 5 * 1024 * 1024; // 5 MB 截断
 const MAX_DETAIL_LEN: usize = 4096; // 单条详情上限，防止一条噪音淹没整个会话
 
-static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+type DebugLogPaths = Arc<Vec<PathBuf>>;
+
+static PATHS: OnceLock<DebugLogPaths> = OnceLock::new();
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
-/// 进程启动时调用一次，注册 debug.log 写入路径。后续调用忽略。
-pub fn init(path: PathBuf) {
-    let _ = LOG_PATH.set(path);
+/// 进程启动时调用一次，注册所有 debug.log 写入路径。后续调用忽略。
+/// 建议在 `.setup(|app|)` 里调用——由 lib.rs 负责用 Tauri API 解析出多条路径
+/// （app_data_dir 为主，避开 Windows Program Files 权限问题），再传给这里。
+pub fn init(paths: Vec<PathBuf>) {
+    if paths.is_empty() {
+        return;
+    }
+    let mut unique: Vec<PathBuf> = Vec::new();
+    for p in paths {
+        if !unique.contains(&p) {
+            unique.push(p);
+        }
+    }
+    let _ = PATHS.set(Arc::new(unique));
 }
 
-/// 把 debug.log 解析为 exe 同级目录下的 `debug.log`。
-/// Windows 上 exe 在安装目录旁边，macOS 上 `tauri dev` 也会落在项目 target/ 旁边。
-/// 如果 `std::env::current_exe()` 解析失败，退而写入当前工作目录。
-pub fn resolve_default_path() -> PathBuf {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-    exe_dir.join("debug.log")
-}
-
-/// 追加一行到 debug.log。Best-effort：错了静默丢弃——debug.log 挂了不能拖垮主流程。
-/// 文件超过 5MB 时先截断再写，防止单会话内无限增长。
-fn write_line(message: &str) {
-    let Some(path) = LOG_PATH.get() else {
+/// 追加一行到**所有**已注册路径下的 debug.log。
+/// Best-effort：错了静默丢弃——debug.log 挂了不能拖垮主流程。
+/// 文件超过 5MB 时先截断再写。
+fn write_line_all(message: &str) {
+    let Some(paths) = PATHS.get() else {
         #[cfg(debug_assertions)]
         eprintln!("[debug_log:uninit] {message}");
         return;
     };
+    for path in paths.iter() {
+        let _ = write_line(path, message);
+    }
+}
 
-    // 确保目录存在
+/// 追加一行到单个 debug.log。内部：创建目录、超 5MB 截断、追加写入。
+fn write_line(path: &Path, message: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -54,50 +69,45 @@ fn write_line(message: &str) {
     // 超 5MB 先截断
     if let Ok(meta) = std::fs::metadata(path) {
         if meta.len() >= DEBUG_LOG_MAX_SIZE {
-            let _ = std::fs::OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(path);
+            let _ = std::fs::OpenOptions::new().write(true).truncate(true).open(path);
         }
     }
 
-    let mut file = match std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        Ok(f) => f,
-        Err(_) => return,
-    };
-
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     let unix = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let time_ms = chrono::Local::now().format("%H:%M:%S%.3f");
-    let _ = writeln!(file, "[{unix}] #{seq:06} {time_ms} {message}");
+    writeln!(file, "[{unix}] #{seq:06} {time_ms} {message}")?;
+    Ok(())
 }
 
-/// 暴露给 lib.rs：打印初始化信息 + 完整路径（方便在 stdout 看到写哪了）。
+/// 启动标记：在所有路径下打印启动行 + 路径信息。
 pub fn on_app_start() {
-    let Some(path) = LOG_PATH.get() else { return };
-    write_line("===== DFY Ops debug.log 启动 =====");
-    write_line(&format!("debug.log 路径：{}", path.display()));
+    write_line_all("===== DFY Ops debug.log 启动 =====");
+    if let Some(paths) = PATHS.get() {
+        write_line_all(&format!(
+            "写入路径（{} 个）：{}",
+            paths.len(),
+            paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(" | ")
+        ));
+    }
 }
 
 // ── 便捷 API ────────────────────────────────────────────────────
-// 按「scope + phase + evt」组织日志条，grep 起来方便：
-//   MQTT phase=connect evt=tcp.start
-//   MQTT phase=connect evt=tcp.ok         detail="tcp 握手 2ms"
-//   MQTT phase=connect evt=client.new      detail="rumqttc Client::new() 已创建"
-//   MQTT phase=connect evt=recv.start      detail="阻塞等 CONNACK，timeout=10s"
-//   MQTT phase=connect evt=recv.result     detail="Ok(Incoming(ConnAck(Success)))"
-//   MQTT phase=connect evt=connack.code    detail="rc=0 (Success)"
 
-/// 结构化 entry：scope / phase / evt 都很短，详情可长（会被 clamp + 换行转义）。
+/// 结构化 entry：scope / level / phase / evt 都很短，详情可长（会被 clamp + 换行转义）。
 pub fn entry(scope: &str, level: &str, phase: &str, evt: &str, detail: &str) {
     let msg = format!(
         "{level:<5} {scope:<6} phase={phase} evt={evt} | {}",
         clamp(&one_line(detail), MAX_DETAIL_LEN)
     );
-    write_line(&msg);
+    write_line_all(&msg);
 }
 
 // ── 工具函数 ────────────────────────────────────────────────────
@@ -187,7 +197,6 @@ mod tests {
 
     #[test]
     fn redact_ignores_short_secrets() {
-        // 2 字符的 mask 太泛，跳过
         assert_eq!(redact("ls -la", &["la"]), "ls -la");
     }
 
