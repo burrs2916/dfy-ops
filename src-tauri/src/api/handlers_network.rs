@@ -289,98 +289,49 @@ fn probe_minio(addr: SocketAddr) -> Result<(String, String), String> {
     }
 }
 
-/// MQTT 剩余长度 varint 编码（MQTT 2.2.3 规范：每字节低 7 位，最高位续传标志）。
-/// 密码较长时 CONNECT 总长会超过 127，固定单字节编码会静默构造出非法包。
-fn encode_mqtt_varint(mut n: usize) -> Vec<u8> {
-    let mut out = Vec::new();
-    loop {
-        let mut byte = (n % 128) as u8;
-        n /= 128;
-        if n > 0 {
-            byte |= 0x80;
-        }
-        out.push(byte);
-        if n == 0 {
-            break;
-        }
-    }
-    out
-}
-
-/// 构造 MQTT 3.1.1 CONNECT 包（真实客户端式握手）：可变头 + payload，
-/// 带 clean session、keepalive 60s，按需携带 username/password——
-/// RabbitMQ（MQTT 插件）等要求认证的 broker 只对带凭证的 CONNECT 给出有效反馈。
-fn build_connect_packet(client_id: &str, username: Option<&str>, password: Option<&str>) -> Vec<u8> {
-    // MQTT 规范要求 password flag 必须伴随 username flag；只有密码没有用户名时
-    // 用 guest 兜底，避免构造出协议非法的包被 broker 直接断开。
-    let username = match (username, password) {
-        (None, Some(_)) => Some("guest"),
-        (u, _) => u,
-    };
-    let mut payload = Vec::new();
-    for field in [Some(client_id), username, password].into_iter().flatten() {
-        payload.extend_from_slice(&(field.len() as u16).to_be_bytes());
-        payload.extend_from_slice(field.as_bytes());
-    }
-    let mut flags = 0x02u8; // clean session
-    if username.is_some() {
-        flags |= 0x80;
-    }
-    if password.is_some() {
-        flags |= 0x40;
-    }
-    let mut packet = vec![0x00, 0x04, b'M', b'Q', b'T', b'T', 0x04, flags, 0x00, 0x3C];
-    packet.extend_from_slice(&payload);
-    let mut out = vec![0x10];
-    out.extend_from_slice(&encode_mqtt_varint(packet.len()));
-    out.extend_from_slice(&packet);
-    out
-}
-
-/// MQTT CONNECT 握手：真实客户端式连接，解析 CONNACK 返回码给出明确反馈。
+/// MQTT CONNECT 握手：用 rumqttc 同步 Client（真实 MQTT 客户端）完成连接并解析 CONNACK。
 /// 返回 (是否握手成功, 反馈详情)：收到 CONNACK（无论接受与否）即证明端口上是
-/// MQTT 服务；Err 表示连 MQTT 反馈都没有（连接被关闭 / 非 MQTT 响应）。
+/// MQTT 服务；Err 表示连 MQTT 反馈都没有（连接被关闭 / 非 MQTT 响应 / 超时）。
 ///
-/// 读超时 7 秒（远大于扫描用的 500ms）：VerneMQ 的 auth_on_register webhook
-/// 默认 response_timeout = 5s，Broker 等 webhook 后端回复完才发 CONNACK；
-/// 沿用扫描的 500ms 会导致"端口通但握手反馈超时"的误报。
-const MQTT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(7);
+/// connection_timeout = 7s：VerneMQ 的 auth_on_register webhook 默认 response_timeout = 5s，
+/// Broker 等 webhook 后端回复完才发 CONNACK；5s 绰绰有余，留 2s 余量给网络。
 fn probe_mqtt(addr: SocketAddr, username: &str, password: &str) -> Result<(bool, String), String> {
-    let mut s = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
-        .map_err(|e| format!("连接失败：{e}"))?;
-    s.set_read_timeout(Some(MQTT_HANDSHAKE_TIMEOUT)).ok();
-    s.set_write_timeout(Some(CONNECT_TIMEOUT)).ok();
-    use std::io::{Read, Write};
-    let uname = if username.is_empty() { None } else { Some(username) };
-    let pword = if password.is_empty() { None } else { Some(password) };
-    let packet = build_connect_packet("dfy-ops", uname, pword);
-    s.write_all(&packet)
-        .map_err(|e| format!("发送 MQTT CONNECT 失败：{e}"))?;
-    let mut buf: Vec<u8> = Vec::new();
-    let mut chunk = [0u8; 64];
-    while buf.len() < 4 {
-        match s.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(n) => buf.extend_from_slice(&chunk[..n]),
-            Err(e) => return Err(format!("等待 Broker 反馈失败：{e}")),
-        }
+    use rumqttc::{Client, ConnectReturnCode, MqttOptions, Packet};
+    let mut opts = MqttOptions::new("dfy-ops-probe", addr.ip().to_string(), addr.port());
+    opts.set_keep_alive(Duration::from_secs(5));
+    if !username.is_empty() || !password.is_empty() {
+        opts.set_credentials(username, password);
     }
-    if buf.is_empty() {
-        // TCP 通了但对 CONNECT 毫无回应直接关闭——最常见的是账号禁止远程登录
-        return Err("连接被服务端关闭，未返回任何 MQTT 反馈——常见原因：账号仅限本机登录（RabbitMQ 的 guest 默认如此）或代理剥断了连接".into());
-    }
-    if buf[0] & 0xF0 != 0x20 {
-        return Err("响应不是 MQTT CONNACK——该端口可能不是 MQTT 服务".into());
-    }
-    let rc = if buf.len() >= 4 { buf[3] } else { 0xFF };
+    let (client, mut connection) = Client::new(opts, 10);
+    // 等 CONNACK 最多 10s：VerneMQ auth_on_register webhook 默认 5s 响应超时，
+    // Broker 等完才发 CONNACK。Connection::recv_timeout 是阻塞等首个 MQTT 事件
+    let first_event = connection
+        .recv_timeout(Duration::from_secs(10))
+        .map_err(|e| format!("Broker 反馈超时：{e:?}"))?
+        .map_err(|e| format!("Broker 反馈失败：{e}"))?;
+    let _ = client.try_disconnect();
+    let connack = match first_event {
+        rumqttc::Event::Incoming(Packet::ConnAck(c)) => c,
+        other => return Err(format!("未收到 CONNACK，而是：{other:?}")),
+    };
+    let rc = connack.code;
     match rc {
-        0x00 => Ok((true, "MQTT 握手成功，Broker 已接受连接".into())),
-        0x01 => Ok((false, "端口确认是 MQTT 服务，但协议版本未被接受（broker 不支持 MQTT 3.1.1）".into())),
-        0x02 => Ok((false, "端口确认是 MQTT 服务，但客户端标识被 Broker 拒绝".into())),
-        0x03 => Ok((false, "端口确认是 MQTT 服务，但 Broker 暂时不可用（可能达到连接上限）".into())),
-        0x04 => Ok((false, "端口确认是 MQTT 服务，但认证被拒：用户名或密码不正确".into())),
-        0x05 => Ok((false, "端口确认是 MQTT 服务，但该账号未获授权连接".into())),
-        _ => Ok((false, "端口确认是 MQTT 服务，但连接被 Broker 拒绝".into())),
+        ConnectReturnCode::Success => Ok((true, "MQTT 握手成功，Broker 已接受连接".into())),
+        ConnectReturnCode::RefusedProtocolVersion => {
+            Ok((false, "端口确认是 MQTT 服务，但协议版本未被接受（broker 不支持 MQTT 3.1.1）".into()))
+        }
+        ConnectReturnCode::BadClientId => {
+            Ok((false, "端口确认是 MQTT 服务，但客户端标识被 Broker 拒绝".into()))
+        }
+        ConnectReturnCode::ServiceUnavailable => {
+            Ok((false, "端口确认是 MQTT 服务，但 Broker 暂时不可用（可能达到连接上限）".into()))
+        }
+        ConnectReturnCode::BadUserNamePassword => {
+            Ok((false, "端口确认是 MQTT 服务，但认证被拒：用户名或密码不正确".into()))
+        }
+        ConnectReturnCode::NotAuthorized => {
+            Ok((false, "端口确认是 MQTT 服务，但该账号未获授权连接".into()))
+        }
     }
 }
 
@@ -750,61 +701,5 @@ mod tests {
         // 错误信息必须给出补救指引（前缀范围），而不是只说"格式错误"
         let err = parse_cidr("10.0.0.0/8").unwrap_err();
         assert!(err.contains("/22"), "错误提示应说明可选前缀范围：{err}");
-    }
-
-    #[test]
-    fn mqtt_varint_encodes_boundaries() {
-        assert_eq!(encode_mqtt_varint(0), vec![0x00]);
-        assert_eq!(encode_mqtt_varint(127), vec![0x7F]);
-        // 128 起进第二字节（0x80 续传位）
-        assert_eq!(encode_mqtt_varint(128), vec![0x80, 0x01]);
-        assert_eq!(encode_mqtt_varint(16383), vec![0xFF, 0x7F]);
-        assert_eq!(encode_mqtt_varint(16384), vec![0x80, 0x80, 0x01]);
-    }
-
-    #[test]
-    fn connect_packet_anonymous_structure() {
-        let p = build_connect_packet("dfy-ops", None, None);
-        assert_eq!(p[0], 0x10); // CONNECT
-        // 剩余长度 = 可变头 10 + clientId(2+7) = 19，单字节 varint
-        assert_eq!(p[1], 19);
-        assert_eq!(&p[2..8], b"\x00\x04MQTT");
-        assert_eq!(p[8], 0x04); // level 4
-        assert_eq!(p[9], 0x02); // clean session only，无用户名密码标志
-        assert_eq!(p.len(), 2 + 19);
-    }
-
-    #[test]
-    fn connect_packet_with_credentials() {
-        let p = build_connect_packet("dfy-ops", Some("guest"), Some("dfy123456"));
-        assert_eq!(p[0], 0x10);
-        assert_eq!(p[9], 0x02 | 0x80 | 0x40); // clean session + username + password
-        // payload 顺序：clientId(2+7) + username(2+5) + password(2+9)，可变头 10
-        let remaining = 10 + (2 + 7) + (2 + 5) + (2 + 9);
-        assert_eq!(p[1], remaining as u8);
-        // username 出现在 clientId 之后
-        let uname_at = 2 + 10 + (2 + 7);
-        assert_eq!(&p[uname_at..uname_at + 2], &[0, 5]);
-        assert_eq!(&p[uname_at + 2..uname_at + 7], b"guest");
-    }
-
-    /// 只有密码没有用户名：协议要求 password 伴随 username，应自动以 guest 兜底
-    #[test]
-    fn connect_packet_password_without_username_fills_guest() {
-        let p = build_connect_packet("dfy-ops", None, Some("secret"));
-        assert_eq!(p[9], 0x02 | 0x80 | 0x40);
-        let uname_at = 2 + 10 + (2 + 7);
-        assert_eq!(&p[uname_at + 2..uname_at + 7], b"guest");
-    }
-
-    /// 密码很长时剩余长度超过 127：varint 必须多字节，否则包是非法的
-    #[test]
-    fn connect_packet_long_password_varint() {
-        let long_pwd = "x".repeat(150);
-        let p = build_connect_packet("dfy-ops", Some("u"), Some(&long_pwd));
-        // 剩余长度 = 10 + (2+7) + (2+1) + (2+150) = 174 > 127
-        assert_eq!(p[1], 0xAE); // 174 = 0b10101110 → 低7位 0x2E | 0x80
-        assert_eq!(p[2], 0x01);
-        assert_eq!(p[1] as usize & 0x7F | ((p[2] as usize) << 7), 174);
     }
 }

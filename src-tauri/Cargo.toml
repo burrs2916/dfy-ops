@@ -27,6 +27,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Redis 原生客户端：RESP 协议 TCP 直连（纯 Rust，零外部依赖），
 # Redis 管理不再依赖 redis-cli.exe 子进程
 redis = "1.7"
+# MQTT 真实客户端：VerneMQ 探测用 rumqttc 的同步 Client
+# —— 替换手写协议帧，让连接、超时、CONNACK 解析由成熟库处理
+rumqttc = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 netdev = "0.46.3"
