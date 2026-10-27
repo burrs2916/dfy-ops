@@ -340,8 +340,16 @@ fn build_connect_packet(client_id: &str, username: Option<&str>, password: Optio
 /// MQTT CONNECT 握手：真实客户端式连接，解析 CONNACK 返回码给出明确反馈。
 /// 返回 (是否握手成功, 反馈详情)：收到 CONNACK（无论接受与否）即证明端口上是
 /// MQTT 服务；Err 表示连 MQTT 反馈都没有（连接被关闭 / 非 MQTT 响应）。
+///
+/// 读超时 7 秒（远大于扫描用的 500ms）：VerneMQ 的 auth_on_register webhook
+/// 默认 response_timeout = 5s，Broker 等 webhook 后端回复完才发 CONNACK；
+/// 沿用扫描的 500ms 会导致"端口通但握手反馈超时"的误报。
+const MQTT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(7);
 fn probe_mqtt(addr: SocketAddr, username: &str, password: &str) -> Result<(bool, String), String> {
-    let mut s = connect(addr)?;
+    let mut s = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
+        .map_err(|e| format!("连接失败：{e}"))?;
+    s.set_read_timeout(Some(MQTT_HANDSHAKE_TIMEOUT)).ok();
+    s.set_write_timeout(Some(CONNECT_TIMEOUT)).ok();
     use std::io::{Read, Write};
     let uname = if username.is_empty() { None } else { Some(username) };
     let pword = if password.is_empty() { None } else { Some(password) };
