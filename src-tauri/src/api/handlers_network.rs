@@ -623,7 +623,14 @@ fn run_remote_test(
     username: &str,
     password: &str,
 ) -> Result<(bool, String), String> {
-    let started = Instant::now();
+    use crate::debug_log as dl;
+    let run_started = Instant::now();
+    dl::entry(
+        dl::MQTT_SCOPE, "INFO", "run", "enter",
+        &format!("service={service_id} host={host}:{port} user={} pwd={}",
+            username, dl::secret_shape(Some(password))),
+    );
+
     let (warn, detail) = match service_id {
         "redis" => {
             let cred = crate::ops::redis_credential::RedisCredential {
@@ -641,20 +648,58 @@ fn run_remote_test(
             (false, "PING 已确认，认证通过".to_string())
         }
         "vernemq" => {
-            let addr = resolve_one(host, port)?;
-            // 密码非空而用户名留空时按 MQTT 生态最常见默认账号 guest 尝试
+            dl::entry(dl::MQTT_SCOPE, "INFO", "run", "dns.resolve.start", &format!("host={host} port={port}"));
+            let addr = match resolve_one(host, port) {
+                Ok(a) => {
+                    dl::entry(dl::MQTT_SCOPE, "INFO", "run", "dns.resolve.ok", &format!("resolved={a}"));
+                    a
+                }
+                Err(e) => {
+                    dl::entry(dl::MQTT_SCOPE, "ERROR", "run", "dns.resolve.fail", &e);
+                    return Err(e);
+                }
+            };
+            // 额外：先做一次 TCP 连通性探测，把网络层和应用层错误区分开
+            dl::entry(dl::MQTT_SCOPE, "INFO", "run", "tcp.probe.start", &format!("addr={addr}"));
+            match TcpStream::connect_timeout(&addr, Duration::from_secs(3)) {
+                Ok(_stream) => {
+                    dl::entry(dl::MQTT_SCOPE, "INFO", "run", "tcp.probe.ok", "TCP 三次握手成功");
+                    // 立即 drop，让 rumqttc 自己建连接（我们不复用这个 stream）
+                }
+                Err(e) => {
+                    let kind = e.kind();
+                    dl::entry(
+                        dl::MQTT_SCOPE, "ERROR", "run", "tcp.probe.fail",
+                        &format!("TCP 连接失败 kind={kind:?} err={e}"),
+                    );
+                    // TCP 都连不上就不用试 MQTT 了
+                    return Err(format!("TCP 连接 {addr} 失败（{kind:?}）：{e}"));
+                }
+            }
+
             let u = if username.is_empty() && !password.is_empty() {
                 "guest"
             } else {
                 username
             };
+            dl::entry(dl::MQTT_SCOPE, "INFO", "run", "mqtt.probe.start",
+                &format!("addr={addr} user={} pwd={}", u, dl::secret_shape(Some(password))));
             match probe_mqtt(addr, u, password) {
-                Ok((true, d)) => (false, d),
-                Ok((false, d)) => (true, d),
-                Err(e) => (
-                    true,
-                    format!("端口连通，但未拿到 MQTT 握手反馈——{e}"),
-                ),
+                Ok((true, d)) => {
+                    dl::entry(dl::MQTT_SCOPE, "INFO", "run", "mqtt.probe.success", &d);
+                    (false, d)
+                }
+                Ok((false, d)) => {
+                    dl::entry(dl::MQTT_SCOPE, "WARN", "run", "mqtt.probe.rejected", &d);
+                    (true, d)
+                }
+                Err(e) => {
+                    dl::entry(dl::MQTT_SCOPE, "ERROR", "run", "mqtt.probe.error", &e);
+                    (
+                        true,
+                        format!("端口连通，但未拿到 MQTT 握手反馈——{e}"),
+                    )
+                }
             }
         }
         "minio" => {
@@ -677,7 +722,11 @@ fn run_remote_test(
         },
         other => return Err(format!("服务「{other}」不支持远程端点测试")),
     };
-    Ok((warn, format!("{detail}，耗时 {} ms", started.elapsed().as_millis())))
+    dl::entry(
+        dl::MQTT_SCOPE, "INFO", "run", "done",
+        &format!("warn={warn} detail={detail} elapsed={}ms", run_started.elapsed().as_millis()),
+    );
+    Ok((warn, format!("{detail}，耗时 {} ms", run_started.elapsed().as_millis())))
 }
 
 /// DNS 解析取第一个地址；解析失败给出面向用户的指引。
