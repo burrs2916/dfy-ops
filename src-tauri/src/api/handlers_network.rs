@@ -296,25 +296,92 @@ fn probe_minio(addr: SocketAddr) -> Result<(String, String), String> {
 /// connection_timeout = 7s：VerneMQ 的 auth_on_register webhook 默认 response_timeout = 5s，
 /// Broker 等 webhook 后端回复完才发 CONNACK；5s 绰绰有余，留 2s 余量给网络。
 fn probe_mqtt(addr: SocketAddr, username: &str, password: &str) -> Result<(bool, String), String> {
+    use crate::debug_log as dl;
     use rumqttc::{Client, ConnectReturnCode, MqttOptions, Packet};
+
+    let t_start = Instant::now();
+    dl::entry(
+        dl::MQTT_SCOPE, "INFO", "connect", "enter",
+        &format!(
+            "host={} port={} user={} pwd={}",
+            addr.ip(), addr.port(),
+            username, dl::secret_shape(Some(password))
+        ),
+    );
+
     let mut opts = MqttOptions::new("dfy-ops-probe", addr.ip().to_string(), addr.port());
     opts.set_keep_alive(Duration::from_secs(5));
     if !username.is_empty() || !password.is_empty() {
         opts.set_credentials(username, password);
     }
+
+    dl::entry(dl::MQTT_SCOPE, "DEBUG", "connect", "client.new.start", "调用 rumqttc Client::new()");
     let (client, mut connection) = Client::new(opts, 10);
+    dl::entry(
+        dl::MQTT_SCOPE, "DEBUG", "connect", "client.new.ok",
+        &format!("Client::new() 返回，已过 {}ms", t_start.elapsed().as_millis()),
+    );
+
     // 等 CONNACK 最多 10s：VerneMQ auth_on_register webhook 默认 5s 响应超时，
     // Broker 等完才发 CONNACK。Connection::recv_timeout 是阻塞等首个 MQTT 事件
-    let first_event = connection
-        .recv_timeout(Duration::from_secs(10))
-        .map_err(|e| format!("Broker 反馈超时：{e:?}"))?
-        .map_err(|e| format!("Broker 反馈失败：{e}"))?;
+    dl::entry(
+        dl::MQTT_SCOPE, "INFO", "connect", "recv.start",
+        "阻塞等 CONNACK，timeout=10s",
+    );
+    let first_event = match connection.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(ev)) => {
+            dl::entry(
+                dl::MQTT_SCOPE, "DEBUG", "connect", "recv.event",
+                &format!("收到事件：{ev:?}"),
+            );
+            ev
+        }
+        Ok(Err(conn_err)) => {
+            dl::entry(
+                dl::MQTT_SCOPE, "ERROR", "connect", "recv.connerror",
+                &format!("rumqttc ConnectionError：{conn_err}（elapsed {}ms）", t_start.elapsed().as_millis()),
+            );
+            let _ = client.try_disconnect();
+            return Err(format!("Broker 反馈失败：{conn_err}"));
+        }
+        Err(timeout_err) => {
+            dl::entry(
+                dl::MQTT_SCOPE, "ERROR", "connect", "recv.timeout",
+                &format!("recv_timeout 返回 RecvTimeoutError：{timeout_err:?}（elapsed {}ms）", t_start.elapsed().as_millis()),
+            );
+            let _ = client.try_disconnect();
+            return Err(format!("Broker 反馈超时：{timeout_err:?}"));
+        }
+    };
+
     let _ = client.try_disconnect();
     let connack = match first_event {
         rumqttc::Event::Incoming(Packet::ConnAck(c)) => c,
-        other => return Err(format!("未收到 CONNACK，而是：{other:?}")),
+        other => {
+            dl::entry(
+                dl::MQTT_SCOPE, "WARN", "connect", "recv.not.connack",
+                &format!("首个事件不是 CONNACK：{other:?}（elapsed {}ms）", t_start.elapsed().as_millis()),
+            );
+            return Err(format!("未收到 CONNACK，而是：{other:?}"));
+        }
     };
+
     let rc = connack.code;
+    let rc_byte = rc as u8;
+    let rc_name = match rc {
+        ConnectReturnCode::Success => "Success",
+        ConnectReturnCode::RefusedProtocolVersion => "RefusedProtocolVersion",
+        ConnectReturnCode::BadClientId => "BadClientId",
+        ConnectReturnCode::ServiceUnavailable => "ServiceUnavailable",
+        ConnectReturnCode::BadUserNamePassword => "BadUserNamePassword",
+        ConnectReturnCode::NotAuthorized => "NotAuthorized",
+    };
+    dl::entry(
+        dl::MQTT_SCOPE, "INFO", "connect", "connack",
+        &format!("rc=0x{rc_byte:02x} ({rc_name}) session_present={} elapsed={}ms",
+            connack.session_present, t_start.elapsed().as_millis()),
+    );
+
     match rc {
         ConnectReturnCode::Success => Ok((true, "MQTT 握手成功，Broker 已接受连接".into())),
         ConnectReturnCode::RefusedProtocolVersion => {

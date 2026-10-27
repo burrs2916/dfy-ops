@@ -1,4 +1,5 @@
 mod api;
+mod debug_log;
 mod ops;
 
 #[cfg(test)]
@@ -54,6 +55,14 @@ pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
+
+    // debug.log：会话级诊断文件，写在 exe 同级目录。tracing 打 stdout 给开发看，
+    // debug.log 打持久文件给用户提交 bug 用。两者并行，互不替代。
+    let log_path = debug_log::resolve_default_path();
+    let path_display = log_path.display().to_string();
+    debug_log::init(log_path);
+    debug_log::on_app_start();
+    tracing::info!("debug.log 路径：{path_display}");
 
     tauri::Builder::default()
         // 原生目录/文件选择对话框（设置 → 资源目录「浏览」）
