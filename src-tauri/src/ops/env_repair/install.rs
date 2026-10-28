@@ -314,6 +314,7 @@ pub fn service_spec(target: &str) -> Option<(&'static str, u16)> {
     match target {
         "mysql" => Some(("MySQL80", 3306)),
         "redis" => Some(("Redis", 6379)),
+        "nginx" => Some(("nginx", 80)),
         _ => None,
     }
 }
@@ -347,6 +348,93 @@ fn redis_conf_path(home: &str) -> String {
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn build_redis_conf() -> String {
     "port 6379\nbind 0.0.0.0\n".to_string()
+}
+
+/// nginx zip 有顶层 `nginx-x.y.z/` 版本目录，需拍平到 install_dir 根，
+/// 否则 -p 参数必须带版本号，升级时路径全变。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn flatten_top_level_dir(install_dir: &str) -> Result<(), String> {
+    let install_path = std::path::Path::new(install_dir);
+    let entries: Vec<_> = std::fs::read_dir(install_path)
+        .map_err(|e| format!("读取安装目录失败：{e}"))?
+        .flatten()
+        .collect();
+    let dirs: Vec<_> = entries.iter().filter(|e| e.path().is_dir()).collect();
+    if dirs.len() == 1 {
+        let top = &dirs[0].path();
+        for item in std::fs::read_dir(top).map_err(|e| format!("读取顶层目录失败：{e}"))?.flatten() {
+            let target = install_path.join(item.file_name());
+            std::fs::rename(item.path(), &target).or_else(|_| {
+                // rename 跨盘符或目标已存在时：先删目标再 rename
+                let _ = if target.is_dir() {
+                    std::fs::remove_dir_all(&target)
+                } else {
+                    std::fs::remove_file(&target)
+                };
+                std::fs::rename(item.path(), &target)
+            }).map_err(|e| format!("移动 {} 失败：{e}", item.path().display()))?;
+        }
+        std::fs::remove_dir_all(top).ok();
+    }
+    Ok(())
+}
+
+/// 默认 nginx.conf：反代 /api → 后端 48085，root 指向 dfy-ui 构建产物。
+/// dfy-ui 路径从 registry 动态读取（避免硬编码，用户改过 installDir 也能跟上）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn build_nginx_conf(nginx_home: &str) -> String {
+    let nginx_home = nginx_home.replace('\\', "/");
+    let dfy_ui_dist = crate::ops::registry::services()
+        .into_iter()
+        .find(|s| s.id == "dfy-ui")
+        .map(|s| format!("{}/dist", s.install_dir.replace('\\', "/")))
+        .unwrap_or_else(|| "C:/services/dfy-ui-admin-vue3-master/dist".into());
+    format!(
+        r#"worker_processes  1;
+
+events {{
+    worker_connections  1024;
+}}
+
+http {{
+    include       mime.types;
+    default_type  application/octet-stream;
+
+    sendfile        on;
+    keepalive_timeout  65;
+
+    gzip on;
+    gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript image/svg+xml;
+
+    server {{
+        listen       80;
+        server_name  localhost;
+
+        root  {dfy_ui_dist};
+        index index.html index.htm;
+
+        # SPA 路由兜底
+        location / {{
+            try_files $uri $uri/ /index.html;
+        }}
+
+        # 后端 API 反代
+        location /api/ {{
+            proxy_pass http://127.0.0.1:48085/api/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 120s;
+        }}
+
+        error_log  {nginx_home}/logs/error.log;
+        access_log {nginx_home}/logs/access.log;
+        pid        {nginx_home}/logs/nginx.pid;
+    }}
+}}
+"#
+    )
 }
 
 /// 通用修复任务：ZIP 免安装版离线安装（mysql/redis/java）——
@@ -524,6 +612,18 @@ fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
                 Ok("使用安装包自带的 redis.windows.conf".into())
             }
         }
+        "nginx" => {
+            // nginx zip 顶层带版本目录，先拍平
+            flatten_top_level_dir(home)?;
+            // 运行时需要的 logs 目录（error.log/access.log 运行时创建，pid 也在这）
+            std::fs::create_dir_all(format!("{home}\\logs"))
+                .map_err(|e| format!("创建 logs 目录失败：{e}"))?;
+            // 覆盖 zip 自带的默认 nginx.conf（它不包含我们的反代规则）
+            let conf_path = format!("{home}\\conf\\nginx.conf");
+            std::fs::write(&conf_path, build_nginx_conf(home))
+                .map_err(|e| format!("写入 nginx.conf 失败：{e}"))?;
+            Ok("已拍平版本目录、创建 logs/、写入默认 nginx.conf（反代 /api → 48085）".into())
+        }
         "java" => {
             // 平台直接指向：写用户级 JAVA_HOME + 把 {home}\bin 追加进用户 PATH。
             // PATH 必须配——否则 cmd 里 `java -version` 无法识别；注册表原始读写
@@ -569,6 +669,7 @@ fn register_and_start(target: &str, home: &str) -> Result<(), String> {
             "net stop {svc} & taskkill /f /im redis-server.exe & ping -n 3 127.0.0.1 >nul & sc delete {svc} & \"{home}\\redis-server.exe\" --service-install \"{}\" --service-name {svc} & net start {svc}",
             redis_conf_path(home)
         ),
+        "nginx" => return Ok(()), // nginx 不走 Windows 服务注册，由平台进程管理器直接托管启停
         _ => return Err("该目标没有服务注册管线".into()),
     };
     runas_wait("cmd.exe", &format!("/c {script}"))
@@ -594,6 +695,8 @@ async fn run_zip_install(
         "redis" => "redis-server.exe",
         // JDK/JRE zip 的标志二进制（zip 可能带顶层目录 jdk8uXXX-jre/）
         "java" => r"bin\java.exe",
+        // nginx zip 顶层带 nginx-x.y.z/，标志在顶层（zip 解压后先 locate_home 再拍平）
+        "nginx" => "nginx.exe",
         _ => {
             finish(state, env_cache, false, format!("{label} 没有免安装版（zip）安装管线")).await;
             return;
@@ -641,36 +744,68 @@ async fn run_zip_install(
         }
     }
 
-    // ===== 注册 + 启动服务（一次 UAC）——java 免安装版无服务概念，跳过 =====
+    // ===== 注册 + 启动服务（一次 UAC）——java/nginx 跳过 =====
     if let Some((svc, _)) = spec {
         state.patch(|j| j.stage = "install".into());
-        state.log(format!("正在注册并启动 Windows 服务 {svc}… 请在 UAC 弹窗中点击「是」…"));
-        let reg = {
-            let home = home.clone();
-            let t = target;
-            tokio::task::spawn_blocking(move || register_and_start(t, &home)).await
-        };
-        match reg {
-            Ok(Ok(())) => state.log(format!("服务 {svc} 已注册并启动")),
-            Ok(Err(e)) => {
-                finish(
-                    state,
-                    env_cache,
-                    false,
-                    format!("服务注册/启动失败：{e}（可到 Windows 服务管理器查看 {svc} 状态）"),
-                )
-                .await;
-                return;
-            }
-            Err(e) => {
-                finish(state, env_cache, false, format!("服务注册任务异常：{e}")).await;
-                return;
+        if target == "nginx" {
+            state.log("nginx 无需注册为 Windows 服务，将由平台进程管理器直接托管启停");
+        } else {
+            state.log(format!("正在注册并启动 Windows 服务 {svc}… 请在 UAC 弹窗中点击「是」…"));
+            let reg = {
+                let home = home.clone();
+                let t = target;
+                tokio::task::spawn_blocking(move || register_and_start(t, &home)).await
+            };
+            match reg {
+                Ok(Ok(())) => state.log(format!("服务 {svc} 已注册并启动")),
+                Ok(Err(e)) => {
+                    finish(
+                        state,
+                        env_cache,
+                        false,
+                        format!("服务注册/启动失败：{e}（可到 Windows 服务管理器查看 {svc} 状态）"),
+                    )
+                    .await;
+                    return;
+                }
+                Err(e) => {
+                    finish(state, env_cache, false, format!("服务注册任务异常：{e}")).await;
+                    return;
+                }
             }
         }
     }
 
-    // ===== 验证：mysql/redis 轮询端口监听；java 直接验证主目录版本 =====
+    // ===== 验证：nginx 检查文件就绪；mysql/redis 轮询端口；java 版本验证 =====
     state.patch(|j| j.stage = "verify".into());
+    if target == "nginx" {
+        let home_for_verify = home.clone();
+        let v = tokio::task::spawn_blocking(move || {
+            let p = std::path::Path::new(&home_for_verify);
+            let exe = p.join("nginx.exe");
+            let conf = p.join("conf").join("nginx.conf");
+            let logs = p.join("logs");
+            if !exe.is_file() {
+                Err(format!("未找到 nginx.exe：{}", exe.display()))
+            } else if !conf.is_file() {
+                Err(format!("未找到 conf/nginx.conf：{}", conf.display()))
+            } else if !logs.is_dir() {
+                Err(format!("未找到 logs 目录：{}", logs.display()))
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        match v {
+            Ok(Ok(())) => {
+                state.log("验证通过：nginx.exe + conf/nginx.conf + logs/ 均就绪，请到「服务运维」面板启动");
+                finish(state, env_cache, true, String::new()).await;
+            }
+            Ok(Err(e)) => finish(state, env_cache, false, e).await,
+            Err(e) => finish(state, env_cache, false, format!("验证任务异常：{e}")).await,
+        }
+        return;
+    }
     let Some((svc, port)) = spec else {
         let home_for_verify = home.clone();
         let v = tokio::task::spawn_blocking(move || verify_java_home(&home_for_verify, JDK_DEFAULT_MAJOR)).await;
@@ -721,6 +856,7 @@ mod tests {
     fn zip_pipeline_spec_and_configs() {
         assert_eq!(service_spec("mysql"), Some(("MySQL80", 3306)));
         assert_eq!(service_spec("redis"), Some(("Redis", 6379)));
+        assert_eq!(service_spec("nginx"), Some(("nginx", 80)));
         assert_eq!(service_spec("java"), None, "java 走 msi/在线，无 zip 管线");
 
         let ini = build_mysql_ini(r"C:\services\mysql");
@@ -730,5 +866,13 @@ mod tests {
         assert!(!ini.contains('\\'), "my.ini 路径不应含反斜杠: {ini}");
 
         assert_eq!(build_redis_conf(), "port 6379\nbind 0.0.0.0\n");
+
+        // nginx.conf 关键元素：反代 /api → 48085、监听 80、日志/pid 路径
+        let conf = build_nginx_conf(r"C:\services\nginx");
+        assert!(conf.contains("listen       80;"));
+        assert!(conf.contains("proxy_pass http://127.0.0.1:48085/api/;"));
+        assert!(conf.contains("C:/services/nginx/logs/error.log"));
+        assert!(conf.contains("C:/services/nginx/logs/nginx.pid"));
+        assert!(conf.contains("try_files $uri $uri/ /index.html;"), "SPA 路由兜底必须存在");
     }
 }

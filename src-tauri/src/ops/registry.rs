@@ -21,6 +21,8 @@ pub enum ServiceKind {
     ObjectStorage,
     /// 第三方数据库/缓存（MySQL、Redis）
     Database,
+    /// HTTP 反向代理（Nginx，前端 SPA + 后端 API 统一入口）
+    ReverseProxy,
 }
 
 /// 声明式依赖检查项：环境检查时按此探测，不再在代码里硬编码路径/端口。
@@ -330,6 +332,30 @@ fn builtin() -> Vec<ServiceDef> {
             remote_only: true,
             requires: vec![],
             description: "远程部署模式的缓存服务：本机不安装，检测目标为「运维中心 → 远程部署」配置页托管的远程端点（默认 192.168.56.101:6379）；连接不可达时请在远程部署配置中检查主机/端口/密码。".into(),
+        },
+        ServiceDef {
+            id: "nginx".into(),
+            name: "Nginx 反向代理".into(),
+            kind: ServiceKind::ReverseProxy,
+            java_major: None,
+            install_dir: "C:/services/nginx".into(),
+            build_cmd: None,
+            run_cmd: "C:/services/nginx/nginx.exe -p C:/services/nginx -c conf/nginx.conf".into(),
+            ports: vec![80],
+            process_names: vec!["nginx".into(), "nginx.exe".into()],
+            product_names: vec![],
+            health_url: None,
+            log_paths: vec![
+                "C:/services/nginx/logs/access.log".into(),
+                "C:/services/nginx/logs/error.log".into(),
+                "C:/services/nginx/logs/nginx.pid".into(),
+            ],
+            depends_on: vec![],
+            is_daemon: true,
+            third_party: false,
+            remote_only: false,
+            requires: vec![],
+            description: "Nginx 反向代理：监听 80 端口，默认反代 /api 到后端 48085，root 指向 dfy-ui dist。".into(),
         },
     ]
 }

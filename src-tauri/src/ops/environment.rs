@@ -539,6 +539,9 @@ pub fn check_service_env_with(
         ServiceKind::RustBin => {
             // Rust 边缘服务：无 kind 特有运行时检查，依赖见 requires + dependsOn。
         }
+        ServiceKind::ReverseProxy => {
+            // nginx 反向代理：无 kind 特有运行时检查，依赖见 requires（安装管线负责放好二进制 + conf）。
+        }
     }
 
     // ===== 2. requires 声明检查（配置驱动，零硬编码） =====

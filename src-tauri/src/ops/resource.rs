@@ -14,7 +14,7 @@
 use serde::Serialize;
 
 /// 资源目录可修复的目标软件（与环境检查项 id 对应，见 repair_target）。
-pub const TARGETS: [&str; 6] = ["java", "mysql", "redis", "vernemq", "minio", "greptime"];
+pub const TARGETS: [&str; 7] = ["java", "mysql", "redis", "vernemq", "minio", "greptime", "nginx"];
 
 /// 资源目录里的一个文件（识别不出的也列出，target=None 交 AI 判断）。
 #[derive(Debug, Clone, Serialize)]
@@ -76,6 +76,8 @@ fn match_target(name_lower: &str) -> Option<&'static str> {
         Some("minio")
     } else if name_lower.contains("greptime") {
         Some("greptime")
+    } else if name_lower.contains("nginx") {
+        Some("nginx")
     } else if name_lower.contains("temurin")
         || name_lower.contains("openjdk")
         || name_lower.contains("jre")
@@ -106,6 +108,7 @@ fn convention_target(dir_name_lower: &str) -> Option<&'static str> {
         "vernemq" => Some("vernemq"),
         "minio" => Some("minio"),
         "greptime" | "greptimedb" => Some("greptime"),
+        "nginx" => Some("nginx"),
         _ => None,
     }
 }
@@ -307,6 +310,7 @@ pub fn target_label(target: &str) -> &'static str {
         "vernemq" => "VerneMQ",
         "minio" => "MinIO",
         "greptime" => "GreptimeDB",
+        "nginx" => "Nginx 反向代理",
         _ => "未知目标",
     }
 }
