@@ -165,6 +165,8 @@ export interface AppSettings {
   resourceDir: string;
   /** 声明为「远程部署」的软件（如 ["redis","minio"]）：本机不安装，修复中心隐藏安装引导 */
   remoteDeployed: string[];
+  /** 云端服务（dfy-backend）部署目录：外部化配置定位基准；空 = 用内置默认 C:/services/dfy-boot-base */
+  backendInstallDir: string;
 }
 
 /** ===== 环境修复中心 ===== */

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Alert, Button, Divider, MenuItem, Paper, Select, Snackbar, Stack, Table, TableBody, TableCell, TableRow, TextField, Typography } from "@mui/material";
 import { MONO_STACK } from "../theme";
-import { Tune, Storage, Info, FolderOpen } from "@mui/icons-material";
+import { Tune, Storage, Info, FolderOpen, Cloud } from "@mui/icons-material";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api } from "../api";
 import { useAppSettingsStore } from "../store";
@@ -135,7 +135,8 @@ export default function Settings() {
   const dirty =
     draft.statusRefreshSecs !== settings.statusRefreshSecs ||
     draft.envRefreshSecs !== settings.envRefreshSecs ||
-    draft.resourceDir !== settings.resourceDir;
+    draft.resourceDir !== settings.resourceDir ||
+    draft.backendInstallDir !== settings.backendInstallDir;
 
   const resourceScanBody =
     scan === null ? null : (
@@ -290,6 +291,43 @@ export default function Settings() {
                 </Stack>
                 {resourceScanBody}
               </>
+            ),
+          },
+          {
+            key: "cloud",
+            icon: <Cloud />,
+            label: "云端服务",
+            title: "云端服务目录",
+            description: "dfy-backend（Java 后端）的部署目录。平台在该目录的 config/application-local.yaml 中读写外部化配置（端口/MySQL/Redis/VerneMQ），启停也以此目录为基准。留空使用内置默认 C:/services/dfy-boot-base。",
+            content: (
+              <Paper variant="outlined" sx={{ overflow: "hidden" }}>
+                <SettingRow label="部署目录路径" description="目录下应有 dfy-server.jar 与 config/ 子目录">
+                  <Stack direction="row" spacing={1} alignItems="center">
+                    <TextField
+                      size="small"
+                      placeholder="例如 C:/services/dfy-boot-base"
+                      value={draft.backendInstallDir}
+                      onChange={(e) => setDraft((d) => ({ ...d, backendInstallDir: e.target.value }))}
+                      sx={{ width: 320 }}
+                    />
+                    <Button
+                      variant="outlined"
+                      onClick={async () => {
+                        let picked: string | null = null;
+                        try {
+                          const r = await open({ directory: true, multiple: false, title: "选择云端服务部署目录" });
+                          picked = typeof r === "string" ? r : null;
+                        } catch {
+                          return;
+                        }
+                        if (picked) setDraft((d) => ({ ...d, backendInstallDir: picked as string }));
+                      }}
+                    >
+                      浏览…
+                    </Button>
+                  </Stack>
+                </SettingRow>
+              </Paper>
             ),
           },
           {

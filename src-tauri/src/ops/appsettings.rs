@@ -18,6 +18,10 @@ pub struct AppSettings {
     /// 声明为「远程部署」的软件（如 ["redis","minio"]）：本机不安装、修复中心
     /// 不再显示其安装引导与"未安装"噪音，仅保留说明与改回本地的入口。
     pub remote_deployed: Vec<String>,
+    /// 云端服务（dfy-backend）部署目录：外部化配置 config/application-local.yaml
+    /// 的定位基准。空串 = 用注册表内置值（C:/services/dfy-boot-base）。
+    /// 部署目录与注册表默认不一致时在此指定，配置面板与启停均以此为准。
+    pub backend_install_dir: String,
 }
 
 impl Default for AppSettings {
@@ -28,6 +32,7 @@ impl Default for AppSettings {
             resource_dir: String::new(),
             // 默认远程部署：VerneMQ（部署架构约定，不本地装）；Redis 由用户在界面声明
             remote_deployed: vec!["vernemq".into()],
+            backend_install_dir: String::new(),
         }
     }
 }
@@ -63,6 +68,12 @@ impl AppSettings {
             self.env_refresh_secs = self.env_refresh_secs.clamp(5, 600);
         }
         self.resource_dir = self.resource_dir.trim().trim_matches('"').to_string();
+        self.backend_install_dir = self
+            .backend_install_dir
+            .trim()
+            .trim_matches('"')
+            .trim_end_matches('/')
+            .to_string();
         // 远程部署清单：小写化 + 只保留已知目标，防手改配置引入脏值
         self.remote_deployed = self
             .remote_deployed

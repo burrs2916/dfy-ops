@@ -201,6 +201,12 @@ fn app_settings_contract() {
     let s = AppSettings::default();
     assert_keys(
         &serde_json::to_value(&s).unwrap(),
-        &["statusRefreshSecs", "envRefreshSecs", "resourceDir", "remoteDeployed"],
+        &[
+            "statusRefreshSecs",
+            "envRefreshSecs",
+            "resourceDir",
+            "remoteDeployed",
+            "backendInstallDir",
+        ],
     );
 }

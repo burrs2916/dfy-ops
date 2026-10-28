@@ -745,6 +745,17 @@ pub async fn env_check(
 
 // ===== 云端服务外部配置（config/application-local.yaml）运维 =====
 
+/// 云端服务部署目录：设置里显式指定的 backendInstallDir 优先，否则用注册表内置值。
+/// 设置锁在取值后立即释放，避免跨 await 持锁。
+fn backend_install_dir(state: &AppState, def: &ServiceDef) -> std::path::PathBuf {
+    let override_dir = state.app_settings.lock().unwrap().backend_install_dir.clone();
+    if override_dir.is_empty() {
+        std::path::PathBuf::from(&def.install_dir)
+    } else {
+        std::path::PathBuf::from(override_dir)
+    }
+}
+
 /// 读取云端 Java 服务的外部化配置（Spring Boot 2.4+ config/ 目录覆盖机制）。
 /// 文件不存在时 exists=false 返回模板指引——部署目录尚未初始化外部配置。
 pub async fn external_config_get(
@@ -752,7 +763,7 @@ pub async fn external_config_get(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
-    let install_dir = std::path::PathBuf::from(&def.install_dir);
+    let install_dir = backend_install_dir(&state, def);
     let path = crate::ops::external_config::config_path(&install_dir);
     let cfg = blocking(move || crate::ops::external_config::read(&install_dir)).await;
     match cfg {
@@ -780,7 +791,7 @@ pub async fn external_config_update(
     Json(body): Json<crate::ops::external_config::ExternalConfig>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
-    let install_dir = std::path::PathBuf::from(&def.install_dir);
+    let install_dir = backend_install_dir(&state, def);
     let written = blocking(move || crate::ops::external_config::write(&install_dir, &body)).await;
     match written {
         Ok(p) => Ok(Json(serde_json::json!({
