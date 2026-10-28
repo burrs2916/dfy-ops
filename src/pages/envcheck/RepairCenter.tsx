@@ -513,21 +513,40 @@ export default function RepairCenter({
           <Button size="small" variant="outlined" disabled={repairDisabled || svcBusy} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
             重装
           </Button>
-          <Button
-            size="small"
-            variant="outlined"
-            color="error"
-            startIcon={<DeleteOutline />}
-            disabled={!st.canUninstall || repairDisabled || svcBusy}
-            onClick={() => {
-              setRemoveData(false);
-              setConfirmText("");
-              setUninstallTarget(st);
-            }}
-            sx={{ textTransform: "none", whiteSpace: "nowrap" }}
-          >
-            卸载
-          </Button>
+          {/* 卸载：前置条件——服务/进程运行中时禁止卸载（反向代理硬断请求会丢数据） */}
+          {(() => {
+            const runningBlockUninstall =
+              (t === "mysql" || t === "nginx" || t === "dfy-backend") && st.serviceRunning;
+            return (
+              <Tooltip
+                title={
+                  runningBlockUninstall
+                    ? `${TARGET_LABEL[t]} 正在运行，请先在「服务运维」面板停止后再卸载`
+                    : st.canUninstall
+                      ? "卸载后需重新安装才能使用"
+                      : "平台暂不支持该组件卸载"
+                }
+              >
+                <span>
+                  <Button
+                    size="small"
+                    variant="outlined"
+                    color="error"
+                    startIcon={<DeleteOutline />}
+                    disabled={!st.canUninstall || repairDisabled || svcBusy || runningBlockUninstall}
+                    onClick={() => {
+                      setRemoveData(false);
+                      setConfirmText("");
+                      setUninstallTarget(st);
+                    }}
+                    sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+                  >
+                    卸载
+                  </Button>
+                </span>
+              </Tooltip>
+            );
+          })()}
         </>
       );
     } else if (st?.dirExists) {

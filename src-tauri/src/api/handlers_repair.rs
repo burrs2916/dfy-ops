@@ -243,15 +243,44 @@ async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
             "dfy-ui" => "index.html".into(),
             _ => unreachable!(),
         };
-        let (dir_exists, key_file_exists) = blocking(move || {
+        // 需要探测运行态的目标（dfy-ui 是静态目录，无进程）
+        let proc_image: Option<&'static str> = match target {
+            "nginx" => Some("nginx.exe"),
+            "dfy-backend" => Some("java.exe"), // Spring Boot jar 由 java.exe 运行
+            "dfy-ui" => None,
+            _ => unreachable!(),
+        };
+        let (dir_exists, key_file_exists, proc_running) = blocking(move || {
             let dir = std::path::Path::new(&install_dir);
             let dir_ok = dir.is_dir();
-            (dir_ok, dir.join(&key_filename).is_file())
+            let key_ok = dir.join(&key_filename).is_file();
+            // tasklist 进程探测（Windows 可用；macOS/Linux 上恒 false 无副作用）
+            let proc = if let Some(img) = proc_image {
+                #[cfg(target_os = "windows")]
+                {
+                    std::process::Command::new("tasklist")
+                        .args(["/fi", &format!("imagename eq {img}"), "/fo", "csv", "/nh"])
+                        .output()
+                        .map(|o| {
+                            String::from_utf8_lossy(&o.stdout)
+                                .lines()
+                                .any(|l| l.contains(img))
+                        })
+                        .unwrap_or(false)
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    let _ = img;
+                    false
+                }
+            } else {
+                false
+            };
+            (dir_ok, key_ok, proc)
         })
         .await;
-        // dfy-ui 没有 run_cmd，nginx 没有 Windows 服务 → service_running 恒 false
-        // （真正的运行态由进程管理器 / 服务运维面板另行探测，此处只回答「装没装」）
-        return (dir_exists && key_file_exists, dir_exists, false);
+        // service_running 对 nginx/dfy-backend = 进程是否在跑（dfy-ui 静态目录恒 false）
+        return (dir_exists && key_file_exists, dir_exists, proc_running);
     }
     // mysql/redis：查 Windows 服务 + 目录 + mysql MSI 兜底
     let Some((svc, _)) = crate::ops::env_repair::service_spec(target) else {
