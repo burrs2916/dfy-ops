@@ -43,8 +43,15 @@ export function ackId(reportId: string, itemId: string) {
 }
 
 /** 与后端 ops/resource.rs 的 repair_target 口径一致：dep- 与 service- 前缀折叠后匹配。
- *  仅本地可装的软件：Redis/VerneMQ/MinIO/GreptimeDB 均为远程部署，问题项走「去远程部署」配置。 */
-export const REPAIR_TARGETS = new Set(["java", "mysql"]);
+ *  云端三件套（nginx/dfy-backend/dfy-ui）支持资源目录一键安装；
+ *  Redis/VerneMQ/MinIO/GreptimeDB 均为远程部署，问题项走「去远程部署」配置。 */
+export const REPAIR_TARGETS = new Set([
+  "java",
+  "mysql",
+  "nginx",
+  "dfy-backend",
+  "dfy-ui",
+]);
 /** 纯远程部署的软件：不进待安装/已安装列表（本机不安装、无安装包可识别），
  *  集中在「远程部署」区配置地址与访问密码。与后端 ServiceDef.remoteOnly 同口径。 */
 export const FIXED_REMOTE = new Set(["redis", "vernemq", "minio", "greptime"]);
@@ -68,20 +75,36 @@ export const TARGET_LABEL: Record<string, string> = {
   vernemq: "VerneMQ",
   minio: "MinIO",
   greptime: "GreptimeDB",
+  nginx: "Nginx 反向代理",
+  "dfy-backend": "DFY 后端",
+  "dfy-ui": "DFY 前端",
 };
 
-/** 安装与维护卡片的展示顺序：用户重点的数据库/运行时在前 */
-export const SOFTWARE_ORDER = ["mysql", "java", "redis", "vernemq", "minio", "greptime"];
+/** 安装与维护卡片的展示顺序：后端三件套在前（nginx 先装），再是中间件 */
+export const SOFTWARE_ORDER = [
+  "nginx",
+  "dfy-backend",
+  "dfy-ui",
+  "mysql",
+  "java",
+  "redis",
+  "vernemq",
+  "minio",
+  "greptime",
+];
 /** 注册了 Windows 服务、可启停的软件（与后端 service_spec 口径一致；java 无服务） */
-export const SERVICE_TARGETS = new Set(["mysql"]);
+export const SERVICE_TARGETS = new Set(["mysql", "nginx"]);
 /** 一句话说清每个软件是干嘛的（卡片副标题，消灭抽象概念） */
 export const TARGET_DESC: Record<string, string> = {
   mysql: "数据库",
   java: "Java 运行时",
-  redis: "缓存数据库",
-  vernemq: "MQTT 消息队列",
-  minio: "对象存储",
-  greptime: "时序数据库",
+  redis: "缓存数据库（远程）",
+  vernemq: "MQTT 消息队列（远程）",
+  minio: "对象存储（远程）",
+  greptime: "时序数据库（远程）",
+  nginx: "反向代理 · 80 端口",
+  "dfy-backend": "Spring Boot · 48085",
+  "dfy-ui": "Vue3 管理后台 · 静态托管",
 };
 /** 约定子目录名（与后端 convention_target 对齐）：无包时引导用户放到哪 */
 export const CONVENTION_DIR: Record<string, string> = {
@@ -91,6 +114,9 @@ export const CONVENTION_DIR: Record<string, string> = {
   vernemq: "VerneMQ",
   minio: "MinIO",
   greptime: "GreptimeDB",
+  nginx: "nginx",
+  "dfy-backend": "dfy-backend",
+  "dfy-ui": "dfy-ui",
 };
 
 /** 包体积 → 人读文案（KB/MB/GB，1 位小数）。 */

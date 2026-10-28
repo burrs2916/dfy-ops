@@ -735,15 +735,18 @@ mod tests {
     /// 且依赖健康时（同一事实来源）整体 pass。
     #[test]
     fn running_service_env_is_pass() {
+        // dfy-ui 依赖 nginx + dfy-backend，静态目录由 nginx 统一托管
         let st = states(&[
             ("dfy-ui", true, true, &[]),
             ("gateway-console", true, true, &[]),
             ("biosphere-spatial", true, true, &[]),
             ("dfy-backend", true, true, &[48085]),
+            ("nginx", true, true, &[80]),
             ("mysql", true, true, &[3306]),
             ("redis", true, true, &[6379]),
         ]);
-        for id in ["dfy-ui", "gateway-console", "biosphere-spatial"] {
+        // gateway-console / biosphere-spatial 无 requires 也无 depends_on → 依赖齐全即 Pass
+        for id in ["gateway-console", "biosphere-spatial"] {
             let def = def_of(id);
             let report = check_service_env_with(&def, &st, None);
             assert_eq!(
@@ -751,6 +754,20 @@ mod tests {
                 CheckStatus::Pass,
                 "运行中的 {id}（依赖齐全）环境检查不应告警: {:?}",
                 report.items
+            );
+        }
+        // dfy-ui 有 requires path 检查（index.html），macOS 测试机上找不到 → Warn 可接受；
+        // 但依赖项必须全 Pass（dfy-backend + nginx 都在跑且健康）
+        let def = def_of("dfy-ui");
+        let report = check_service_env_with(&def, &st, None);
+        let dep_items: Vec<_> = report.items.iter().filter(|i| i.id.starts_with("dep-")).collect();
+        for item in &dep_items {
+            assert_eq!(
+                item.status,
+                CheckStatus::Pass,
+                "dfy-ui 依赖项 {} 应 Pass: {:?}",
+                item.name,
+                item.actual
             );
         }
     }
