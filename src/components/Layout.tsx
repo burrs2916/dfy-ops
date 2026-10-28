@@ -93,7 +93,7 @@ export default function Layout() {
         sx={{
           flex: 1,
           overflow: "auto",
-          p: 3,
+          p: 4,
           // 与 gateway-console 一致的浅灰渐变背景
           background: "linear-gradient(135deg, #f5f7fa 0%, #e9ecef 100%)",
         }}

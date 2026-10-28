@@ -180,13 +180,27 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
                   helperText="dfy-boot-base 默认 48085"
                 />
               </Stack>
-              <Typography variant="caption" color="text.secondary">
-                反代地址自动拼接为 http://{cfg.backendHost || "host"}:{cfg.backendPort || "port"}/api/
-              </Typography>
+              <Box
+                sx={{
+                  mt: 0.5,
+                  fontFamily: "monospace",
+                  fontSize: 12,
+                  bgcolor: "rgba(0,0,0,0.04)",
+                  p: "4px 10px",
+                  borderRadius: 1,
+                  color: "#1e3f66",
+                }}
+              >
+                proxy_pass http://{cfg.backendHost || "—"}:{cfg.backendPort || "—"}/api/;
+              </Box>
             </FieldGroup>
 
-            <FieldGroup title="日志路径（一般不动）">
-              <Stack direction="row" spacing={1.5}>
+            {/* 日志路径：高级，折叠 */}
+            <details style={{ marginTop: 8 }}>
+              <summary style={{ cursor: "pointer", fontSize: 12, color: "#6b7280", padding: "2px 0" }}>
+                高级 · 日志路径（一般不动）
+              </summary>
+              <Stack direction="row" spacing={1.5} sx={{ mt: 1 }}>
                 <TextField
                   size="small"
                   label="访问日志（access_log）"
@@ -202,7 +216,7 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
                   sx={{ maxWidth: 400 }}
                 />
               </Stack>
-            </FieldGroup>
+            </details>
 
             <Stack direction="row" spacing={1.5} alignItems="center">
               <Button variant="contained" onClick={save} disabled={saving}>

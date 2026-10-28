@@ -19,7 +19,9 @@ import {
   Stack,
   Typography,
 } from "@mui/material";
-import { Close, ContentCopy, Download, Pause, PlayArrow, Refresh } from "@mui/icons-material";
+import { Close, ContentCopy, Download, MoreVert, Pause, PlayArrow, Refresh } from "@mui/icons-material";
+import Menu from "@mui/material/Menu";
+import MenuItem from "@mui/material/MenuItem";
 import { useOpsStore, useAppSettingsStore } from "../store";
 import { ServiceCard } from "../components/ServiceCard";
 import ReadinessCard from "../components/ReadinessCard";
@@ -51,6 +53,7 @@ export default function Dashboard() {
   const [diagnosing, setDiagnosing] = useState(false);
   const [bulkBusy, setBulkBusy] = useState<null | "start" | "stop">(null);
   const [confirmStop, setConfirmStop] = useState(false);
+  const [moreMenu, setMoreMenu] = useState<null | HTMLElement>(null);
   // 轮询开关默认关闭：默认策略是「启动检测一次 + 按需手动/单服务刷新」，
   // 全量探测在 Windows 上开销大，常驻轮询得不偿失（需要时在设置里配间隔）
   const [live, setLive] = useState(false);
@@ -206,33 +209,44 @@ export default function Dashboard() {
         description="全部服务的运行状态、环境健康与部署就绪度一屏总览；异常项有直达修复入口"
         actions={
           <>
-            <Button variant="outlined" startIcon={<Refresh />} onClick={manualRefresh}>
+            <Button variant="text" startIcon={<Refresh />} onClick={manualRefresh}>
               刷新
             </Button>
             <Button
-              variant="outlined"
+              variant="text"
               color={pollingActive ? "success" : "inherit"}
               startIcon={live ? <Pause /> : <PlayArrow />}
               onClick={() => setLive((v) => !v)}
             >
-              {pollingActive ? "实时中" : "已暂停"}
+              {pollingActive ? "实时中" : "实时"}
             </Button>
             <Button
               variant="outlined"
               onClick={startAll}
               disabled={bulkBusy !== null}
-              startIcon={bulkBusy === "start" ? <CircularProgress size={14} color="inherit" /> : undefined}
+              startIcon={bulkBusy === "start" ? <CircularProgress size={14} color="inherit" /> : <PlayArrow />}
             >
               全部启动
             </Button>
             <Button
+              size="small"
               variant="outlined"
-              color="warning"
-              onClick={() => setConfirmStop(true)}
-              disabled={bulkBusy !== null}
+              sx={{ minWidth: 36, px: 1 }}
+              onClick={(e) => setMoreMenu(e.currentTarget)}
+              aria-label="更多操作"
             >
-              全部停止
+              <MoreVert />
             </Button>
+            <Menu anchorEl={moreMenu} open={!!moreMenu} onClose={() => setMoreMenu(null)}>
+              <MenuItem
+                onClick={() => {
+                  setMoreMenu(null);
+                  setConfirmStop(true);
+                }}
+              >
+                全部停止（危险）
+              </MenuItem>
+            </Menu>
             <Button
               variant="contained"
               onClick={diagnosis}
@@ -244,10 +258,73 @@ export default function Dashboard() {
           </>
         }
       />
-      <Typography variant="caption" color="text.secondary" sx={{ mt: -1.5, mb: 0.5, display: "block" }}>
-        共 {services.length} 个服务，{healthyCount} 个健康 · 实时刷新{pollingActive ? "中" : "已暂停"} · 上次更新{" "}
-        {lastUpdate ? lastUpdate.toLocaleTimeString("zh-CN") : "—"}
-      </Typography>
+
+      {/* 聚合数字：一眼看到全局健康度 */}
+      <Grid container spacing={2}>
+        <Grid item xs={6} sm={3}>
+          <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 2 }}>
+            <Typography variant="caption" color="text.secondary">
+              部署就绪
+            </Typography>
+            <Typography variant="h4" sx={{ mt: 0.5, fontFamily: MONO_STACK, fontVariantNumeric: "tabular-nums" }}>
+              {services.filter((s) => s.installed).length}
+              <Typography variant="body2" color="text.secondary" sx={{ ml: 0.5, fontSize: "1rem" }}>
+                / {services.length}
+              </Typography>
+            </Typography>
+          </Paper>
+        </Grid>
+        <Grid item xs={6} sm={3}>
+          <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 2 }}>
+            <Typography variant="caption" color="text.secondary">
+              运行中
+            </Typography>
+            <Typography
+              variant="h4"
+              sx={{ mt: 0.5, fontFamily: MONO_STACK, fontVariantNumeric: "tabular-nums" }}
+              color={services.filter((s) => s.running).length > 0 ? "primary.main" : "text.secondary"}
+            >
+              {services.filter((s) => s.running).length}
+            </Typography>
+          </Paper>
+        </Grid>
+        <Grid item xs={6} sm={3}>
+          <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 2 }}>
+            <Typography variant="caption" color="text.secondary">
+              健康
+            </Typography>
+            <Typography
+              variant="h4"
+              sx={{ mt: 0.5, fontFamily: MONO_STACK, fontVariantNumeric: "tabular-nums" }}
+              color={healthyCount === services.length && services.length > 0 ? "primary.main" : "warning.main"}
+            >
+              {healthyCount}
+            </Typography>
+          </Paper>
+        </Grid>
+        <Grid item xs={6} sm={3}>
+          <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 2 }}>
+            <Typography variant="caption" color="text.secondary">
+              上次更新
+            </Typography>
+            <Typography
+              variant="body2"
+              sx={{
+                mt: 1.25,
+                fontFamily: MONO_STACK,
+                fontVariantNumeric: "tabular-nums",
+                fontWeight: 600,
+                fontSize: "1rem",
+              }}
+            >
+              {lastUpdate ? lastUpdate.toLocaleTimeString("zh-CN") : "—"}
+            </Typography>
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>
+              实时刷新{pollingActive ? "中" : "已暂停"}
+            </Typography>
+          </Paper>
+        </Grid>
+      </Grid>
 
       {!bootstrapped ? (
         <Card variant="outlined" sx={{ p: 2.5 }}>
