@@ -379,16 +379,50 @@ fn flatten_top_level_dir(install_dir: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// 默认 nginx.conf：反代 /api → 后端 48085，root 指向 dfy-ui 构建产物。
+/// 把 locate_home 找到的程序目录内容整体搬平到 install_dir 根（同盘 rename，秒级完成），
+/// 返回归一后的程序目录（= install_dir）。
+///
+/// 为什么必须搬平：nginx zip 顶层带 `nginx-x.y.z/` 版本目录、dfy-ui zip 顶层可能是
+/// `dist/`，解压后关键文件落在 install_dir 的**子目录**里；而 registry requires、
+/// 卸载探测（serviceInstalled）、nginx root 全部按 install_dir **根**解析。
+/// 不搬平的后果：安装在子目录里验证通过、报「安装完成」，探测却查根目录查不到 →
+/// 修复中心「待安装」永远不更新（装了等于白装）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn relocate_home_contents(install_dir: &str, home: &str) -> Result<(), String> {
+    if std::path::Path::new(install_dir) == std::path::Path::new(home) {
+        return Ok(());
+    }
+    let root = std::path::Path::new(install_dir);
+    for item in std::fs::read_dir(home)
+        .map_err(|e| format!("读取程序目录 {home} 失败：{e}"))?
+        .flatten()
+    {
+        let target = root.join(item.file_name());
+        std::fs::rename(item.path(), &target).or_else(|_| {
+            // rename 跨盘符或目标已存在时：先删目标再 rename（与 flatten 同语义）
+            let _ = if target.is_dir() {
+                std::fs::remove_dir_all(&target)
+            } else {
+                std::fs::remove_file(&target)
+            };
+            std::fs::rename(item.path(), &target)
+        }).map_err(|e| format!("移动 {} 失败：{e}", item.path().display()))?;
+    }
+    std::fs::remove_dir_all(home).ok();
+    Ok(())
+}
+
+/// 默认 nginx.conf：反代 /admin-api → 后端 48085，root 指向 dfy-ui 构建产物。
 /// dfy-ui 路径从 registry 动态读取（避免硬编码，用户改过 installDir 也能跟上）。
+/// root = dfy-ui install_dir 根（安装管线已把 dist 内容搬平到根，index.html 在根上）。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn build_nginx_conf(nginx_home: &str) -> String {
     let nginx_home = nginx_home.replace('\\', "/");
     let dfy_ui_dist = crate::ops::registry::services()
         .into_iter()
         .find(|s| s.id == "dfy-ui")
-        .map(|s| format!("{}/dist", s.install_dir.replace('\\', "/")))
-        .unwrap_or_else(|| "C:/services/dfy-ui-admin-vue3-master/dist".into());
+        .map(|s| s.install_dir.replace('\\', "/"))
+        .unwrap_or_else(|| "C:/services/dfy-ui-admin-vue3-master".into());
     format!(
         r#"worker_processes  1;
 
@@ -846,7 +880,7 @@ async fn run_zip_install(
         })
         .await
     };
-    let home = match located {
+    let mut home = match located {
         Ok(Ok(h)) => {
             state.log(format!("解压完成，程序目录：{h}"));
             h
@@ -860,6 +894,32 @@ async fn run_zip_install(
             return;
         }
     };
+
+    // ===== nginx/dfy-ui：程序目录搬平到 install_dir 根 =====
+    // zip 顶层版本目录（nginx-x.y.z/、dist/）会把关键文件埋进子目录，而探测、
+    // registry requires、nginx root 全按 install_dir 根解析——不搬平就会出现
+    // 「安装完成但待安装状态不更新」。搬平后 home 归一为 install_dir。
+    if matches!(target, "nginx" | "dfy-ui") {
+        let home_was_root = home == install_dir;
+        let idd = install_dir.clone();
+        let relocated = tokio::task::spawn_blocking(move || relocate_home_contents(&idd, &home)).await;
+        match relocated {
+            Ok(Ok(())) => {
+                if !home_was_root {
+                    state.log(format!("已把程序目录内容搬平到安装根目录：{install_dir}"));
+                }
+                home = install_dir.clone();
+            }
+            Ok(Err(e)) => {
+                finish(state, env_cache, false, e).await;
+                return;
+            }
+            Err(e) => {
+                finish(state, env_cache, false, format!("搬平目录任务异常：{e}")).await;
+                return;
+            }
+        }
+    }
 
     // ===== 写配置 + 初始化数据 =====
     state.patch(|j| j.stage = "configure".into());
@@ -1025,12 +1085,44 @@ mod tests {
 
         assert_eq!(build_redis_conf(), "port 6379\nbind 0.0.0.0\n");
 
-        // nginx.conf 关键元素：反代 /api → 48085、监听 80、日志/pid 路径
+        // nginx.conf 关键元素：反代 /api → 48085、监听 80、日志/pid 路径、root 指向 dfy-ui 根
         let conf = build_nginx_conf(r"C:\services\nginx");
         assert!(conf.contains("listen       80;"));
         assert!(conf.contains("proxy_pass http://127.0.0.1:48085/admin-api/;"));
         assert!(conf.contains("C:/services/nginx/logs/error.log"));
         assert!(conf.contains("C:/services/nginx/logs/nginx.pid"));
         assert!(conf.contains("try_files $uri $uri/ /index.html;"), "SPA 路由兜底必须存在");
+        assert!(
+            conf.contains("root  C:/services/dfy-ui-admin-vue3-master;"),
+            "root 必须指向 dfy-ui 安装根（dist 内容已搬平）: {conf}"
+        );
+        assert!(!conf.contains("/dist"), "root 不应再带 /dist 后缀: {conf}");
+    }
+
+    /// relocate_home_contents：版本子目录内容搬平到安装根（nginx/dfy-ui 状态探测的关键前提）。
+    #[test]
+    fn relocate_home_flattens_versioned_subdir() {
+        let base = std::env::temp_dir().join(format!("dfy-ops-relocate-{}", std::process::id()));
+        let install_dir = base.join("services/nginx");
+        let home = install_dir.join("nginx-1.28.0");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(home.join("conf")).unwrap();
+        std::fs::create_dir_all(home.join("logs")).unwrap();
+        std::fs::write(home.join("nginx.exe"), b"fake").unwrap();
+        std::fs::write(home.join("conf/nginx.conf"), b"conf").unwrap();
+        std::fs::write(home.join("logs/.keep"), b"").unwrap();
+
+        relocate_home_contents(install_dir.to_str().unwrap(), home.to_str().unwrap()).unwrap();
+
+        assert!(install_dir.join("nginx.exe").is_file(), "nginx.exe 必须落在安装根");
+        assert!(install_dir.join("conf/nginx.conf").is_file());
+        assert!(install_dir.join("logs").is_dir());
+        assert!(!home.exists(), "搬平后版本子目录应被删除");
+
+        // 同目录幂等：home == install_dir 时直接 Ok 不动文件
+        relocate_home_contents(install_dir.to_str().unwrap(), install_dir.to_str().unwrap()).unwrap();
+        assert!(install_dir.join("nginx.exe").is_file(), "幂等调用不得破坏已有文件");
+
+        std::fs::remove_dir_all(&base).ok();
     }
 }

@@ -204,7 +204,7 @@ http {
         listen       80;
         server_name  localhost;
 
-        root  C:/services/dfy-ui-admin-vue3-master/dist;
+        root  C:/services/dfy-ui-admin-vue3-master;
         index index.html index.htm;
 
         location / {
@@ -229,7 +229,7 @@ http {
         let c = parse(SAMPLE);
         assert_eq!(c.listen_port, "80");
         assert_eq!(c.server_name, "localhost");
-        assert_eq!(c.frontend_root, "C:/services/dfy-ui-admin-vue3-master/dist");
+        assert_eq!(c.frontend_root, "C:/services/dfy-ui-admin-vue3-master");
         assert_eq!(c.backend_host, "127.0.0.1");
         assert_eq!(c.backend_port, "48085");
         assert_eq!(c.access_log, "C:/services/nginx/logs/access.log");
@@ -252,7 +252,7 @@ http {
         assert!(out.contains("proxy_pass http://192.168.56.101:48085/admin-api/;"), "{out}");
         // 未改的指令保持原值
         assert!(out.contains("listen       8080;"));
-        assert!(out.contains("root  C:/services/dfy-ui-admin-vue3-master/dist;"));
+        assert!(out.contains("root  C:/services/dfy-ui-admin-vue3-master;"));
         assert!(out.contains("access_log C:/services/nginx/logs/access.log;"));
         // 块结构、其他指令完全不动
         assert!(out.contains("try_files $uri $uri/ /index.html;"));
