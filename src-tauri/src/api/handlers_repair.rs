@@ -200,6 +200,11 @@ pub async fn start_generic_repair(
 /// （MSI 注册表条目静默卸载）。其余目标建议 AI 方案或控制面板手动卸载。
 pub const UNINSTALLABLE: [&str; 3] = ["mysql", "redis", "java"];
 
+/// 可探测安装痕迹的全部目标（= UNINSTALLABLE + 三个云端组件）。
+/// 这三个云端组件不注册 Windows 服务、不走 net start/stop，但需要在修复中心
+/// 「已安装/待安装」卡片上正确显示状态，所以纳入探测列表。
+pub const PROBEABLE: [&str; 6] = ["mysql", "redis", "java", "nginx", "dfy-backend", "dfy-ui"];
+
 pub(crate) fn registry_install_dir(state: &AppState, target: &str) -> String {
     state
         .registry
@@ -209,9 +214,15 @@ pub(crate) fn registry_install_dir(state: &AppState, target: &str) -> String {
         .unwrap_or_else(|| format!("C:\\services\\{target}"))
 }
 
-/// 探测一个目标的安装痕迹（服务存在 + 目录存在；java = MSI 条目或平台免安装
-/// 目录；mysql 的服务检测叠加 MSI 产品条目——外部 MySQL Installer 装的也算已装）。
-/// 同时返回服务运行态（运维面板展示与启停按钮状态用；java 无服务恒 false）。
+/// 探测一个目标的安装痕迹。返回 (service_installed, dir_exists, service_running)。
+///
+/// 探测策略分三种：
+/// 1. mysql/redis — 注册了 Windows 服务 → 查 sc query + install_dir + mysql MSI 兜底
+/// 2. java — MSI 条目或平台免安装目录（无 Windows 服务）
+/// 3. nginx — 有 service_spec 但**不注册 Windows 服务**（进程管理器托管启停），
+///    所以 service_running 恒 false，按 install_dir + nginx.exe 判已装
+/// 4. dfy-backend/dfy-ui — 无 service_spec（jar 拷贝管线 / 静态目录），按
+///    install_dir + requires 文件（dfy-server.jar / index.html）判已装
 async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
     if target == "java" {
         let installed = blocking(|| {
@@ -221,10 +232,30 @@ async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
         .await;
         return (installed, false, false);
     }
+    let install_dir = registry_install_dir(state, target);
+    // dfy-backend/dfy-ui/nginx 都不注册 Windows 服务：按 install_dir + 关键文件判定
+    if matches!(target, "dfy-backend" | "dfy-ui" | "nginx") {
+        let install_dir = install_dir.clone();
+        let key_filename: String = match target {
+            "nginx" => "nginx.exe".into(),
+            "dfy-backend" => "dfy-server.jar".into(),
+            "dfy-ui" => "index.html".into(),
+            _ => unreachable!(),
+        };
+        let (dir_exists, key_file_exists) = blocking(move || {
+            let dir = std::path::Path::new(&install_dir);
+            let dir_ok = dir.is_dir();
+            (dir_ok, dir.join(&key_filename).is_file())
+        })
+        .await;
+        // dfy-ui 没有 run_cmd，nginx 没有 Windows 服务 → service_running 恒 false
+        // （真正的运行态由进程管理器 / 服务运维面板另行探测，此处只回答「装没装」）
+        return (dir_exists && key_file_exists, dir_exists, false);
+    }
+    // mysql/redis：查 Windows 服务 + 目录 + mysql MSI 兜底
     let Some((svc, _)) = crate::ops::env_repair::service_spec(target) else {
         return (false, false, false);
     };
-    let install_dir = registry_install_dir(state, target);
     let msi = target == "mysql";
     let (svc_exists, dir_exists, msi_installed, running) = blocking(move || {
         let exists = crate::ops::env_repair::service_exists(svc);
@@ -240,11 +271,12 @@ async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
     (svc_exists || msi_installed, dir_exists, running)
 }
 
-/// GET /api/env/repair/uninstall/status —— 可卸载组件的安装痕迹探测，
-/// 修复中心「已安装组件管理」与 AI 方案上下文共用（每次实时探，sc query 很快）。
+/// GET /api/env/repair/uninstall/status —— 可探测组件的安装痕迹探测。
+/// 覆盖 mysql/redis/java 以及三个云端组件 nginx、dfy-backend、dfy-ui。
+/// 修复中心「已安装组件管理」卡片和 AI 方案上下文共用（每次实时探，sc query 很快）。
 pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let mut targets = Vec::new();
-    for t in UNINSTALLABLE {
+    for t in PROBEABLE {
         let (service_installed, dir_exists, service_running) = probe_target(&state, t).await;
         // java 补充实测信息：平台托管主目录 + 实跑 java -version 的版本号
         // （MSI 装的从卸载条目名提取主版本）+ 注册表核实的 JAVA_HOME 配置态，
@@ -1341,7 +1373,7 @@ pub async fn repair_plan(
     let files = blocking(move || resource::scan(&dir).files).await;
     // 已安装状态：让 AI 区分「全新安装」与「修复/重装」，方案更贴近实情
     let mut installed = Vec::new();
-    for t in UNINSTALLABLE {
+    for t in PROBEABLE {
         let (on, _, _) = probe_target(&state, t).await;
         installed.push((resource::target_label(t).to_string(), on));
     }
