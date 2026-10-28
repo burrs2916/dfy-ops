@@ -73,12 +73,12 @@ fn parse_proxy_pass(val: &str) -> (String, String) {
     (host, port)
 }
 
-/// 用 host/port 拼接回 proxy_pass 值：`http://{host}:{port}/api/`。
+/// 用 host/port 拼接回 proxy_pass 值：`http://{host}:{port}/admin-api/`（ruoyi-vue-pro 标准前缀）。
 fn build_proxy_pass(host: &str, port: &str) -> String {
     if host.is_empty() || port.is_empty() {
         return String::new();
     }
-    format!("http://{host}:{port}/api/")
+    format!("http://{host}:{port}/admin-api/")
 }
 
 /// 从 nginx.conf 文本解析运维字段。
@@ -211,8 +211,8 @@ http {
             try_files $uri $uri/ /index.html;
         }
 
-        location /api/ {
-            proxy_pass http://127.0.0.1:48085/api/;
+        location /admin-api/ {
+            proxy_pass http://127.0.0.1:48085/admin-api/;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
         }
@@ -249,7 +249,7 @@ http {
         // 修改的指令原地替换
         assert!(out.contains("listen       8080;"), "缩进应保留: {out}");
         assert!(out.contains("server_name  dfy.example.com;"), "{out}");
-        assert!(out.contains("proxy_pass http://192.168.56.101:48085/api/;"), "{out}");
+        assert!(out.contains("proxy_pass http://192.168.56.101:48085/admin-api/;"), "{out}");
         // 未改的指令保持原值
         assert!(out.contains("listen       8080;"));
         assert!(out.contains("root  C:/services/dfy-ui-admin-vue3-master/dist;"));

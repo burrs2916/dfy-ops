@@ -418,9 +418,9 @@ http {{
             try_files $uri $uri/ /index.html;
         }}
 
-        # 后端 API 反代
-        location /api/ {{
-            proxy_pass http://127.0.0.1:48085/api/;
+        # 后端 API 反代（ruoyi-vue-pro 标准前缀 /admin-api）
+        location /admin-api/ {{
+            proxy_pass http://127.0.0.1:48085/admin-api/;
             proxy_set_header Host $host;
             proxy_set_header X-Real-IP $remote_addr;
             proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -1028,7 +1028,7 @@ mod tests {
         // nginx.conf 关键元素：反代 /api → 48085、监听 80、日志/pid 路径
         let conf = build_nginx_conf(r"C:\services\nginx");
         assert!(conf.contains("listen       80;"));
-        assert!(conf.contains("proxy_pass http://127.0.0.1:48085/api/;"));
+        assert!(conf.contains("proxy_pass http://127.0.0.1:48085/admin-api/;"));
         assert!(conf.contains("C:/services/nginx/logs/error.log"));
         assert!(conf.contains("C:/services/nginx/logs/nginx.pid"));
         assert!(conf.contains("try_files $uri $uri/ /index.html;"), "SPA 路由兜底必须存在");
