@@ -591,7 +591,7 @@ pub fn check_service_env_with(
                 // 提示引导到「远程部署」配置页而非本地启动/安装。
                 if let Some((host, port)) = &dep.remote {
                     let ep = format!("{host}:{port}");
-                    let (status, actual) = if dep.running && dep.healthy {
+                    let (status, detail) = if dep.running && dep.healthy {
                         (
                             CheckStatus::Pass,
                             format!("远程端点 {ep} 可达（TCP 连通）"),
@@ -607,7 +607,7 @@ pub fn check_service_env_with(
                         &format!("依赖：{}", dep.name),
                         "外部依赖",
                         &format!("远程端点 {ep} 可达"),
-                        &actual,
+                        &detail,
                         status,
                     )
                 } else {
@@ -620,7 +620,7 @@ pub fn check_service_env_with(
                             .collect::<Vec<_>>()
                             .join("/")
                     };
-                    let (status, actual) = if dep.running && dep.healthy {
+                    let (status, detail) = if dep.running && dep.healthy {
                         (CheckStatus::Pass, format!("运行中，端口 {ports_txt}"))
                     } else if dep.running {
                         // 依赖在跑但端口不可达：非致命，但功能可能受限
@@ -634,7 +634,7 @@ pub fn check_service_env_with(
                         &format!("依赖：{}", dep.name),
                         "外部依赖",
                         "依赖服务运行且健康",
-                        &actual,
+                        &detail,
                         status,
                     )
                 }
