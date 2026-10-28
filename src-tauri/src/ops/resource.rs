@@ -14,7 +14,9 @@
 use serde::Serialize;
 
 /// 资源目录可修复的目标软件（与环境检查项 id 对应，见 repair_target）。
-pub const TARGETS: [&str; 7] = ["java", "mysql", "redis", "vernemq", "minio", "greptime", "nginx"];
+pub const TARGETS: [&str; 9] = [
+    "java", "mysql", "redis", "vernemq", "minio", "greptime", "nginx", "dfy-backend", "dfy-ui",
+];
 
 /// 资源目录里的一个文件（识别不出的也列出，target=None 交 AI 判断）。
 #[derive(Debug, Clone, Serialize)]
@@ -56,7 +58,7 @@ pub struct ResourceScan {
 }
 
 /// 安装包扩展名（决定「能不能自动装/识别」；随机同名文件如 readme.pdf 不认）。
-const PKG_EXTS: [&str; 4] = [".msi", ".exe", ".zip", ".msix"];
+const PKG_EXTS: [&str; 5] = [".msi", ".exe", ".zip", ".msix", ".jar"];
 
 fn is_pkg_ext(name_lower: &str) -> bool {
     PKG_EXTS.iter().any(|e| name_lower.ends_with(e))
@@ -65,8 +67,14 @@ fn is_pkg_ext(name_lower: &str) -> bool {
 /// 名字 token 匹配归属软件（不含扩展名过滤）——文件名与目录名共用同一套规则。
 /// 目录名兜底识别依赖它：约定布局 `resources/mysql/…`、`resources/redis/…`。
 fn match_target(name_lower: &str) -> Option<&'static str> {
+    // 自研服务（优先：精确的 service id 匹配，不跟 java/jdk 这种泛词冲突）
+    if name_lower.contains("dfy-server") {
+        Some("dfy-backend")
+    } else if name_lower.contains("dfy-ui") {
+        Some("dfy-ui")
+    }
     // 顺序敏感：vernemq 含 "mq" 但不含 "mysql"；memurai 是 Windows 原生 Redis
-    if name_lower.contains("vernemq") {
+    else if name_lower.contains("vernemq") {
         Some("vernemq")
     } else if name_lower.contains("mysql") {
         Some("mysql")
@@ -109,6 +117,9 @@ fn convention_target(dir_name_lower: &str) -> Option<&'static str> {
         "minio" => Some("minio"),
         "greptime" | "greptimedb" => Some("greptime"),
         "nginx" => Some("nginx"),
+        // 自研云端三件套：目录名 = service id
+        "dfy-backend" => Some("dfy-backend"),
+        "dfy-ui" => Some("dfy-ui"),
         _ => None,
     }
 }
@@ -234,6 +245,12 @@ pub fn find_zip(dir: &str, target: &str) -> Option<ResourceFile> {
     find_pkg(dir, target, ".zip")
 }
 
+/// 找目标软件的 fat jar（自研后端 dfy-boot-base 的管线：拷贝到 install_dir 根）。
+/// 约定目录内的包优先，同优先级取最大的（最大 = 最新版本）。
+pub fn find_jar(dir: &str, target: &str) -> Option<ResourceFile> {
+    find_pkg(dir, target, ".jar")
+}
+
 fn find_pkg(dir: &str, target: &str, ext: &str) -> Option<ResourceFile> {
     scan(dir)
         .files
@@ -311,6 +328,8 @@ pub fn target_label(target: &str) -> &'static str {
         "minio" => "MinIO",
         "greptime" => "GreptimeDB",
         "nginx" => "Nginx 反向代理",
+        "dfy-backend" => "DFY 后端服务 (dfy-boot-base)",
+        "dfy-ui" => "DFY 前端 (Vue3)",
         _ => "未知目标",
     }
 }
@@ -487,7 +506,9 @@ mod tests {
         assert_eq!(repair_target("greptime"), Some("greptime"));
         assert_eq!(repair_target("webview2"), None);
         assert_eq!(repair_target("jar"), None);
-        assert_eq!(repair_target("dep-dfy-backend"), None, "自研服务依赖不进修复目标");
+        // 自研云端三件套现在进修复目标（支持资源目录安装）
+        assert_eq!(repair_target("dep-dfy-backend"), Some("dfy-backend"));
+        assert_eq!(repair_target("dep-dfy-ui"), Some("dfy-ui"));
         assert_eq!(repair_target("service-state"), None);
     }
 

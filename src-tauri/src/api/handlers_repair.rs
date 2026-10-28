@@ -89,16 +89,41 @@ pub async fn start_generic_repair(
     let label = resource::target_label(target);
 
     let dir = state.app_settings.lock().unwrap().resource_dir.clone();
-    let (zip, msi) = if dir.is_empty() {
-        (None, None)
+    let (zip, msi, jar) = if dir.is_empty() {
+        (None, None, None)
     } else {
-        blocking(move || (resource::find_zip(&dir, target), resource::find_msi(&dir, target))).await
+        blocking(move || {
+            (
+                resource::find_zip(&dir, target),
+                resource::find_msi(&dir, target),
+                resource::find_jar(&dir, target),
+            )
+        })
+        .await
     };
 
-    // mysql/java 支持免安装版管线；java 的安装目录固定平台托管位置。
-    // redis 纯远程部署（上方已拦截），不进本地安装管线。
-    let zip_capable = matches!(target, "mysql" | "java" | "nginx");
-    let started = if zip_capable && zip.is_some() {
+    // 管线分流：
+    // - java/mysql/nginx/dfy-ui → zip 解压管线
+    // - dfy-backend → jar 拷贝管线（单独分支）
+    // - 其他 → msi 静默安装管线
+    let zip_capable = matches!(target, "mysql" | "java" | "nginx" | "dfy-ui");
+    let jar_capable = target == "dfy-backend";
+
+    let started = if jar_capable && jar.is_some() {
+        let install_dir = state
+            .registry
+            .iter()
+            .find(|d| d.id == target)
+            .map(|d| d.install_dir.clone())
+            .unwrap_or_else(|| format!("C:\\services\\{target}"));
+        crate::ops::env_repair::start_jar_install(
+            target,
+            jar.clone().unwrap().path,
+            install_dir,
+            state.env_cache.clone(),
+            state.repair.clone(),
+        )
+    } else if zip_capable && zip.is_some() {
         let install_dir = if target == "java" {
             crate::ops::env_repair::JDK_MANAGED_HOME.to_string()
         } else {
@@ -131,12 +156,23 @@ pub async fn start_generic_repair(
             state.repair.clone(),
         )
     } else {
+        let mut hint_parts: Vec<&str> = Vec::new();
+        if zip_capable {
+            hint_parts.push("ZIP 免安装版");
+        }
+        if jar_capable {
+            hint_parts.push("fat JAR");
+        }
+        hint_parts.push("MSI 安装包");
         Err(format!(
-            "本地资源目录中没有 {label} 的可安装包。请将 MSI 安装包（或 MySQL/Redis/Java 的 ZIP 免安装版）放入「设置 → 本地资源目录」后重试，或使用 AI 方案"
+            "本地资源目录中没有 {label} 的可安装包。请将 {} 放入「设置 → 本地资源目录」后重试，或使用 AI 方案",
+            hint_parts.join("/")
         ))
     };
 
-    let source = if zip.is_some() && zip_capable {
+    let source = if jar.is_some() && jar_capable {
+        Some("jar")
+    } else if zip.is_some() && zip_capable {
         Some("zip")
     } else if msi.is_some() {
         Some("msi")

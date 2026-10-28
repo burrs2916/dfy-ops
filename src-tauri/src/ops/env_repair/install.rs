@@ -451,7 +451,7 @@ pub fn start_zip_install(
     env_cache: EnvCache,
     state: Arc<RepairState>,
 ) -> Result<(), String> {
-    if service_spec(target).is_none() && target != "java" {
+    if service_spec(target).is_none() && target != "java" && target != "dfy-ui" {
         return Err(format!(
             "{} 没有免安装版（zip）安装管线，请使用 MSI 安装包或 AI 方案",
             crate::ops::resource::target_label(target)
@@ -489,6 +489,121 @@ pub fn start_zip_install(
         "免安装版（zip）安装仅支持 Windows 目标机，{} 请手动安装",
         crate::ops::resource::target_label(target)
     ))
+}
+
+/// jar 快速拷贝管线：自研后端 dfy-boot-base 的 fat jar 直接拷贝到 install_dir 根，
+/// 重命名为 dfy-server.jar（统一命名，registry run_cmd = `{java} -jar dfy-server.jar`）。
+/// 无解压、无拍平、无 Windows 服务注册——jar 本身就是自包含部署形态。
+#[cfg(target_os = "windows")]
+pub fn start_jar_install(
+    target: &'static str,
+    jar_path: String,
+    install_dir: String,
+    env_cache: EnvCache,
+    state: Arc<RepairState>,
+) -> Result<(), String> {
+    if target != "dfy-backend" {
+        return Err(format!(
+            "{} 没有 jar 安装管线",
+            crate::ops::resource::target_label(target)
+        ));
+    }
+    {
+        let mut job = state.job.lock().unwrap();
+        if job.running {
+            return Err("已有修复任务在执行，请等待其完成".into());
+        }
+        job.running = true;
+        job.target = Some(target.into());
+        job.op = "install".into();
+        job.stage = "install".into();
+        job.ok = None;
+        job.error = None;
+        job.logs.clear();
+    }
+    tokio::spawn(async move {
+        run_jar_install(state, jar_path, install_dir, env_cache).await;
+    });
+    Ok(())
+}
+
+/// 非 Windows：dev 机不提供 jar 管线（交付平台是 Windows）。
+#[cfg(not(target_os = "windows"))]
+pub fn start_jar_install(
+    target: &'static str,
+    _jar_path: String,
+    _install_dir: String,
+    _env_cache: EnvCache,
+    _state: Arc<RepairState>,
+) -> Result<(), String> {
+    Err(format!(
+        "jar 安装仅支持 Windows 目标机，{} 请手动拷贝 jar",
+        crate::ops::resource::target_label(target)
+    ))
+}
+
+/// jar 管线主体：拷贝 → 验证。
+#[cfg(target_os = "windows")]
+async fn run_jar_install(
+    state: Arc<RepairState>,
+    jar_path: String,
+    install_dir: String,
+    env_cache: EnvCache,
+) {
+    state.log(format!(
+        "开始安装 DFY 后端：{} → {}\\dfy-server.jar",
+        jar_path, install_dir
+    ));
+
+    state.patch(|j| j.stage = "install".into());
+    let copy = {
+        let jp = jar_path.clone();
+        let id = install_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&id)
+                .map_err(|e| format!("创建目录失败：{e}"))?;
+            let dest = std::path::Path::new(&id).join("dfy-server.jar");
+            std::fs::copy(&jp, &dest)
+                .map_err(|e| format!("拷贝 jar 失败：{e}"))?;
+            Ok(())
+        })
+        .await
+    };
+    match copy {
+        Ok(Ok(())) => state.log("jar 已拷贝到目标目录"),
+        Ok(Err(e)) => {
+            finish(state, env_cache, false, e).await;
+            return;
+        }
+        Err(e) => {
+            finish(state, env_cache, false, format!("拷贝任务异常：{e}")).await;
+            return;
+        }
+    }
+
+    // ===== 验证：jar 存在 =====
+    state.patch(|j| j.stage = "verify".into());
+    let v = {
+        let id = install_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let p = std::path::Path::new(&id).join("dfy-server.jar");
+            if p.is_file() {
+                Ok(())
+            } else {
+                Err(format!("拷贝完成但未找到 dfy-server.jar：{}", p.display()))
+            }
+        })
+        .await
+    };
+    match v {
+        Ok(Ok(())) => {
+            state.log("验证通过：dfy-server.jar 已就位，请到「服务运维」面板启动后端服务");
+            state.log("提示：首次启动前请确认 JDK 8+ 已安装且 JAVA_HOME 已配置");
+            finish(state, env_cache, true, String::new()).await;
+        }
+        Ok(Err(e)) => finish(state, env_cache, false, e).await,
+        Err(e) => finish(state, env_cache, false, format!("验证任务异常：{e}")).await,
+    }
 }
 
 /// PowerShell 单引号字面量转义（路径含空格/引号时保结构）。
@@ -624,6 +739,25 @@ fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
                 .map_err(|e| format!("写入 nginx.conf 失败：{e}"))?;
             Ok("已拍平版本目录、创建 logs/、写入默认 nginx.conf（反代 /api → 48085）".into())
         }
+        "dfy-ui" => {
+            // dfy-ui dist zip 可能顶层是 dist/ 子目录 → 拍平（dist/ 里的内容移到 install_dir 根）
+            // 也可能直接是 index.html + assets/ → 不需要拍平
+            flatten_top_level_dir(home)?;
+            // 再检查一遍是否有残留 dist/（用户 zip 结构可能是 dist/dist/ 这种嵌套）
+            let dist_dir = std::path::Path::new(home).join("dist");
+            if dist_dir.is_dir() {
+                // 还有 dist/，把里面内容再拍一次
+                for item in std::fs::read_dir(&dist_dir)
+                    .map_err(|e| format!("读取 dist 目录失败：{e}"))?
+                    .flatten()
+                {
+                    let target = std::path::Path::new(home).join(item.file_name());
+                    std::fs::rename(item.path(), &target).map_err(|e| format!("移动 {} 失败：{e}", item.path().display()))?;
+                }
+                std::fs::remove_dir_all(&dist_dir).ok();
+            }
+            Ok("已解压 dfy-ui 构建产物，前端静态文件已就绪".into())
+        }
         "java" => {
             // 平台直接指向：写用户级 JAVA_HOME + 把 {home}\bin 追加进用户 PATH。
             // PATH 必须配——否则 cmd 里 `java -version` 无法识别；注册表原始读写
@@ -697,6 +831,8 @@ async fn run_zip_install(
         "java" => r"bin\java.exe",
         // nginx zip 顶层带 nginx-x.y.z/，标志在顶层（zip 解压后先 locate_home 再拍平）
         "nginx" => "nginx.exe",
+        // dfy-ui dist zip 标志文件：index.html
+        "dfy-ui" => "index.html",
         _ => {
             finish(state, env_cache, false, format!("{label} 没有免安装版（zip）安装管线")).await;
             return;
@@ -776,7 +912,7 @@ async fn run_zip_install(
         }
     }
 
-    // ===== 验证：nginx 检查文件就绪；mysql/redis 轮询端口；java 版本验证 =====
+    // ===== 验证：nginx/dfy-ui 检查文件就绪；mysql/redis 轮询端口；java 版本验证 =====
     state.patch(|j| j.stage = "verify".into());
     if target == "nginx" {
         let home_for_verify = home.clone();
@@ -799,6 +935,28 @@ async fn run_zip_install(
         match v {
             Ok(Ok(())) => {
                 state.log("验证通过：nginx.exe + conf/nginx.conf + logs/ 均就绪，请到「服务运维」面板启动");
+                finish(state, env_cache, true, String::new()).await;
+            }
+            Ok(Err(e)) => finish(state, env_cache, false, e).await,
+            Err(e) => finish(state, env_cache, false, format!("验证任务异常：{e}")).await,
+        }
+        return;
+    }
+    if target == "dfy-ui" {
+        let home_for_verify = home.clone();
+        let v = tokio::task::spawn_blocking(move || {
+            let p = std::path::Path::new(&home_for_verify);
+            let idx = p.join("index.html");
+            if !idx.is_file() {
+                Err(format!("未找到 index.html：{}（解压后前端文件不完整）", idx.display()))
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        match v {
+            Ok(Ok(())) => {
+                state.log("验证通过：dfy-ui 前端静态文件已就绪，请到「服务运维」面板启动 nginx 访问");
                 finish(state, env_cache, true, String::new()).await;
             }
             Ok(Err(e)) => finish(state, env_cache, false, e).await,
