@@ -197,8 +197,9 @@ pub async fn start_generic_repair(
 // ===== 卸载 / 维护 =====
 
 /// 平台内卸载覆盖：mysql/redis（zip 管线，服务+目录全由平台掌控）+ java
-/// （MSI 注册表条目静默卸载）。其余目标建议 AI 方案或控制面板手动卸载。
-pub const UNINSTALLABLE: [&str; 3] = ["mysql", "redis", "java"];
+/// （MSI 注册表条目静默卸载）+ nginx（Windows 服务可选注册，先优雅停服再删目录）。
+/// dfy-backend/dfy-ui 暂不支持平台内卸载（无服务注册，jar 拷贝产物/静态目录）。
+pub const UNINSTALLABLE: [&str; 4] = ["mysql", "redis", "java", "nginx"];
 
 /// 可探测安装痕迹的全部目标（= UNINSTALLABLE + 三个云端组件）。
 /// 这三个云端组件不注册 Windows 服务、不走 net start/stop，但需要在修复中心
@@ -337,6 +338,13 @@ pub async fn service_action(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ServiceActionReq>,
 ) -> Json<serde_json::Value> {
+    // nginx 不注册 Windows 服务（由进程管理器托管启停），不走 net start/stop
+    if req.target == "nginx" {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "Nginx 不注册 Windows 服务，请到「服务运维」面板（进程管理器）启停"
+        }));
+    }
     if !UNINSTALLABLE.contains(&req.target.as_str()) {
         return Json(serde_json::json!({ "ok": false, "error": format!("不支持的服务：{}", req.target) }));
     }

@@ -168,9 +168,9 @@ pub fn start_uninstall(
     env_cache: EnvCache,
     state: Arc<RepairState>,
 ) -> Result<(), String> {
-    if !matches!(target, "mysql" | "redis" | "java") {
+    if !matches!(target, "mysql" | "redis" | "java" | "nginx") {
         return Err(format!(
-            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis/Java），请使用 AI 方案或控制面板手动卸载",
+            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis/Java/Nginx），请使用 AI 方案或控制面板手动卸载",
             crate::ops::resource::target_label(target)
         ));
     }
@@ -220,6 +220,10 @@ async fn run_uninstall(
 ) {
     if target == "java" {
         run_java_uninstall(state, env_cache).await;
+        return;
+    }
+    if target == "nginx" {
+        run_nginx_uninstall(state, remove_data, install_dir, env_cache).await;
         return;
     }
     let label = crate::ops::resource::target_label(target);
@@ -451,6 +455,165 @@ async fn run_java_uninstall(state: Arc<RepairState>, env_cache: EnvCache) {
             format!(
                 "卸载未完成：MSI 条目 {}，平台目录 {}（可能 UAC 被取消或 MSI 卸载被拒）——可到「设置 → 应用」手动处理",
                 if after.is_empty() { "已清空" } else { "仍有残留" },
+                if dir_gone { "已删除" } else { "仍保留" }
+            ),
+        )
+        .await;
+    }
+}
+
+/// Nginx 卸载（安全闸门）：
+/// 1. 前置探测 Windows 服务是否存在（手动装的可能 `sc create nginx` 过，也可能纯命令行跑）
+/// 2. 服务运行中 → net stop 给 3s 让 pending 请求优雅退出（反代不能硬断）
+/// 3. taskkill /f /im nginx.exe 兜底（net stop 后进程还在 = 有人绕过服务跑 / 优雅退出没走通）
+/// 4. sc delete nginx 注销服务（如果有注册）
+/// 5. rmdir /s /q 删目录
+/// 6. 复核：服务没了 + 进程没了 + 目录没了 = 成功
+///
+/// nginx 是 dfy-ui 的反代入口——卸载后前端 SPA 没人托管，日志里提示但不阻止
+/// （用户主动行为，知道自己在干嘛）。
+#[cfg(target_os = "windows")]
+async fn run_nginx_uninstall(
+    state: Arc<RepairState>,
+    _remove_data: bool,
+    install_dir: String,
+    env_cache: EnvCache,
+) {
+    use crate::ops::resource::target_label;
+    let label = target_label("nginx");
+    let svc = "nginx";
+
+    // ===== 前置探测：让用户在卸载前看清当前状态 =====
+    let (svc_exists, svc_running, proc_running, dir_exists) = {
+        let s = svc;
+        let id = install_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            let svc_e = service_exists(s);
+            let svc_r = svc_e && service_running(s);
+            // 进程探测：tasklist /fi "imagename eq nginx.exe" 过滤掉表头
+            let proc = std::process::Command::new("tasklist")
+                .args(["/fi", "imagename eq nginx.exe", "/fo", "csv", "/nh"])
+                .output()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .any(|l| l.contains("nginx.exe"))
+                })
+                .unwrap_or(false);
+            (svc_e, svc_r, proc, std::path::Path::new(&id).is_dir())
+        })
+        .await
+        .unwrap_or((false, false, false, false))
+    };
+
+    state.log(format!("开始卸载 {label}（目录 {install_dir}）"));
+    state.log(format!(
+        "当前状态：Windows 服务 {}，服务 {}，nginx.exe 进程 {}，安装目录 {}",
+        if svc_exists { "存在" } else { "未注册" },
+        if svc_running { "运行中" } else { "已停止" },
+        if proc_running { "存在" } else { "不存在" },
+        if dir_exists { "存在" } else { "不存在" },
+    ));
+
+    if !svc_exists && !proc_running && !dir_exists {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!("未检测到 {label} 的安装痕迹（无 Windows 服务，无 nginx.exe 进程，目录 {install_dir} 也不存在）"),
+        )
+        .await;
+        return;
+    }
+
+    // nginx 是 dfy-ui 的反代入口——卸载提示但不阻止（用户主动行为）
+    state.log("提示：Nginx 是前端 SPA 的反代入口，卸载后前端将无法访问（后端 API 不受影响）");
+
+    state.patch(|j| j.stage = "uninstall".into());
+
+    // 安全闸门脚本（一次 UAC 内全部完成）：
+    // 1. net stop nginx —— 给 3s 让 pending 请求优雅退出（反代不能硬断）
+    // 2. taskkill /f /im nginx.exe —— 兜底：net stop 后进程还在 = 有人绕过服务跑 / 优雅退出没走通
+    // 3. sc delete nginx —— 注销服务
+    // 4. rmdir /s /q —— 删目录
+    //
+    // 没有服务注册时 net stop / sc delete 会报错但不影响（退出码不作数，成败以复核为准）
+    let mut parts: Vec<String> = Vec::new();
+    if svc_exists && svc_running {
+        parts.push(format!("net stop {svc}"));
+        // ping 当 sleep：timeout 命令在非交互上下文会拒绝等待
+        parts.push("ping -n 4 127.0.0.1 >nul".to_string());
+        state.log("服务运行中 → 先 stop 给 3s 让 pending 请求优雅退出…");
+    }
+    // 兜底：不管有没有服务，都杀进程（防止有人绕过服务直接双击 nginx.exe）
+    parts.push("taskkill /f /im nginx.exe 2>nul".to_string());
+    parts.push("ping -n 2 127.0.0.1 >nul".to_string());
+    if svc_exists {
+        parts.push(format!("sc delete {svc}"));
+    }
+    parts.push(format!("rmdir /s /q \"{install_dir}\""));
+
+    let script = parts.join(" & ");
+    state.log("请在 UAC 弹窗中点击「是」…");
+    let run = tokio::task::spawn_blocking(move || runas_wait("cmd.exe", &format!("/c {script}"))).await;
+    match run {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => state.log(format!("清理命令返回：{e}（将以实际状态复核）")),
+        Err(e) => {
+            finish(state, env_cache, false, format!("卸载任务异常：{e}")).await;
+            return;
+        }
+    }
+
+    // ===== 复核 =====
+    state.patch(|j| j.stage = "verify".into());
+    let (svc_gone, proc_gone, dir_gone) = {
+        let s = svc;
+        let id = install_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            // sc delete 是「标记删除」，句柄全释放才真正消失——轮询几次
+            let svc_g = {
+                let mut ok = !service_exists(s);
+                if !ok {
+                    for _ in 0..5 {
+                        if !service_exists(s) {
+                            ok = true;
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+                ok
+            };
+            let proc_g = std::process::Command::new("tasklist")
+                .args(["/fi", "imagename eq nginx.exe", "/fo", "csv", "/nh"])
+                .output()
+                .map(|o| {
+                    !String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .any(|l| l.contains("nginx.exe"))
+                })
+                .unwrap_or(true);
+            let dir_g = !std::path::Path::new(&id).exists();
+            (svc_g, proc_g, dir_g)
+        })
+        .await
+        .unwrap_or((true, true, true))
+    };
+
+    if svc_gone && proc_gone && dir_gone {
+        state.log("卸载完成：服务已注销，进程已清除，目录已删除");
+        state.log("请点击「重新检查」刷新环境状态");
+        finish(state, env_cache, true, String::new()).await;
+    } else {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!(
+                "卸载未完成：服务 {}，进程 {}，目录 {}（可能 UAC 被取消或目录仍被占用）——请重试或手动处理",
+                if svc_gone { "已注销" } else { "仍存在" },
+                if proc_gone { "已清除" } else { "仍存在" },
                 if dir_gone { "已删除" } else { "仍保留" }
             ),
         )
