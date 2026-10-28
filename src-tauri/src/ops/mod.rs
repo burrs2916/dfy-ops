@@ -9,6 +9,7 @@ pub mod watchdog;
 pub mod environment;
 pub mod env_repair;
 pub mod external_config;
+pub mod nginx_config;
 pub mod ai;
 pub mod aimodels;
 pub mod appsettings;

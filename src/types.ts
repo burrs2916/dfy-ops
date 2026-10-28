@@ -280,6 +280,17 @@ export interface ExternalConfigWriteResult {
   error?: string;
 }
 
+/** Nginx 反向代理配置可视化运维字段（conf/nginx.conf 指令级读写） */
+export interface NginxConfig {
+  listenPort: string;
+  serverName: string;
+  frontendRoot: string;
+  backendHost: string;
+  backendPort: string;
+  accessLog: string;
+  errorLog: string;
+}
+
 /** POST /api/env/repair/uninstall 启动结果 */
 export interface GenericUninstallStart {
   ok: boolean;

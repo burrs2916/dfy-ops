@@ -756,13 +756,32 @@ fn backend_install_dir(state: &AppState, def: &ServiceDef) -> std::path::PathBuf
     }
 }
 
-/// 读取云端 Java 服务的外部化配置（Spring Boot 2.4+ config/ 目录覆盖机制）。
-/// 文件不存在时 exists=false 返回模板指引——部署目录尚未初始化外部配置。
+/// 读取服务配置（dfy-backend → external_config，nginx → nginx_config）。
 pub async fn external_config_get(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
+    if def.id == "nginx" {
+        let install_dir = def.install_dir.clone();
+        let cfg = blocking(move || crate::ops::nginx_config::read(std::path::Path::new(&install_dir))).await;
+        let path = crate::ops::nginx_config::config_path(std::path::Path::new(&def.install_dir));
+        return Ok(Json(match cfg {
+            Ok(Some(c)) => serde_json::json!({
+                "ok": true,
+                "exists": true,
+                "configPath": path.display().to_string(),
+                "config": c,
+            }),
+            Ok(None) => serde_json::json!({
+                "ok": true,
+                "exists": false,
+                "configPath": path.display().to_string(),
+                "hint": "nginx.conf 不存在：请先通过资源目录安装 Nginx（nginx zip）。",
+            }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e }),
+        }));
+    }
     let install_dir = backend_install_dir(&state, def);
     let path = crate::ops::external_config::config_path(&install_dir);
     let cfg = blocking(move || crate::ops::external_config::read(&install_dir)).await;
@@ -783,16 +802,35 @@ pub async fn external_config_get(
     }
 }
 
-/// 更新云端服务外部化配置（端口/MySQL/Redis/VerneMQ 连接），原子写回。
-/// 修改后需重启服务生效。
+/// 更新服务配置（dfy-backend → external_config，nginx → nginx_config）。
 pub async fn external_config_update(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(body): Json<crate::ops::external_config::ExternalConfig>,
+    Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
+    if def.id == "nginx" {
+        let cfg: crate::ops::nginx_config::NginxConfig = match serde_json::from_value(body) {
+            Ok(c) => c,
+            Err(e) => return Ok(Json(serde_json::json!({ "ok": false, "error": format!("配置格式错误：{e}") }))),
+        };
+        let install_dir = def.install_dir.clone();
+        let written = blocking(move || crate::ops::nginx_config::write(std::path::Path::new(&install_dir), &cfg)).await;
+        return Ok(Json(match written {
+            Ok(p) => serde_json::json!({
+                "ok": true,
+                "configPath": p.display().to_string(),
+                "hint": "已写入 nginx.conf。改完配置需要 nginx 重新加载（在服务运维面板点「重载」或先停后启）。",
+            }),
+            Err(e) => serde_json::json!({ "ok": false, "error": e }),
+        }));
+    }
+    let cfg: crate::ops::external_config::ExternalConfig = match serde_json::from_value(body) {
+        Ok(c) => c,
+        Err(e) => return Ok(Json(serde_json::json!({ "ok": false, "error": format!("配置格式错误：{e}") }))),
+    };
     let install_dir = backend_install_dir(&state, def);
-    let written = blocking(move || crate::ops::external_config::write(&install_dir, &body)).await;
+    let written = blocking(move || crate::ops::external_config::write(&install_dir, &cfg)).await;
     match written {
         Ok(p) => Ok(Json(serde_json::json!({
             "ok": true,
