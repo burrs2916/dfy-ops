@@ -20,7 +20,7 @@ import StorageIcon from "@mui/icons-material/Storage";
 import BoltIcon from "@mui/icons-material/Bolt";
 import SettingsInputAntennaIcon from "@mui/icons-material/SettingsInputAntenna";
 import TuneOutlinedIcon from "@mui/icons-material/TuneOutlined";
-import HubsOutlinedIcon from "@mui/icons-material/HubsOutlined";
+import DnsOutlinedIcon from "@mui/icons-material/DnsOutlined";
 import ArrowForwardIcon from "@mui/icons-material/ArrowForward";
 import EditNoteOutlinedIcon from "@mui/icons-material/EditNoteOutlined";
 import { api } from "../api";
@@ -166,7 +166,7 @@ export default function ConfigCenterPanel({ onGotoOpsTab }: Props) {
       />
       <Grid container spacing={1.5} sx={{ mt: 0.25 }}>
         {/* --- Nginx --- */}
-        <Grid size={{ xs: 12, md: 6 }}>
+        <Grid item xs={12} md={6}>
           <Paper
             variant="outlined"
             sx={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}
@@ -229,7 +229,7 @@ export default function ConfigCenterPanel({ onGotoOpsTab }: Props) {
         </Grid>
 
         {/* --- DFY 后端 --- */}
-        <Grid size={{ xs: 12, md: 6 }}>
+        <Grid item xs={12} md={6}>
           <Paper
             variant="outlined"
             sx={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}
@@ -303,13 +303,13 @@ export default function ConfigCenterPanel({ onGotoOpsTab }: Props) {
 
       {/* ===== ② 中间件连接 ===== */}
       <Section
-        icon={<HubsOutlinedIcon fontSize="small" />}
+        icon={<DnsOutlinedIcon fontSize="small" />}
         title="中间件连接"
         hint="地址、端口、密码在各自管理页配置，从这里直达"
       />
       <Grid container spacing={1.5} sx={{ mt: 0.25 }}>
         {middlewareCards.map((m) => (
-          <Grid size={{ xs: 12, sm: 4 }} key={m.key}>
+          <Grid item xs={12} sm={4} key={m.key}>
             <Paper
               variant="outlined"
               sx={{ height: "100%", px: 2, py: 1.75, display: "flex", flexDirection: "column", gap: 0.5 }}
