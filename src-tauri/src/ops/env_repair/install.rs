@@ -486,6 +486,8 @@ pub fn start_zip_install(
     install_dir: String,
     env_cache: EnvCache,
     state: Arc<RepairState>,
+    procs: Arc<crate::ops::process::ProcManager>,
+    registry: Vec<crate::ops::registry::ServiceDef>,
 ) -> Result<(), String> {
     if service_spec(target).is_none() && target != "java" && target != "dfy-ui" {
         return Err(format!(
@@ -507,7 +509,7 @@ pub fn start_zip_install(
         job.logs.clear();
     }
     tokio::spawn(async move {
-        run_zip_install(state, target, zip_path, install_dir, env_cache).await;
+        run_zip_install(state, target, zip_path, install_dir, env_cache, procs, registry).await;
     });
     Ok(())
 }
@@ -520,6 +522,8 @@ pub fn start_zip_install(
     _install_dir: String,
     _env_cache: EnvCache,
     _state: Arc<RepairState>,
+    _procs: Arc<crate::ops::process::ProcManager>,
+    _registry: Vec<crate::ops::registry::ServiceDef>,
 ) -> Result<(), String> {
     Err(format!(
         "免安装版（zip）安装仅支持 Windows 目标机，{} 请手动安装",
@@ -883,6 +887,8 @@ async fn run_zip_install(
     zip_path: String,
     install_dir: String,
     env_cache: EnvCache,
+    procs: Arc<crate::ops::process::ProcManager>,
+    registry: Vec<crate::ops::registry::ServiceDef>,
 ) {
     let label = crate::ops::resource::target_label(target);
     let spec = service_spec(target);
@@ -1027,7 +1033,7 @@ async fn run_zip_install(
         .await;
         match v {
             Ok(Ok(())) => {
-                state.log("验证通过：nginx.exe + conf/nginx.conf + logs/ 均就绪，请到「服务运维」面板启动");
+                state.log("验证通过：nginx.exe + conf/nginx.conf + logs/ 均就绪");
                 // 探测基准明示：修复中心「已安装」判定就看这个路径下的 nginx.exe，
                 // 与上面「解压完成，程序目录」对照——两处不一致即状态不更新的根因
                 state.log(format!(
@@ -1041,6 +1047,42 @@ async fn run_zip_install(
                     "nginx",
                     &format!("基准 {}\\nginx.exe；home={}", install_dir, home),
                 );
+                // ===== 安装即运行：nginx 是常驻服务（前端静态托管 + API 反代），
+                // 装完立刻拉起，用户不需要再找「启动」按钮——修复中心的启停按钮
+                // 只用于停止/重启运维。80 端口被占时 spawn 日志回流会给出原因。
+                state.log("正在自动启动 Nginx（常驻服务，安装即运行）…");
+                let results = crate::ops::orchestrator::start_with_deps(&procs, &registry, "nginx");
+                for r in &results {
+                    if !r.ok {
+                        state.log(format!("自动启动失败：{}", r.error.clone().unwrap_or_default()));
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                let running = crate::ops::env_repair::nginx_running();
+                if running {
+                    state.log("Nginx 已自动启动并在后台运行（监听 80，反代 /admin-api/ → 48085）");
+                    debug_log::entry(
+                        debug_log::APP_SCOPE,
+                        "INFO",
+                        "install_autostart",
+                        "nginx",
+                        "自动启动成功（nginx.exe 常驻）",
+                    );
+                } else {
+                    let tail = std::fs::read_to_string(format!("{}\\logs\\platform-spawn.log", install_dir.trim_end_matches('\\')))
+                        .map(|t| t.lines().rev().take(5).rev().collect::<Vec<_>>().join(" | "))
+                        .unwrap_or_default();
+                    state.log(format!(
+                        "Nginx 自动启动未就绪（可能 80 端口被占用）。可在修复中心点「启动」重试，失败原因会直接显示。日志：{tail}"
+                    ));
+                    debug_log::entry(
+                        debug_log::APP_SCOPE,
+                        "WARN",
+                        "install_autostart",
+                        "nginx",
+                        &format!("自动启动未就绪；spawn 日志：{tail}"),
+                    );
+                }
                 finish(state, env_cache, true, String::new()).await;
             }
             Ok(Err(e)) => finish(state, env_cache, false, e).await,

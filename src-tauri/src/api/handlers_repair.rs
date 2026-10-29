@@ -146,6 +146,8 @@ pub async fn start_generic_repair(
             install_dir,
             state.env_cache.clone(),
             state.repair.clone(),
+            state.procs.clone(),
+            state.registry.clone(),
         )
     } else if let Some(f) = msi.clone() {
         crate::ops::env_repair::start_resource_install(
@@ -223,7 +225,7 @@ pub(crate) fn registry_install_dir(state: &AppState, target: &str) -> String {
 
 /// 按映像名探测进程是否在跑（tasklist；非 Windows 恒 false）。
 /// probe_target 与 service_action（nginx 进程启停复核）共用，保证状态同源闭环。
-fn image_running(img: &str) -> bool {
+pub fn image_running(img: &str) -> bool {
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("tasklist")
@@ -237,6 +239,49 @@ fn image_running(img: &str) -> bool {
         let _ = img;
         false
     }
+}
+
+/// 查 TCP 监听端口的占用者：netstat -ano 找 LISTENING 行 → 提取 PID →
+/// tasklist 反查进程名。查不到名字（如 PID 4 = System/http.sys）时返回占位说明。
+/// 仅 Windows；非 Windows 恒 None。
+#[cfg(target_os = "windows")]
+fn port_holder(port: u16) -> Option<(u32, String)> {
+    let out = std::process::Command::new("netstat")
+        .args(["-ano", "-p", "tcp"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let needle = format!(":{port}");
+    let mut pid: Option<u32> = None;
+    for line in text.lines() {
+        // 形如  TCP    0.0.0.0:80    0.0.0.0:0    LISTENING    1234
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() >= 5 && cols[3].eq_ignore_ascii_case("LISTENING") && cols[1].ends_with(&needle) {
+            if let Ok(p) = cols[4].parse::<u32>() {
+                pid = Some(p);
+                break;
+            }
+        }
+    }
+    let pid = pid?;
+    let name = std::process::Command::new("tasklist")
+        .args(["/fi", &format!("pid eq {pid}"), "/fo", "csv", "/nh"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .and_then(|s| {
+            s.lines()
+                .next()
+                .and_then(|l| l.split(',').next().map(|f| f.trim_matches('"').to_string()))
+        })
+        .filter(|n| !n.is_empty() && !n.contains("INFO:"))
+        .unwrap_or_else(|| "System（通常是 IIS/HTTP.sys，请在「启用或关闭 Windows 功能」中关闭 IIS，或改用其他端口）".into());
+    Some((pid, name))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn port_holder(_port: u16) -> Option<(u32, String)> {
+    None
 }
 
 /// 读 spawn 日志文件尾部（最多 25 行）——进程秒退时把 nginx/java 的报错
@@ -458,6 +503,23 @@ pub async fn service_action(
     if req.target == "nginx" {
         if !matches!(req.action.as_str(), "start" | "stop") {
             return Json(serde_json::json!({ "ok": false, "error": format!("未知操作：{}", req.action) }));
+        }
+        // 启动前置：80 端口占用检测（nginx bind 失败的头号原因）。
+        // 直接指出占用者（PID + 进程名），用户立刻知道改端口还是停程序。
+        if req.action == "start" {
+            if let Some((pid, who)) = blocking(|| port_holder(80)).await {
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    "ERROR",
+                    "service_action",
+                    "start_blocked",
+                    &format!("target=nginx 80 端口被 PID {pid} ({who}) 占用"),
+                );
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("80 端口已被 PID {pid}（{who}）占用，Nginx 无法监听。请停止占用程序，或在「运维中心 → 配置中心」把监听端口改为其他值后重试。")
+                }));
+            }
         }
         let verb = req.action.clone();
         let st = state.clone();

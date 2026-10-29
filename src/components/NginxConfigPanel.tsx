@@ -50,6 +50,8 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState<{ severity: "success" | "error"; text: string } | null>(null);
+  /** DFY 后端实际监听端口（外部配置 serverPort）——与反代目标不一致时提示联动 */
+  const [backendPort, setBackendPort] = useState("");
 
   const set = (k: keyof NginxConfig) => (e: React.ChangeEvent<HTMLInputElement>) => {
     setCfg((c) => (c ? { ...c, [k]: e.target.value } : c));
@@ -65,6 +67,15 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
       setHint(r.hint ?? "");
       // config 字段对 nginx 来说是 NginxConfig，但 JSON camelCase key 一致，Object.assign 可用
       setCfg((r.config as unknown as NginxConfig) ?? EMPTY);
+      // 端口绑定联动：读后端外部配置的实际 serverPort，供反代端口一致性提示。
+      // 后端未安装/读取失败静默忽略——联动只在两边都就绪时生效。
+      try {
+        const b = await api.getExternalConfig("dfy-backend");
+        const sp = (b.config as Record<string, string> | undefined)?.serverPort;
+        if (sp) setBackendPort(sp);
+      } catch {
+        /* 后端未安装，忽略 */
+      }
     } catch (e) {
       setMsg({ severity: "error", text: "读取 nginx.conf 失败：" + (e as Error).message });
     } finally {
@@ -83,10 +94,8 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
     try {
       const r: ExternalConfigWriteResult = await api.updateExternalConfig(serviceId, cfg);
       if (r.ok) {
-        setMsg({
-          severity: "success",
-          text: "已写入 nginx.conf。请在上方服务面板点「重载」或「重启」使配置生效。",
-        });
+        // hint 由后端生成：写入成功 + 自动热加载结果（运行中→立即生效；未运行→下次启动生效）
+        setMsg({ severity: "success", text: r.hint ?? "已写入 nginx.conf。" });
       } else {
         setMsg({ severity: "error", text: r.error ?? "写入失败" });
       }
@@ -96,6 +105,10 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
       setSaving(false);
     }
   };
+
+  // 端口绑定检查：反代目标端口 ≠ DFY 后端实际 serverPort（两者都非空时才比对）
+  const portMismatch =
+    !!backendPort && !!cfg?.backendPort && cfg.backendPort.trim() !== backendPort.trim();
 
   return (
     <Card variant="outlined">
@@ -129,6 +142,22 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
           </Alert>
         ) : cfg ? (
           <Stack spacing={2.5}>
+            {portMismatch && (
+              <Alert
+                severity="warning"
+                action={
+                  <Button
+                    size="small"
+                    onClick={() => setCfg((c) => (c ? { ...c, backendPort } : c))}
+                  >
+                    同步为 {backendPort}
+                  </Button>
+                }
+              >
+                反代目标端口（{cfg.backendPort}）与 DFY 后端实际监听端口（{backendPort}）不一致——
+                前端页面调 /admin-api/ 时会 502。点击右侧按钮对齐后保存。
+              </Alert>
+            )}
             <FieldGroup title="基础">
               <Stack direction="row" spacing={1.5}>
                 <TextField

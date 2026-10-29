@@ -65,6 +65,22 @@ impl RepairState {
     }
 }
 
+/// nginx.exe 是否在跑（tasklist；安装自动启动复核与运维层共用，状态同源）。
+#[cfg(target_os = "windows")]
+pub fn nginx_running() -> bool {
+    std::process::Command::new("tasklist")
+        .args(["/fi", "imagename eq nginx.exe", "/fo", "csv", "/nh"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("nginx.exe"))
+        .unwrap_or(false)
+}
+
+/// 非 Windows（dev 机）：无 nginx 进程托管，恒 false。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn nginx_running() -> bool {
+    false
+}
+
 /// 环境检查全量缓存类型（修复完成后清空，让下一次 /api/env 重新实测而非用 60s 旧缓存）。
 pub type EnvCache = Arc<Mutex<Option<(std::time::Instant, Vec<crate::ops::environment::ServiceEnvReport>)>>>;
 

@@ -478,28 +478,44 @@ export default function RepairCenter({
       actions = (
         <>
           {isSvc && !st.serviceRunning && (
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={starting ? <CircularProgress size={14} color="inherit" /> : <PlayArrow />}
-              disabled={repairDisabled || svcBusy}
-              onClick={() => void onServiceAction(t, "start")}
-              sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+            <Tooltip
+              title={
+                t === "nginx"
+                  ? "Nginx 是常驻服务：安装完成时已自动启动；此按钮用于因端口占用等原因启动失败后的重试。"
+                  : "启动平台托管的服务"
+              }
             >
-              启动
-            </Button>
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={starting ? <CircularProgress size={14} color="inherit" /> : <PlayArrow />}
+                disabled={repairDisabled || svcBusy}
+                onClick={() => void onServiceAction(t, "start")}
+                sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+              >
+                启动
+              </Button>
+            </Tooltip>
           )}
           {isSvc && st.serviceRunning && (
-            <Button
-              size="small"
-              variant="outlined"
-              startIcon={stopping ? <CircularProgress size={14} color="inherit" /> : <Pause />}
-              disabled={repairDisabled || svcBusy}
-              onClick={() => void onServiceAction(t, "stop")}
-              sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+            <Tooltip
+              title={
+                t === "nginx"
+                  ? "停止后前端页面与 /admin-api/ 接口将全部不可访问，请确认没有用户正在使用系统。"
+                  : "停止平台托管的服务"
+              }
             >
-              停止
-            </Button>
+              <Button
+                size="small"
+                variant="outlined"
+                startIcon={stopping ? <CircularProgress size={14} color="inherit" /> : <Pause />}
+                disabled={repairDisabled || svcBusy}
+                onClick={() => void onServiceAction(t, "stop")}
+                sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+              >
+                停止
+              </Button>
+            </Tooltip>
           )}
           {t === "mysql" && (
             <Tooltip title={st.serviceRunning ? "从本机 .sql 文件导入数据库" : "MySQL 未运行，请先启动服务"}>
