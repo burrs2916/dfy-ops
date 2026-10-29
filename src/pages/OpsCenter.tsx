@@ -1,21 +1,28 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Box, Stack, Tab, Tabs } from "@mui/material";
-import { BoltOutlined, DnsOutlined, StorageOutlined } from "@mui/icons-material";
+import {
+  BoltOutlined,
+  DnsOutlined,
+  SettingsOutlined,
+  StorageOutlined,
+} from "@mui/icons-material";
 import MySQLOps from "./MySQLOps";
 import RedisOps from "./RedisOps";
 import RemoteServicesPanel from "../components/RemoteServicesPanel";
+import ConfigCenterPanel from "../components/ConfigCenterPanel";
 import { PageHeader } from "../components/PageHeader";
 import { api } from "../api";
 import { useOpsStore } from "../store";
 
-type SubTab = "mysql" | "redis" | "deploy";
+type SubTab = "mysql" | "redis" | "deploy" | "config";
 
 /**
  * 运维中心：数据库、缓存中间件的在线运维域（与「修复中心」同级的顶级页签）。
  * 修复中心专注环境安装与修复；本页专注已就绪中间件的日常运维——
- * MySQL（表/数据/权限/SQL 查询）、Redis（远程连接管理），
- * 以及远程部署（VerneMQ/MinIO/Redis 的远程地址配置与网段发现）。
+ * MySQL（表/数据/权限/SQL 查询）、Redis（远程连接管理）、
+ * 远程部署（VerneMQ/MinIO/Redis 的远程地址配置与网段发现），
+ * 以及配置中心（所有组件配置文件路径 + 参数摘要 + 展开编辑的统一入口）。
  */
 export default function OpsCenter() {
   // 修复中心问题项「去连接配置」引导：落地即落在 Redis 管理，并自动弹出连接配置
@@ -25,7 +32,7 @@ export default function OpsCenter() {
   const [subTab, setSubTab] = useState<SubTab>(() => {
     if (redisConfigPending) return "redis";
     const t = searchParams.get("tab");
-    return t === "redis" || t === "deploy" ? t : "mysql";
+    return t === "redis" || t === "deploy" || t === "config" ? t : "mysql";
   });
 
   const changeTab = (v: SubTab) => {
@@ -65,6 +72,7 @@ export default function OpsCenter() {
         <Tab value="mysql" icon={<StorageOutlined fontSize="small" />} iconPosition="start" label="MySQL 管理" />
         <Tab value="redis" icon={<BoltOutlined fontSize="small" />} iconPosition="start" label="Redis 管理" />
         <Tab value="deploy" icon={<DnsOutlined fontSize="small" />} iconPosition="start" label="远程部署" />
+        <Tab value="config" icon={<SettingsOutlined fontSize="small" />} iconPosition="start" label="配置中心" />
       </Tabs>
 
       {/* ===== MySQL 管理：CSS 隐藏挂载，切页不丢状态 ===== */}
@@ -84,6 +92,11 @@ export default function OpsCenter() {
       {/* ===== 远程部署：虚拟机/远程主机上的第三方中间件地址集中配置 ===== */}
       <Box sx={{ flex: 1, minHeight: 0, display: subTab === "deploy" ? "flex" : "none", flexDirection: "column" }}>
         {subTab === "deploy" && <RemoteServicesPanel />}
+      </Box>
+
+      {/* ===== 配置中心：所有组件配置文件路径 + 参数摘要 + 展开编辑的统一入口 ===== */}
+      <Box sx={{ flex: 1, minHeight: 0, display: subTab === "config" ? "flex" : "none", flexDirection: "column" }}>
+        {subTab === "config" && <ConfigCenterPanel onGotoOpsTab={changeTab} />}
       </Box>
     </Stack>
   );

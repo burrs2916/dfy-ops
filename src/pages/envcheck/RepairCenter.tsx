@@ -770,7 +770,8 @@ export default function RepairCenter({
               环境修复
             </Typography>
             <Typography variant="body2" color="text.secondary">
-              识别资源目录中的离线安装包，一键安装 / 卸载 MySQL、JDK 等环境依赖
+              识别资源目录中的离线安装包，一键安装 / 卸载 MySQL、JDK 等环境依赖；
+              安装后的配置文件统一在「运维中心 → 配置中心」查看与编辑
             </Typography>
           </Box>
 
