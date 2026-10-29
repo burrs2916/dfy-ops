@@ -215,15 +215,36 @@ pub(crate) fn registry_install_dir(state: &AppState, target: &str) -> String {
         .unwrap_or_else(|| format!("C:\\services\\{target}"))
 }
 
+/// 限深递归查找关键文件（只列目录条目、不读文件内容，代价可控）。
+/// 用于兼容旧版安装留下的版本子目录布局（nginx-1.28.0/nginx.exe、dist/index.html）。
+fn find_key_shallow(dir: &std::path::Path, key: &str, depth: u8) -> bool {
+    if depth == 0 {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_file() && p.file_name().is_some_and(|n| n == key) {
+            return true;
+        }
+        if p.is_dir() && find_key_shallow(&p, key, depth - 1) {
+            return true;
+        }
+    }
+    false
+}
+
 /// 探测一个目标的安装痕迹。返回 (service_installed, dir_exists, service_running)。
 ///
 /// 探测策略分三种：
 /// 1. mysql/redis — 注册了 Windows 服务 → 查 sc query + install_dir + mysql MSI 兜底
 /// 2. java — MSI 条目或平台免安装目录（无 Windows 服务）
 /// 3. nginx — 有 service_spec 但**不注册 Windows 服务**（进程管理器托管启停），
-///    所以 service_running 恒 false，按 install_dir + nginx.exe 判已装
+///    按 install_dir 根 + nginx.exe 判已装（根上没有时限深搜子目录兜底）
 /// 4. dfy-backend/dfy-ui — 无 service_spec（jar 拷贝管线 / 静态目录），按
-///    install_dir + requires 文件（dfy-server.jar / index.html）判已装
+///    install_dir + 关键文件（dfy-server.jar / index.html）判已装（同样限深兜底）
 async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
     if target == "java" {
         let installed = blocking(|| {
@@ -253,7 +274,14 @@ async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
         let (dir_exists, key_file_exists, proc_running) = blocking(move || {
             let dir = std::path::Path::new(&install_dir);
             let dir_ok = dir.is_dir();
-            let key_ok = dir.join(&key_filename).is_file();
+            // 关键文件先查 install_dir 根（v0.2.26 起安装管线把内容搬平到根）；
+            // 根上没有 → 限深 3 层兜底搜一遍：旧版安装曾把文件埋进版本子目录
+            // （nginx-1.28.0/、dist/），装完了但探测查不到根上文件，导致
+            // 「待安装」永不更新。兜底让旧布局也能被如实识别为已安装。
+            let mut key_ok = dir.join(&key_filename).is_file();
+            if dir_ok && !key_ok {
+                key_ok = find_key_shallow(dir, &key_filename, 3);
+            }
             // tasklist 进程探测（Windows 可用；macOS/Linux 上恒 false 无副作用）
             let proc = if let Some(img) = proc_image {
                 #[cfg(target_os = "windows")]
@@ -1543,6 +1571,35 @@ pub async fn repair_exec(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 限深兜底查找：子目录里的关键文件（旧版安装布局）能被识别，超深不误报。
+    #[test]
+    fn find_key_shallow_finds_versioned_subdir() {
+        let base = std::env::temp_dir().join(format!("dfy-ops-fk-{}", std::process::id()));
+        // 旧 nginx 布局：install_dir/nginx-1.28.0/nginx.exe（深度 2）
+        let dir = base.join("nginx");
+        std::fs::create_dir_all(dir.join("nginx-1.28.0")).unwrap();
+        std::fs::write(dir.join("nginx-1.28.0/nginx.exe"), b"x").unwrap();
+        assert!(find_key_shallow(&dir, "nginx.exe", 3));
+
+        // 旧 dfy-ui 嵌套布局：install_dir/pkg/dist/index.html（深度 3）
+        let ui = base.join("ui");
+        std::fs::create_dir_all(ui.join("pkg/dist")).unwrap();
+        std::fs::write(ui.join("pkg/dist/index.html"), b"x").unwrap();
+        assert!(find_key_shallow(&ui, "index.html", 3));
+
+        // 深度 4 不该被搜到（限深防误伤）
+        let deep = base.join("deep");
+        std::fs::create_dir_all(deep.join("a/b/c")).unwrap();
+        std::fs::write(deep.join("a/b/c/nginx.exe"), b"x").unwrap();
+        assert!(!find_key_shallow(&deep, "nginx.exe", 3));
+
+        // 不存在的文件 + 不存在的目录都不报错
+        assert!(!find_key_shallow(&dir, "ghost.exe", 3));
+        assert!(!find_key_shallow(&base.join("nope"), "nginx.exe", 3));
+
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     /// AI 输出容错解析：干净 JSON / markdown 包裹 / 纯文本 / 缺 steps 各分支。
     #[test]
