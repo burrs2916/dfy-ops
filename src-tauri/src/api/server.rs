@@ -174,6 +174,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/services/:id/external-config",
             axum::routing::get(handlers::external_config_get).post(handlers::external_config_update),
         )
+        // 打开服务配置所在目录（文件管理器定位，只读便利操作）
+        .route(
+            "/api/services/:id/open-config-dir",
+            axum::routing::post(handlers::open_config_dir),
+        )
         // 环境修复：POST 启动（分级：无需修复/配置指引/自动安装），GET 轮询任务状态
         .route(
             "/api/env/repair",

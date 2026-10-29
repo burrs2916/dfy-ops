@@ -970,6 +970,59 @@ pub async fn external_config_update(
     }
 }
 
+/// 在系统文件管理器中打开服务配置文件所在目录（只读便利操作）。
+/// nginx → conf/（nginx.conf）；dfy-backend → config/（application-local.yaml）。
+/// 纯浏览不入 ops_events 审计，debug_log 留痕即可。
+pub async fn open_config_dir(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
+    let path = if def.id == "nginx" {
+        crate::ops::nginx_config::config_path(std::path::Path::new(&def.install_dir))
+    } else {
+        crate::ops::external_config::config_path(&backend_install_dir(&state, def))
+    };
+    let dir = match path.parent() {
+        Some(d) => d.to_path_buf(),
+        None => {
+            return Ok(Json(serde_json::json!({ "ok": false, "error": "配置路径异常：无父目录" })));
+        }
+    };
+    if !dir.exists() {
+        return Ok(Json(serde_json::json!({
+            "ok": false,
+            "error": format!("目录不存在：{}（服务可能未安装）", dir.display()),
+        })));
+    }
+    match open_in_file_manager(&dir) {
+        Ok(_) => {
+            crate::debug_log::entry(
+                crate::debug_log::APP_SCOPE,
+                "INFO",
+                "open_config_dir",
+                "open",
+                &format!("打开配置目录：{}", dir.display()),
+            );
+            Ok(Json(serde_json::json!({ "ok": true, "dir": dir.display().to_string() })))
+        }
+        Err(e) => {
+            crate::debug_log::entry(
+                crate::debug_log::APP_SCOPE,
+                "WARN",
+                "open_config_dir",
+                "open_failed",
+                &format!("打开配置目录 {} 失败：{e}", dir.display()),
+            );
+            Ok(Json(serde_json::json!({
+                "ok": false,
+                "error": format!("打开失败：{e}"),
+                "dir": dir.display().to_string(),
+            })))
+        }
+    }
+}
+
 /// 环境检查全量结果的缓存有效期：全量探测含多次子进程调用（java/-version 等），开销大。
 const ENV_CACHE_TTL: Duration = Duration::from_secs(60);
 

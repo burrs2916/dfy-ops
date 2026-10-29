@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Box,
@@ -9,6 +9,7 @@ import {
   CircularProgress,
   Divider,
   Grid,
+  IconButton,
   InputAdornment,
   Paper,
   Stack,
@@ -20,6 +21,7 @@ import CableIcon from "@mui/icons-material/Cable";
 import DnsIcon from "@mui/icons-material/Dns";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import DescriptionIcon from "@mui/icons-material/Description";
+import UndoIcon from "@mui/icons-material/Undo";
 import { api } from "../api";
 import type { NginxConfig, ExternalConfigResponse, ExternalConfigWriteResult } from "../types";
 import { MONO_STACK } from "../theme";
@@ -101,20 +103,38 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
   const [msg, setMsg] = useState<{ severity: "success" | "error"; text: string } | null>(null);
   /** DFY 后端实际监听端口（外部配置 serverPort）——与反代目标不一致时提示联动 */
   const [backendPort, setBackendPort] = useState("");
+  /** 已保存基线：dirty 判定 + 「重置」恢复到上次写盘的内容 */
+  const [saved, setSaved] = useState<NginxConfig | null>(null);
+  /** Nginx 运行状态：true=运行中（保存即热加载）/ false=已停止（下次启动生效）/ null=探测失败 */
+  const [running, setRunning] = useState<boolean | null>(null);
+  const [openingDir, setOpeningDir] = useState(false);
 
   const set = (k: keyof NginxConfig) => (e: React.ChangeEvent<HTMLInputElement>) => {
     setCfg((c) => (c ? { ...c, [k]: e.target.value } : c));
   };
 
+  /** 探测 Nginx 运行状态。失败静默：只影响状态角标，不阻塞配置编辑。 */
+  const refreshRunning = useCallback(async () => {
+    try {
+      const s = await api.refreshService(serviceId);
+      setRunning(s.status.running);
+    } catch {
+      setRunning(null);
+    }
+  }, [serviceId]);
+
   const load = useCallback(async () => {
     setLoading(true);
     setMsg(null);
+    void refreshRunning();
     try {
       const r: ExternalConfigResponse = await api.getExternalConfig(serviceId);
       setConfigPath(r.configPath);
       setExists(r.exists);
       setHint(r.hint ?? "");
-      setCfg((r.config as unknown as NginxConfig) ?? EMPTY);
+      const loaded = (r.config as unknown as NginxConfig) ?? EMPTY;
+      setCfg(loaded);
+      setSaved(loaded);
       // 端口绑定联动：读后端外部配置的实际 serverPort，供反代端口一致性提示。
       try {
         const b = await api.getExternalConfig("dfy-backend");
@@ -128,7 +148,7 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
     } finally {
       setLoading(false);
     }
-  }, [serviceId]);
+  }, [serviceId, refreshRunning]);
 
   useEffect(() => {
     void load();
@@ -141,7 +161,10 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
     try {
       const r: ExternalConfigWriteResult = await api.updateExternalConfig(serviceId, cfg);
       if (r.ok) {
+        // 写盘成功 → 当前表单即成为新基线；热加载结果顺带刷新运行状态角标
+        setSaved({ ...cfg });
         setMsg({ severity: "success", text: r.hint ?? "已写入 nginx.conf。" });
+        void refreshRunning();
       } else {
         setMsg({ severity: "error", text: r.error ?? "写入失败" });
       }
@@ -152,9 +175,58 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
     }
   };
 
+  /** 在系统文件管理器中打开配置目录（nginx.conf 所在目录，logs 同级）。 */
+  const openDir = async () => {
+    setOpeningDir(true);
+    try {
+      const r = await api.openConfigDir(serviceId);
+      if (!r.ok) setMsg({ severity: "error", text: r.error ?? "打开目录失败" });
+    } catch (e) {
+      setMsg({ severity: "error", text: "打开目录失败：" + (e as Error).message });
+    } finally {
+      setOpeningDir(false);
+    }
+  };
+
+  // ===== 校验 =====
+  // 端口合法性：空 = 保留 nginx.conf 原值（后端 apply 的语义），非空必须是 1–65535 整数
+  const portInvalid = (v: string | undefined) => {
+    const t = (v ?? "").trim();
+    if (!t) return false;
+    const n = Number(t);
+    return !Number.isInteger(n) || n < 1 || n > 65535;
+  };
+  const listenPortT = cfg?.listenPort.trim() ?? "";
+  const backendHostT = cfg?.backendHost.trim() ?? "";
+  const backendPortT = cfg?.backendPort.trim() ?? "";
+  // 同机端口占用：反代目标在本机（回环/默认原值）且监听端口 == 反代端口时，
+  // nginx 与 Java 抢同一端口必然有一个起不来——面板里唯一必须拦下的硬错误
+  const sameMachine =
+    backendHostT === "" || ["127.0.0.1", "localhost", "::1"].includes(backendHostT);
+  const portClash = sameMachine && listenPortT !== "" && listenPortT === backendPortT;
+  const listenErr = portInvalid(cfg?.listenPort)
+    ? "端口需为 1–65535"
+    : portClash
+      ? "与后端端口相同，会端口占用"
+      : undefined;
+  const backendErr = portInvalid(cfg?.backendPort)
+    ? "端口需为 1–65535"
+    : portClash
+      ? "与监听端口相同，会端口占用"
+      : undefined;
+  const hasErrors = !!(listenErr || backendErr);
+
   // 端口绑定检查：反代目标端口 ≠ DFY 后端实际 serverPort（两者都非空时才比对）
   const portMismatch =
     !!backendPort && !!cfg?.backendPort && cfg.backendPort.trim() !== backendPort.trim();
+
+  // dirty：与已保存基线比较（键序一致，JSON 对比即逐字段对比）
+  const dirty = useMemo(
+    () => !!cfg && !!saved && JSON.stringify(cfg) !== JSON.stringify(saved),
+    [cfg, saved],
+  );
+
+  const reset = () => setCfg(saved ? { ...saved } : null);
 
   const proxyPreview = `proxy_pass http://${cfg?.backendHost || "—"}:${cfg?.backendPort || "—"}/admin-api/;`;
 
@@ -196,12 +268,31 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
             )}
           </Box>
           {!loading && (
-            <Chip
-              size="small"
-              color={exists ? "success" : "default"}
-              variant="outlined"
-              label={exists ? "配置就绪" : "未安装 / 无配置"}
-            />
+            <Stack direction="row" alignItems="center" spacing={0.5}>
+              {exists && (
+                <Tooltip title="打开配置所在目录（nginx.conf，logs 同级）">
+                  <IconButton size="small" onClick={openDir} disabled={openingDir}>
+                    <FolderOpenIcon fontSize="small" />
+                  </IconButton>
+                </Tooltip>
+              )}
+              <Chip
+                size="small"
+                variant="outlined"
+                color={
+                  !exists ? "default" : running === true ? "success" : running === false ? "warning" : "default"
+                }
+                label={
+                  !exists
+                    ? "未安装 / 无配置"
+                    : running === true
+                      ? "运行中"
+                      : running === false
+                        ? "已停止"
+                        : "配置就绪"
+                }
+              />
+            </Stack>
           )}
         </Stack>
 
@@ -266,7 +357,8 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
                           onChange={set("listenPort")}
                           type="number"
                           sx={{ width: 140 }}
-                          helperText="默认 80"
+                          error={!!listenErr}
+                          helperText={listenErr ?? "默认 80；留空保留原值"}
                         />
                         <TextField
                           size="small"
@@ -338,7 +430,11 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
                           onChange={set("backendPort")}
                           type="number"
                           sx={{ width: 140 }}
-                          helperText={backendPort ? `后端实际端口 ${backendPort}` : "dfy-boot-base 默认 48085"}
+                          error={!!backendErr}
+                          helperText={
+                            backendErr ??
+                            (backendPort ? `后端实际端口 ${backendPort}` : "dfy-boot-base 默认 48085")
+                          }
                         />
                       </Stack>
                       <Box
@@ -394,7 +490,7 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
                   </Grid>
                 </Grid>
 
-                {/* 保存栏 */}
+                {/* 保存栏：状态随 dirty / 校验结果 / 运行状态联动 */}
                 <Paper
                   elevation={0}
                   sx={{
@@ -404,15 +500,44 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
                     px: 2,
                     py: 1.25,
                     border: "1px dashed",
-                    borderColor: "divider",
+                    borderColor: hasErrors ? "error.main" : dirty ? "warning.main" : "divider",
                     borderRadius: 1.5,
                   }}
                 >
-                  <DescriptionIcon fontSize="small" color="action" />
+                  <DescriptionIcon
+                    fontSize="small"
+                    color={hasErrors ? "error" : dirty ? "warning" : "action"}
+                  />
                   <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
-                    保存即写入 nginx.conf 并自动热加载（nginx 运行中立即生效；未运行则下次启动生效）
+                    {hasErrors
+                      ? "存在无效配置项（见红框提示），修正后才能保存"
+                      : running === false
+                        ? "Nginx 未运行：保存写入 nginx.conf，下次启动时生效"
+                        : "保存即写入 nginx.conf 并自动热加载（nginx 运行中立即生效）"}
                   </Typography>
-                  <Button variant="contained" onClick={save} disabled={saving} startIcon={saving ? <CircularProgress size={14} color="inherit" /> : undefined}>
+                  {dirty && !hasErrors && (
+                    <Chip
+                      size="small"
+                      color="warning"
+                      variant="outlined"
+                      label="有未保存更改"
+                      sx={{ height: 20 }}
+                    />
+                  )}
+                  <Button
+                    variant="outlined"
+                    onClick={reset}
+                    disabled={!dirty || saving}
+                    startIcon={<UndoIcon />}
+                  >
+                    重置
+                  </Button>
+                  <Button
+                    variant="contained"
+                    onClick={save}
+                    disabled={saving || !dirty || hasErrors}
+                    startIcon={saving ? <CircularProgress size={14} color="inherit" /> : undefined}
+                  >
                     {saving ? "保存中…" : "保存配置"}
                   </Button>
                 </Paper>
