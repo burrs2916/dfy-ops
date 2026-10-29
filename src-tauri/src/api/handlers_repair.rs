@@ -1508,6 +1508,18 @@ pub async fn uninstall(
             if input.remove_data { "含" } else { "保留" }
         )
     };
+    // 卸载请求明细落 debug.log：目标/是否删数据/安装目录一目了然。
+    // 「点了卸载没反应」时先看这行有没有出现——没出现 = 请求根本没到后端
+    debug_log::entry(
+        debug_log::APP_SCOPE,
+        "INFO",
+        "uninstall",
+        "dispatch",
+        &format!(
+            "target={target} remove_data={} install_dir={install_dir}",
+            input.remove_data
+        ),
+    );
     match crate::ops::env_repair::start_uninstall(
         target,
         input.remove_data,
@@ -1517,7 +1529,11 @@ pub async fn uninstall(
         state.repair.clone(),
     ) {
         Ok(()) => Json(serde_json::json!({"ok": true, "action": "uninstall", "message": message})),
-        Err(e) => Json(serde_json::json!({"ok": false, "error": e})),
+        Err(e) => {
+            // 发起失败（已有任务在执行等）：完成事件由 finish() 记，这里补「试过但没成」
+            crate::ops_events::record("user", target, "uninstall", false, &e);
+            Json(serde_json::json!({"ok": false, "error": e}))
+        }
     }
 }
 

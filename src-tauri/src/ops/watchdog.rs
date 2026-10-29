@@ -20,6 +20,10 @@ use std::time::{Duration, Instant};
 use crate::ops::process::ProcManager;
 use crate::ops::registry::ServiceDef;
 
+/// debug.log 里看门狗自动拉起的结构化 scope（与 Proc/App 并列，可按 scope 过滤）。
+/// 「没人动它怎么自己起来了」的困惑直接在这里给出答案：进程退出 → 看门狗拉起。
+const WATCHDOG_SCOPE: &str = "Watchdog";
+
 /// 同一服务两次自动拉起的最小间隔（crash-loop 冷却）。
 const RESTART_COOLDOWN: Duration = Duration::from_secs(30);
 
@@ -51,8 +55,29 @@ fn run_loop(procs: Arc<ProcManager>, defs: Vec<ServiceDef>, interval: Duration) 
             }
             tracing::warn!("受管常驻服务 {id} 进程已退出，自动拉起（保活）");
             last_attempt.insert(id.clone(), Instant::now());
-            if let Err(e) = procs.start(&id, &def.install_dir, &def.run_cmd) {
-                tracing::error!("服务 {id} 保活拉起失败: {e}");
+            // 拉起结果落 debug.log（scope=Watchdog）+ ops-events.jsonl（actor=watchdog）：
+            // start() 内部已有 Proc scope 日志，这里补「为什么会被拉起」的上下文与审计
+            match procs.start(&id, &def.install_dir, &def.run_cmd) {
+                Ok(()) => {
+                    crate::debug_log::entry(
+                        WATCHDOG_SCOPE,
+                        "WARN",
+                        "keepalive",
+                        "restart",
+                        &format!("服务 {id} 进程已退出，已自动拉起（run_cmd={}）", def.run_cmd),
+                    );
+                    crate::ops_events::record("watchdog", &id, "autostart", true, "进程退出，看门狗自动拉起");
+                }
+                Err(e) => {
+                    crate::debug_log::entry(
+                        WATCHDOG_SCOPE,
+                        "ERROR",
+                        "keepalive",
+                        "restart_failed",
+                        &format!("服务 {id} 自动拉起失败：{e}"),
+                    );
+                    crate::ops_events::record("watchdog", &id, "autostart", false, &format!("自动拉起失败：{e}"));
+                }
             }
         }
     }

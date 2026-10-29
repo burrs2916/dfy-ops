@@ -59,8 +59,18 @@ impl RepairState {
         }
     }
     /// 追加任务日志（修复中心进度区展示；上限 200 条自动截断）。
+    /// 同时镜像写 debug.log（scope=Repair）：job.logs 每次安装/卸载都会清空，
+    /// 不镜像的话「安装失败现场」在 UI 上几秒内就消失——用户传回 debug.log
+    /// 时必须能看到完整安装过程（解压/配置/注册服务/验证每一步）。
     pub fn log(&self, msg: impl Into<String>) {
         let msg = msg.into();
+        crate::debug_log::entry(
+            crate::debug_log::APP_SCOPE,
+            "INFO",
+            "repair_job",
+            "log",
+            &msg,
+        );
         self.patch(move |j| j.logs.push(msg));
     }
 }
@@ -94,9 +104,18 @@ pub const JDK_MANAGED_HOME: &str = "C:\\services\\jdk";
 pub const JDK_DEFAULT_MAJOR: u32 = 8;
 
 
-/// 收尾：更新任务终态 + 清空环境检查缓存（下一次 /api/env 全量实测）。
+/// 收尾：更新任务终态 + 完成事件落 ops-events.jsonl + 清空环境检查缓存。
+///
+/// 所有安装/卸载管线（zip/jar/msi/jdk 在线）都汇聚到这里——完成事件一处记录
+/// 即全管线覆盖。失败原因一并入事件（截 160 字），审计时间轴上「谁装了什么、
+/// 成没成、为什么失败」无需翻 debug.log。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 async fn finish(state: Arc<RepairState>, env_cache: EnvCache, ok: bool, error: String) {
+    // op/target 在 patch 前取快照（patch 不动这两个字段，但显式先取语义清晰）
+    let (op, target) = {
+        let job = state.job.lock().unwrap();
+        (job.op.clone(), job.target.clone())
+    };
     if !error.is_empty() {
         state.log(format!("失败：{error}"));
     }
@@ -104,8 +123,21 @@ async fn finish(state: Arc<RepairState>, env_cache: EnvCache, ok: bool, error: S
         j.running = false;
         j.stage = "done".into();
         j.ok = Some(ok);
-        j.error = if error.is_empty() { None } else { Some(error) };
+        j.error = if error.is_empty() { None } else { Some(error.clone()) };
     });
+    // 完成事件：actor 按操作类别区分——安装是管线行为（installer），
+    // 卸载由用户在界面发起（user）；action 直接用 op（install/uninstall）
+    if !op.is_empty() {
+        if let Some(t) = &target {
+            let detail = if error.is_empty() {
+                "任务完成".to_string()
+            } else {
+                format!("任务失败：{}", &error.chars().take(160).collect::<String>())
+            };
+            let actor = if op == "uninstall" { "user" } else { "installer" };
+            crate::ops_events::record(actor, t, &op, ok, &detail);
+        }
+    }
     let _ = tokio::task::spawn_blocking(move || {
         if let Ok(mut guard) = env_cache.lock() {
             *guard = None;

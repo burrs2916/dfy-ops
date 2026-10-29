@@ -779,7 +779,17 @@ pub async fn external_config_get(
                 "configPath": path.display().to_string(),
                 "hint": "nginx.conf 不存在：请先通过资源目录安装 Nginx（nginx zip）。",
             }),
-            Err(e) => serde_json::json!({ "ok": false, "error": e }),
+            Err(e) => {
+                // 读失败（权限/被占用/编码）：前端只见「读取失败」，这里留下根因
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "WARN",
+                    "nginx_config",
+                    "read_failed",
+                    &format!("读取 {} 失败：{e}", path.display()),
+                );
+                serde_json::json!({ "ok": false, "error": e })
+            }
         }));
     }
     let install_dir = backend_install_dir(&state, def);
@@ -798,7 +808,17 @@ pub async fn external_config_get(
             "configPath": path.display().to_string(),
             "hint": "外部配置不存在：服务使用 jar 内置默认配置。在部署目录创建 config/application-local.yaml 即可覆盖。",
         }))),
-        Err(e) => Ok(Json(serde_json::json!({ "ok": false, "error": e }))),
+        Err(e) => {
+            // 读失败（目录不存在但预期有/权限）：前端只见「读取失败」，这里留根因
+            crate::debug_log::entry(
+                crate::debug_log::APP_SCOPE,
+                "WARN",
+                "external_config",
+                "read_failed",
+                &format!("读取 {} 失败：{e}", path.display()),
+            );
+            Ok(Json(serde_json::json!({ "ok": false, "error": e })))
+        }
     }
 }
 
@@ -812,8 +832,23 @@ pub async fn external_config_update(
     if def.id == "nginx" {
         let cfg: crate::ops::nginx_config::NginxConfig = match serde_json::from_value(body) {
             Ok(c) => c,
-            Err(e) => return Ok(Json(serde_json::json!({ "ok": false, "error": format!("配置格式错误：{e}") }))),
+            Err(e) => {
+                // 前端表单正常不会发出坏 payload；出现即说明前后端结构失配，留根因
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "WARN",
+                    "nginx_config",
+                    "parse_failed",
+                    &format!("nginx 配置保存请求解析失败：{e}"),
+                );
+                return Ok(Json(serde_json::json!({ "ok": false, "error": format!("配置格式错误：{e}") })));
+            }
         };
+        // 审计摘要：写闭包会消费 cfg，先提取关键字段（均为转发拓扑，无敏感信息）
+        let summary = format!(
+            "server_name={}, listen={}, 反代 {}:{}",
+            cfg.server_name, cfg.listen_port, cfg.backend_host, cfg.backend_port
+        );
         let install_dir = def.install_dir.clone();
         let written = blocking(move || crate::ops::nginx_config::write(std::path::Path::new(&install_dir), &cfg)).await;
         // 写盘成功后自动热加载（nginx -s reload）：运行中立即生效，无需用户
@@ -853,6 +888,14 @@ pub async fn external_config_update(
                 "write_and_reload",
                 &format!("path={} reload_note={reload_note}", p.display()),
             );
+            // 配置修改事件：改了哪些转发字段 + 生效方式（热加载/待重启），审计可回溯
+            crate::ops_events::record(
+                "user",
+                "nginx",
+                "config_update",
+                true,
+                &format!("{summary}；{reload_note}"),
+            );
         }
         return Ok(Json(match written {
             Ok(p) => serde_json::json!({
@@ -860,22 +903,70 @@ pub async fn external_config_update(
                 "configPath": p.display().to_string(),
                 "hint": format!("已写入 nginx.conf。{reload_note}"),
             }),
-            Err(e) => serde_json::json!({ "ok": false, "error": e }),
+            Err(e) => {
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "ERROR",
+                    "nginx_config",
+                    "write_failed",
+                    &format!("写入 nginx.conf 失败（{summary}）：{e}"),
+                );
+                crate::ops_events::record("user", "nginx", "config_update", false, &format!("{summary}：{e}"));
+                serde_json::json!({ "ok": false, "error": e })
+            }
         }));
     }
     let cfg: crate::ops::external_config::ExternalConfig = match serde_json::from_value(body) {
         Ok(c) => c,
-        Err(e) => return Ok(Json(serde_json::json!({ "ok": false, "error": format!("配置格式错误：{e}") }))),
+        Err(e) => {
+            crate::debug_log::entry(
+                crate::debug_log::APP_SCOPE,
+                "WARN",
+                "external_config",
+                "parse_failed",
+                &format!("dfy-backend 外部配置保存请求解析失败：{e}"),
+            );
+            return Ok(Json(serde_json::json!({ "ok": false, "error": format!("配置格式错误：{e}") })));
+        }
     };
+    // 审计摘要：只取非敏感字段——连接串/密码一律不入日志（application-local.yaml
+    // 里有 MySQL/Redis/VerneMQ 明文凭据，审计文件可能被截图传阅）
+    let summary = format!("serverPort={}", cfg.server_port);
     let install_dir = backend_install_dir(&state, def);
     let written = blocking(move || crate::ops::external_config::write(&install_dir, &cfg)).await;
     match written {
-        Ok(p) => Ok(Json(serde_json::json!({
-            "ok": true,
-            "configPath": p.display().to_string(),
-            "hint": "已写入。重启服务后生效。",
-        }))),
-        Err(e) => Ok(Json(serde_json::json!({ "ok": false, "error": e }))),
+        Ok(p) => {
+            crate::debug_log::entry(
+                crate::debug_log::APP_SCOPE,
+                "INFO",
+                "external_config",
+                "write",
+                &format!("dfy-backend 外部配置已写入 {}（{summary}）", p.display()),
+            );
+            crate::ops_events::record(
+                "user",
+                "dfy-backend",
+                "config_update",
+                true,
+                &format!("{summary}，已写入 {}，重启服务后生效", p.display()),
+            );
+            Ok(Json(serde_json::json!({
+                "ok": true,
+                "configPath": p.display().to_string(),
+                "hint": "已写入。重启服务后生效。",
+            })))
+        }
+        Err(e) => {
+            crate::debug_log::entry(
+                crate::debug_log::APP_SCOPE,
+                "ERROR",
+                "external_config",
+                "write_failed",
+                &format!("dfy-backend 外部配置写入失败（{summary}）：{e}"),
+            );
+            crate::ops_events::record("user", "dfy-backend", "config_update", false, &format!("{summary}：{e}"));
+            Ok(Json(serde_json::json!({ "ok": false, "error": e })))
+        }
     }
 }
 

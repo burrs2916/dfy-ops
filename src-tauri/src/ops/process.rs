@@ -156,6 +156,13 @@ impl ProcManager {
     pub fn stop(&self, id: &str) -> std::io::Result<()> {
         let mut map = self.children.lock().unwrap();
         if let Some(mut child) = map.remove(id) {
+            crate::debug_log::entry(
+                PROC_SCOPE,
+                "INFO",
+                "stop",
+                "kill_tree",
+                &format!("id={id} pid={}（杀整个进程树）", child.id()),
+            );
             // 显式停止：保活看门狗不再自动拉起，直到下一次显式 start
             self.suppressed
                 .lock()
@@ -165,11 +172,25 @@ impl ProcManager {
             {
                 use std::os::windows::process::CommandExt;
                 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-                let _ = Command::new("taskkill")
+                let out = Command::new("taskkill")
                     .args(["/PID", &child.id().to_string(), "/T", "/F"])
                     .creation_flags(CREATE_NO_WINDOW)
-                    .stderr(Stdio::null())
-                    .status();
+                    .output();
+                let note = match &out {
+                    Ok(o) if o.status.success() => "taskkill 成功".to_string(),
+                    Ok(o) => format!(
+                        "taskkill 非零退出：{}",
+                        String::from_utf8_lossy(&o.stderr).trim().chars().take(120).collect::<String>()
+                    ),
+                    Err(e) => format!("taskkill 调用失败：{e}"),
+                };
+                crate::debug_log::entry(
+                    PROC_SCOPE,
+                    if out.as_ref().map(|o| o.status.success()).unwrap_or(false) { "INFO" } else { "WARN" },
+                    "stop",
+                    "taskkill",
+                    &format!("id={id} {note}"),
+                );
             }
             #[cfg(unix)]
             {
@@ -184,7 +205,17 @@ impl ProcManager {
             }
             // 兜底：确保本进程句柄对应的直接子进程被结束并回收
             let _ = child.kill();
-            let _ = child.wait();
+            let waited = child.wait();
+            crate::debug_log::entry(
+                PROC_SCOPE,
+                if waited.is_ok() { "INFO" } else { "WARN" },
+                "stop",
+                "done",
+                &format!(
+                    "id={id} 句柄回收{}",
+                    waited.map(|s| format!("exit={}", s.code().unwrap_or(-1))).unwrap_or_else(|e| format!("失败：{e}"))
+                ),
+            );
         }
         Ok(())
     }
