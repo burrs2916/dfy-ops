@@ -61,7 +61,7 @@ export default function OpsCenter() {
     <Stack spacing={2} sx={{ height: "100%", minHeight: 0 }}>
       <PageHeader
         title="运维中心"
-        description="MySQL 与 Redis 的在线管理：表/数据/权限/SQL 查询、Key 浏览与 TTL 运维；远程部署集中配置虚拟机中间件地址"
+        description="MySQL 与 Redis 的在线管理、远程中间件地址配置；「配置中心」集中查看/编辑所有组件配置文件"
       />
 
       <Tabs
