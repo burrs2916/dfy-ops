@@ -1070,7 +1070,11 @@ async fn run_zip_install(
                     );
                 } else {
                     let tail = std::fs::read_to_string(format!("{}\\logs\\platform-spawn.log", install_dir.trim_end_matches('\\')))
-                        .map(|t| t.lines().rev().take(5).rev().collect::<Vec<_>>().join(" | "))
+                        .map(|t| {
+                            let ls: Vec<&str> = t.lines().collect();
+                            let start = ls.len().saturating_sub(5);
+                            ls[start..].join(" | ")
+                        })
                         .unwrap_or_default();
                     state.log(format!(
                         "Nginx 自动启动未就绪（可能 80 端口被占用）。可在修复中心点「启动」重试，失败原因会直接显示。日志：{tail}"

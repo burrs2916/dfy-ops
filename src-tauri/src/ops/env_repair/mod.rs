@@ -76,7 +76,8 @@ pub fn nginx_running() -> bool {
 }
 
 /// 非 Windows（dev 机）：无 nginx 进程托管，恒 false。
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[cfg(not(target_os = "windows"))]
+#[allow(dead_code)]
 pub fn nginx_running() -> bool {
     false
 }
