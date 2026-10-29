@@ -1,6 +1,7 @@
 mod api;
 mod debug_log;
 mod ops;
+pub mod ops_events;
 
 #[cfg(test)]
 mod contract_sync;
@@ -108,6 +109,11 @@ pub fn run() {
             // 但 data_local_dir（%LOCALAPPDATA%）一定能写。
             let paths = resolve_debug_log_paths();
             debug_log::init_paths(paths.clone());
+            // 运维事件审计（ops-events.jsonl）：与 debug.log 第一优先路径同目录，
+            // 启停/安装/卸载事件全部留痕，界面可查
+            if let Some(first) = paths.first() {
+                ops_events::init_path(first.parent().map(|d| d.to_path_buf()).unwrap_or_else(|| first.clone()));
+            }
             // 在 tracing 里打出所有路径，用户从 stdout 就能看到写哪了
             for (i, p) in paths.iter().enumerate() {
                 tracing::info!("[debug.log] 路径 {}：{}", i + 1, p.display());

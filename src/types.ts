@@ -280,6 +280,16 @@ export interface ExternalConfigWriteResult {
   error?: string;
 }
 
+/** 运维操作事件（启停/安装/卸载审计，ops-events.jsonl） */
+export interface OpsEventItem {
+  ts: string;
+  actor: string;
+  target: string;
+  action: string;
+  ok: boolean;
+  detail: string;
+}
+
 /** Nginx 反向代理配置可视化运维字段（conf/nginx.conf 指令级读写） */
 export interface NginxConfig {
   listenPort: string;

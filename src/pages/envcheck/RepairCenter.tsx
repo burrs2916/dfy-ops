@@ -52,6 +52,7 @@ import type { EnvCheckItem, RepairPlan, ResourceScan, UninstallTargetStatus } fr
 import { MONO_STACK } from "../../theme";
 import EmptyBlock from "./EmptyBlock";
 import StatusDot from "./StatusDot";
+import OpsEventTimeline from "../../components/OpsEventTimeline";
 import {
   CONVENTION_DIR,
   FIXED_REMOTE,
@@ -114,6 +115,8 @@ export default function RepairCenter({
   });
   // AI 方案「复制全部」的瞬时反馈
   const [planCopied, setPlanCopied] = useState(false);
+  // 启停事件时间轴刷新键：onServiceAction / 安装完成后递增
+  const [eventRefresh, setEventRefresh] = useState(0);
   // 安装痕迹首次探测中（Windows 上 sc/注册表扫描需 1-2 秒，先如实显示加载态）
   const [probing, setProbing] = useState(true);
   // 探测请求本身失败（后端未启动等）：与「未安装」区分开，避免误导一键安装
@@ -172,6 +175,8 @@ export default function RepairCenter({
   useEffect(() => {
     if (repairRunning) return; // 任务进行中不探（结束时会再刷）
     probeStatus();
+    // 安装/卸载等任务结束 → 事件时间轴同步刷新（自动启动等 installer 事件已留痕）
+    setEventRefresh((k) => k + 1);
   }, [repairRunning, probeStatus]);
 
   /** 服务启停 / SQL 导入的进行中标记（按钮防抖 + loading） */
@@ -187,7 +192,8 @@ export default function RepairCenter({
     [onRepair],
   );
 
-  /** 启动 / 停止平台服务（MySQL80、Redis；net start/stop + UAC 确认），完成后即时重探 */
+  /** 启动 / 停止平台服务（MySQL80、Redis；net start/stop + UAC 确认），完成后即时重探；
+   *  同时递增 eventRefresh 让「启停事件」时间轴重取（操作已留痕） */
   const onServiceAction = useCallback(
     async (target: string, action: "start" | "stop") => {
       setBusyOps(`${target}:${action}`);
@@ -203,6 +209,7 @@ export default function RepairCenter({
       } finally {
         setBusyOps(null);
         probeStatus();
+        setEventRefresh((k) => k + 1);
       }
     },
     [probeStatus],
@@ -900,6 +907,7 @@ export default function RepairCenter({
                     ) : (
                       installedList.map((t) => renderCard(t))
                     )}
+                    <OpsEventTimeline refreshKey={eventRefresh} />
                   </Stack>
                 )}
 

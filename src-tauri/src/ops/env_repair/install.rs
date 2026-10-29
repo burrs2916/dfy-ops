@@ -1061,6 +1061,13 @@ async fn run_zip_install(
                 let running = crate::ops::env_repair::nginx_running();
                 if running {
                     state.log("Nginx 已自动启动并在后台运行（监听 80，反代 /admin-api/ → 48085）");
+                    crate::ops_events::record(
+                        "installer",
+                        "nginx",
+                        "autostart",
+                        true,
+                        "安装完成自动启动（常驻服务，监听 80）",
+                    );
                     debug_log::entry(
                         debug_log::APP_SCOPE,
                         "INFO",
@@ -1079,6 +1086,13 @@ async fn run_zip_install(
                     state.log(format!(
                         "Nginx 自动启动未就绪（可能 80 端口被占用）。可在修复中心点「启动」重试，失败原因会直接显示。日志：{tail}"
                     ));
+                    crate::ops_events::record(
+                        "installer",
+                        "nginx",
+                        "autostart",
+                        false,
+                        &format!("自动启动未就绪（可能 80 端口被占用）。日志尾部：{tail}"),
+                    );
                     debug_log::entry(
                         debug_log::APP_SCOPE,
                         "WARN",

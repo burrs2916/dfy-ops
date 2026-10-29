@@ -9,7 +9,7 @@ use std::io::{BufRead, Read, Write};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
 
@@ -521,6 +521,7 @@ pub async fn service_action(
                 }));
             }
         }
+        let action_label = if req.action == "start" { "启动" } else { "停止" };
         let verb = req.action.clone();
         let st = state.clone();
         let tgt = req.target.clone();
@@ -539,6 +540,13 @@ pub async fn service_action(
         })
         .await;
         if let Err(e) = res {
+            crate::ops_events::record(
+                "user",
+                "nginx",
+                &req.action,
+                false,
+                &format!("手动{action_label}失败：{e}"),
+            );
             crate::debug_log::entry(
                 crate::ops::process::PROC_SCOPE,
                 "ERROR",
@@ -572,6 +580,13 @@ pub async fn service_action(
                 spawn_log_tail(&format!("{}/logs/platform-spawn.log", install_dir.trim_end_matches('/')))
             })
             .await;
+            crate::ops_events::record(
+                "user",
+                "nginx",
+                "start",
+                false,
+                &format!("手动启动后进程立即退出。日志尾部：{tail}"),
+            );
             crate::debug_log::entry(
                 crate::ops::process::PROC_SCOPE,
                 "ERROR",
@@ -585,12 +600,26 @@ pub async fn service_action(
             }));
         }
         if req.action == "stop" && running {
+            crate::ops_events::record(
+                "user",
+                "nginx",
+                "stop",
+                false,
+                "停止命令已执行，但仍有 nginx.exe 进程残留",
+            );
             return Json(serde_json::json!({
                 "ok": false,
                 "error": "停止命令已执行，但仍有 nginx.exe 进程残留（可能是非平台拉起的实例），请到任务管理器确认"
             }));
         }
         let msg = if req.action == "start" { "Nginx 已启动" } else { "Nginx 已停止" };
+        crate::ops_events::record(
+            "user",
+            "nginx",
+            &req.action,
+            true,
+            &format!("手动{action_label}成功（80 端口监听状态：{running}）"),
+        );
         return Json(serde_json::json!({ "ok": true, "running": running, "message": msg }));
     }
     if !UNINSTALLABLE.contains(&req.target.as_str()) {
@@ -622,13 +651,50 @@ pub async fn service_action(
             // net stop 后 STATE 短暂过渡，以复核为准；失败给出明确原因
             if running == (verb == "start") {
                 state.repair.log(format!("{label} 完成"));
+                crate::ops_events::record(
+                    "user",
+                    &req.target,
+                    &req.action,
+                    true,
+                    &format!("{label}成功（Windows 服务 {}）", if running { "运行中" } else { "已停止" }),
+                );
                 Json(serde_json::json!({ "ok": true, "running": running, "message": format!("{label}成功") }))
             } else {
+                crate::ops_events::record(
+                    "user",
+                    &req.target,
+                    &req.action,
+                    false,
+                    &format!("{label}后状态未达预期（当前{}）", if running { "运行中" } else { "已停止" }),
+                );
                 Json(serde_json::json!({ "ok": false, "error": format!("{label}后状态未达预期（当前{}），可在服务管理器查看详情", if running { "运行中" } else { "已停止" }) }))
             }
         }
-        Err(e) => Json(serde_json::json!({ "ok": false, "error": format!("{label}失败：{e}") })),
+        Err(e) => {
+            crate::ops_events::record(
+                "user",
+                &req.target,
+                &req.action,
+                false,
+                &format!("{label}失败：{e}"),
+            );
+            Json(serde_json::json!({ "ok": false, "error": format!("{label}失败：{e}") }))
+        }
     }
+}
+
+/// GET /api/ops-events?limit=50 —— 运维操作事件（启停/安装/卸载审计），
+/// 修复中心「已安装」tab 的时间轴展示。最新在前。
+pub async fn ops_events_list(
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let limit = q
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(crate::ops_events::RECENT_LIMIT)
+        .min(crate::ops_events::RECENT_LIMIT);
+    let events = blocking(move || crate::ops_events::recent(limit)).await;
+    Json(serde_json::json!({ "events": events }))
 }
 
 #[derive(Deserialize)]

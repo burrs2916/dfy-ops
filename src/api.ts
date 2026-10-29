@@ -12,6 +12,7 @@ import type {
   EnvCheckItem,
   EnvRepairJob,
   EnvRepairStart,
+  OpsEventItem,
   GenericRepairStart,
   LogsResponse,
   NetworkAdapter,
@@ -530,6 +531,8 @@ export const api = {
   // 服务配置运维（dfy-backend → ExternalConfig，nginx → NginxConfig；后端 handler 按 service id 分流）
   getExternalConfig: (id: string) =>
     request<ExternalConfigResponse>(`/api/services/${id}/external-config`),
+  getOpsEvents: (limit = 50) =>
+    request<{ events: OpsEventItem[] }>(`/api/ops-events?limit=${limit}`),
   updateExternalConfig: (id: string, config: any) =>
     request<ExternalConfigWriteResult>(`/api/services/${id}/external-config`, {
       method: "POST",
