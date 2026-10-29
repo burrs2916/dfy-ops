@@ -5,20 +5,31 @@ import {
   Button,
   Card,
   CardContent,
+  Chip,
   CircularProgress,
+  Divider,
+  Grid,
+  InputAdornment,
+  Paper,
   Stack,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
+import CableIcon from "@mui/icons-material/Cable";
+import DnsIcon from "@mui/icons-material/Dns";
+import FolderOpenIcon from "@mui/icons-material/FolderOpen";
+import DescriptionIcon from "@mui/icons-material/Description";
 import { api } from "../api";
 import type { NginxConfig, ExternalConfigResponse, ExternalConfigWriteResult } from "../types";
+import { MONO_STACK } from "../theme";
 
 /**
  * Nginx 反向代理配置可视化运维面板。
  *
  * 直接读写 {install_dir}/conf/nginx.conf，字段覆盖 listen/server_name/root/proxy_pass/
- * 日志路径。保存后提示「重载 nginx」——nginx 支持 `nginx -s reload` 热加载，
- * 不需要中断服务（后续可暴露重载按钮）。
+ * 日志路径。保存后由后端自动 `nginx -s reload`（运行中立即生效）。
+ * 分组卡片布局：接入层 / 前端静态资源 / API 反代（实时预览）/ 日志（高级）。
  */
 
 const EMPTY: NginxConfig = {
@@ -31,14 +42,52 @@ const EMPTY: NginxConfig = {
   errorLog: "",
 };
 
-function FieldGroup({ title, children }: { title: string; children: React.ReactNode }) {
+/** 配置分组卡片：图标圆底 + 标题 + 一句话说明 + 字段区 */
+function ConfCard({
+  icon,
+  title,
+  desc,
+  badge,
+  children,
+}: {
+  icon: React.ReactNode;
+  title: string;
+  desc: string;
+  badge?: React.ReactNode;
+  children: React.ReactNode;
+}) {
   return (
-    <Box>
-      <Typography variant="body2" sx={{ color: "text.secondary", mb: 1 }}>
-        {title}
-      </Typography>
-      <Stack spacing={1.5}>{children}</Stack>
-    </Box>
+    <Paper variant="outlined" sx={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ px: 1.75, pt: 1.5 }}>
+        <Box
+          sx={{
+            width: 28,
+            height: 28,
+            borderRadius: 1,
+            display: "grid",
+            placeItems: "center",
+            bgcolor: "primary.main",
+            color: "primary.contrastText",
+            flexShrink: 0,
+          }}
+        >
+          {icon}
+        </Box>
+        <Box sx={{ flex: 1, minWidth: 0 }}>
+          <Typography variant="subtitle2" sx={{ fontWeight: 700, lineHeight: 1.2 }}>
+            {title}
+          </Typography>
+          <Typography variant="caption" color="text.secondary">
+            {desc}
+          </Typography>
+        </Box>
+        {badge}
+      </Stack>
+      <Divider sx={{ my: 1.25, mx: 1.75 }} />
+      <Stack spacing={1.5} sx={{ px: 1.75, pb: 1.75, flex: 1 }}>
+        {children}
+      </Stack>
+    </Paper>
   );
 }
 
@@ -65,10 +114,8 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
       setConfigPath(r.configPath);
       setExists(r.exists);
       setHint(r.hint ?? "");
-      // config 字段对 nginx 来说是 NginxConfig，但 JSON camelCase key 一致，Object.assign 可用
       setCfg((r.config as unknown as NginxConfig) ?? EMPTY);
       // 端口绑定联动：读后端外部配置的实际 serverPort，供反代端口一致性提示。
-      // 后端未安装/读取失败静默忽略——联动只在两边都就绪时生效。
       try {
         const b = await api.getExternalConfig("dfy-backend");
         const sp = (b.config as Record<string, string> | undefined)?.serverPort;
@@ -94,7 +141,6 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
     try {
       const r: ExternalConfigWriteResult = await api.updateExternalConfig(serviceId, cfg);
       if (r.ok) {
-        // hint 由后端生成：写入成功 + 自动热加载结果（运行中→立即生效；未运行→下次启动生效）
         setMsg({ severity: "success", text: r.hint ?? "已写入 nginx.conf。" });
       } else {
         setMsg({ severity: "error", text: r.error ?? "写入失败" });
@@ -110,153 +156,270 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
   const portMismatch =
     !!backendPort && !!cfg?.backendPort && cfg.backendPort.trim() !== backendPort.trim();
 
+  const proxyPreview = `proxy_pass http://${cfg?.backendHost || "—"}:${cfg?.backendPort || "—"}/admin-api/;`;
+
   return (
-    <Card variant="outlined">
+    <Card variant="outlined" sx={{ position: "relative" }}>
       <CardContent>
-        <Typography variant="subtitle2" sx={{ mb: 0.5 }}>
-          Nginx 反向代理 · 可视化配置
-        </Typography>
-        <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1.5 }}>
-          {configPath
-            ? `直接读写 nginx.conf 指令行，保留文件原始格式和未托管的自定义配置块。修改后 nginx -s reload 热加载即可生效。`
-            : ""}
-        </Typography>
+        <Stack direction="row" alignItems="center" spacing={1.25} sx={{ mb: 1.5 }}>
+          <Box
+            sx={{
+              width: 34,
+              height: 34,
+              borderRadius: 1.25,
+              display: "grid",
+              placeItems: "center",
+              bgcolor: "primary.main",
+              color: "primary.contrastText",
+            }}
+          >
+            <DnsIcon fontSize="small" />
+          </Box>
+          <Box sx={{ flex: 1, minWidth: 0 }}>
+            <Typography variant="subtitle1" sx={{ fontWeight: 800, lineHeight: 1.2 }}>
+              Nginx 反向代理
+            </Typography>
+            {loading ? (
+              <Typography variant="caption" color="text.secondary">
+                读取 nginx.conf…
+              </Typography>
+            ) : (
+              <Tooltip title={configPath}>
+                <Typography
+                  variant="caption"
+                  sx={{ color: "text.secondary", fontFamily: MONO_STACK, display: "block" }}
+                  noWrap
+                >
+                  {configPath}
+                </Typography>
+              </Tooltip>
+            )}
+          </Box>
+          {!loading && (
+            <Chip
+              size="small"
+              color={exists ? "success" : "default"}
+              variant="outlined"
+              label={exists ? "配置就绪" : "未安装 / 无配置"}
+            />
+          )}
+        </Stack>
 
         {loading ? (
-          <Stack direction="row" spacing={1} alignItems="center">
-            <CircularProgress size={16} />
+          <Stack alignItems="center" spacing={1} sx={{ py: 5 }}>
+            <CircularProgress size={24} />
             <Typography variant="body2" color="text.secondary">
-              读取 nginx.conf…
+              正在解析配置…
             </Typography>
           </Stack>
-        ) : msg ? (
-          <Alert severity={msg.severity} onClose={() => setMsg(null)}>
-            {msg.text}
-          </Alert>
-        ) : !exists ? (
-          <Alert severity="info">
-            {hint || "nginx.conf 不存在，请先安装 Nginx（资源目录 nginx zip）。"}
-            <Box component="code" sx={{ display: "block", mt: 1, fontSize: 12 }}>
-              {configPath}
-            </Box>
-          </Alert>
-        ) : cfg ? (
-          <Stack spacing={2.5}>
-            {portMismatch && (
-              <Alert
-                severity="warning"
-                action={
-                  <Button
-                    size="small"
-                    onClick={() => setCfg((c) => (c ? { ...c, backendPort } : c))}
-                  >
-                    同步为 {backendPort}
-                  </Button>
-                }
-              >
-                反代目标端口（{cfg.backendPort}）与 DFY 后端实际监听端口（{backendPort}）不一致——
-                前端页面调 /admin-api/ 时会 502。点击右侧按钮对齐后保存。
+        ) : (
+          <Stack spacing={2}>
+            {msg && (
+              <Alert severity={msg.severity} onClose={() => setMsg(null)}>
+                {msg.text}
               </Alert>
             )}
-            <FieldGroup title="基础">
-              <Stack direction="row" spacing={1.5}>
-                <TextField
-                  size="small"
-                  label="监听端口（listen）"
-                  value={cfg.listenPort}
-                  onChange={set("listenPort")}
-                  sx={{ maxWidth: 160 }}
-                  helperText="HTTP 默认 80；改完记得 nginx -s reload"
-                />
-                <TextField
-                  size="small"
-                  label="主机名（server_name）"
-                  value={cfg.serverName}
-                  onChange={set("serverName")}
-                  sx={{ maxWidth: 280 }}
-                  helperText="localhost / 域名 / _ 通配"
-                />
-              </Stack>
-            </FieldGroup>
+            {!exists ? (
+              <Alert severity="info">
+                {hint || "nginx.conf 不存在，请先安装 Nginx（修复中心 → 待安装 → 一键安装）。"}
+                <Box component="code" sx={{ display: "block", mt: 1, fontSize: 12, fontFamily: MONO_STACK }}>
+                  {configPath}
+                </Box>
+              </Alert>
+            ) : (
+              <>
+                {portMismatch && cfg && (
+                  <Alert
+                    severity="warning"
+                    action={
+                      <Button
+                        size="small"
+                        onClick={() => setCfg((c) => (c ? { ...c, backendPort } : c))}
+                      >
+                        同步为 {backendPort}
+                      </Button>
+                    }
+                  >
+                    反代目标端口（{cfg.backendPort}）与 DFY 后端实际监听端口（{backendPort}）不一致——
+                    前端页面调 /admin-api/ 时会 502。点击右侧按钮对齐后保存。
+                  </Alert>
+                )}
 
-            <FieldGroup title="前端静态资源">
-              <TextField
-                size="small"
-                label="前端根目录（root）"
-                value={cfg.frontendRoot}
-                onChange={set("frontendRoot")}
-                fullWidth
-                helperText="前端 dist/ 解压目标，如 C:/services/dfy-ui-admin-vue3-master"
-              />
-            </FieldGroup>
+                <Grid container spacing={2}>
+                  {/* ① 接入层 */}
+                  <Grid item xs={12} md={6}>
+                    <ConfCard
+                      icon={<DnsIcon sx={{ fontSize: 17 }} />}
+                      title="接入层"
+                      desc="浏览器访问入口"
+                      badge={
+                        cfg?.listenPort === "80" ? (
+                          <Chip size="small" label="HTTP 80" variant="outlined" sx={{ height: 20 }} />
+                        ) : undefined
+                      }
+                    >
+                      <Stack direction="row" spacing={1.5}>
+                        <TextField
+                          size="small"
+                          label="监听端口"
+                          value={cfg?.listenPort ?? ""}
+                          onChange={set("listenPort")}
+                          type="number"
+                          sx={{ width: 140 }}
+                          helperText="默认 80"
+                        />
+                        <TextField
+                          size="small"
+                          label="主机名（server_name）"
+                          value={cfg?.serverName ?? ""}
+                          onChange={set("serverName")}
+                          fullWidth
+                          helperText="localhost / 域名 / _ 通配"
+                        />
+                      </Stack>
+                      <Typography variant="caption" color="text.secondary" sx={{ fontFamily: MONO_STACK }}>
+                        访问入口：http://localhost:{cfg?.listenPort || "80"}/
+                      </Typography>
+                    </ConfCard>
+                  </Grid>
 
-            <FieldGroup title="后端 API 反代（/api/ → proxy_pass）">
-              <Stack direction="row" spacing={1.5}>
-                <TextField
-                  size="small"
-                  label="后端主机"
-                  value={cfg.backendHost}
-                  onChange={set("backendHost")}
-                  sx={{ maxWidth: 200 }}
-                  helperText="127.0.0.1 或内网 IP"
-                />
-                <TextField
-                  size="small"
-                  label="后端端口"
-                  value={cfg.backendPort}
-                  onChange={set("backendPort")}
-                  sx={{ maxWidth: 140 }}
-                  helperText="dfy-boot-base 默认 48085"
-                />
-              </Stack>
-              <Box
-                sx={{
-                  mt: 0.5,
-                  fontFamily: "monospace",
-                  fontSize: 12,
-                  bgcolor: "rgba(0,0,0,0.04)",
-                  p: "4px 10px",
-                  borderRadius: 1,
-                  color: "#1e3f66",
-                }}
-              >
-                proxy_pass http://{cfg.backendHost || "—"}:{cfg.backendPort || "—"}/api/;
-              </Box>
-            </FieldGroup>
+                  {/* ② 前端静态资源 */}
+                  <Grid item xs={12} md={6}>
+                    <ConfCard
+                      icon={<FolderOpenIcon sx={{ fontSize: 17 }} />}
+                      title="前端静态资源"
+                      desc="Vue3 dist 解压目录"
+                    >
+                      <TextField
+                        size="small"
+                        label="前端根目录（root）"
+                        value={cfg?.frontendRoot ?? ""}
+                        onChange={set("frontendRoot")}
+                        fullWidth
+                        InputProps={{
+                          sx: { fontFamily: MONO_STACK, fontSize: 13 },
+                        }}
+                        helperText="指向 index.html 所在目录，SPA 路由自动兜底"
+                      />
+                    </ConfCard>
+                  </Grid>
 
-            {/* 日志路径：高级，折叠 */}
-            <details style={{ marginTop: 8 }}>
-              <summary style={{ cursor: "pointer", fontSize: 12, color: "#6b7280", padding: "2px 0" }}>
-                高级 · 日志路径（一般不动）
-              </summary>
-              <Stack direction="row" spacing={1.5} sx={{ mt: 1 }}>
-                <TextField
-                  size="small"
-                  label="访问日志（access_log）"
-                  value={cfg.accessLog}
-                  onChange={set("accessLog")}
-                  sx={{ maxWidth: 400 }}
-                />
-                <TextField
-                  size="small"
-                  label="错误日志（error_log）"
-                  value={cfg.errorLog}
-                  onChange={set("errorLog")}
-                  sx={{ maxWidth: 400 }}
-                />
-              </Stack>
-            </details>
+                  {/* ③ API 反代 */}
+                  <Grid item xs={12}>
+                    <ConfCard
+                      icon={<CableIcon sx={{ fontSize: 17 }} />}
+                      title="后端 API 反代"
+                      desc="/admin-api/ 请求转发到 Spring Boot 服务"
+                      badge={
+                        portMismatch ? (
+                          <Chip size="small" color="warning" label="端口不一致" sx={{ height: 20 }} />
+                        ) : (
+                          <Chip size="small" color="success" label="端口一致" variant="outlined" sx={{ height: 20 }} />
+                        )
+                      }
+                    >
+                      <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5}>
+                        <TextField
+                          size="small"
+                          label="后端主机"
+                          value={cfg?.backendHost ?? ""}
+                          onChange={set("backendHost")}
+                          InputProps={{
+                            sx: { fontFamily: MONO_STACK, fontSize: 13 },
+                            startAdornment: <InputAdornment position="start">http://</InputAdornment>,
+                          }}
+                          sx={{ flex: 1 }}
+                          helperText="127.0.0.1 或内网 IP"
+                        />
+                        <TextField
+                          size="small"
+                          label="后端端口"
+                          value={cfg?.backendPort ?? ""}
+                          onChange={set("backendPort")}
+                          type="number"
+                          sx={{ width: 140 }}
+                          helperText={backendPort ? `后端实际端口 ${backendPort}` : "dfy-boot-base 默认 48085"}
+                        />
+                      </Stack>
+                      <Box
+                        sx={{
+                          fontFamily: MONO_STACK,
+                          fontSize: 12,
+                          bgcolor: "action.hover",
+                          px: 1.25,
+                          py: 0.75,
+                          borderRadius: 1,
+                          wordBreak: "break-all",
+                        }}
+                      >
+                        {proxyPreview}
+                      </Box>
+                    </ConfCard>
+                  </Grid>
 
-            <Stack direction="row" spacing={1.5} alignItems="center">
-              <Button variant="contained" onClick={save} disabled={saving}>
-                {saving ? "保存中…" : "保存配置"}
-              </Button>
-              <Typography variant="caption" color="text.secondary">
-                保存后请在上方面板点「重载」或「重启」使 nginx 重新加载配置
-              </Typography>
-            </Stack>
+                  {/* ④ 日志（高级，默认折叠） */}
+                  <Grid item xs={12}>
+                    <Paper variant="outlined" sx={{ px: 1.75, py: 1.25 }}>
+                      <details>
+                        <summary
+                          style={{
+                            cursor: "pointer",
+                            fontSize: 12,
+                            color: "#6b7280",
+                            userSelect: "none",
+                          }}
+                        >
+                          高级 · 日志路径（一般不用改）
+                        </summary>
+                        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mt: 1.25 }}>
+                          <TextField
+                            size="small"
+                            label="访问日志（access_log）"
+                            value={cfg?.accessLog ?? ""}
+                            onChange={set("accessLog")}
+                            fullWidth
+                            InputProps={{ sx: { fontFamily: MONO_STACK, fontSize: 13 } }}
+                          />
+                          <TextField
+                            size="small"
+                            label="错误日志（error_log）"
+                            value={cfg?.errorLog ?? ""}
+                            onChange={set("errorLog")}
+                            fullWidth
+                            InputProps={{ sx: { fontFamily: MONO_STACK, fontSize: 13 } }}
+                          />
+                        </Stack>
+                      </details>
+                    </Paper>
+                  </Grid>
+                </Grid>
+
+                {/* 保存栏 */}
+                <Paper
+                  elevation={0}
+                  sx={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 1.5,
+                    px: 2,
+                    py: 1.25,
+                    border: "1px dashed",
+                    borderColor: "divider",
+                    borderRadius: 1.5,
+                  }}
+                >
+                  <DescriptionIcon fontSize="small" color="action" />
+                  <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+                    保存即写入 nginx.conf 并自动热加载（nginx 运行中立即生效；未运行则下次启动生效）
+                  </Typography>
+                  <Button variant="contained" onClick={save} disabled={saving} startIcon={saving ? <CircularProgress size={14} color="inherit" /> : undefined}>
+                    {saving ? "保存中…" : "保存配置"}
+                  </Button>
+                </Paper>
+              </>
+            )}
           </Stack>
-        ) : null}
+        )}
       </CardContent>
     </Card>
   );

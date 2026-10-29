@@ -167,6 +167,9 @@ pub fn read(install_dir: &Path) -> Result<Option<NginxConfig>, String> {
 }
 
 /// 原子写回 nginx.conf：临时文件 + rename。
+/// 写回前执行 [`sanitize_pid`]：v0.2.29 之前生成的模板把 `pid` 写进了
+/// server 块，nginx 启动直接 [emerg] 拒载。保存任意配置都会顺带修复旧布局，
+/// 已装机器无需重装。
 pub fn write(install_dir: &Path, cfg: &NginxConfig) -> Result<PathBuf, String> {
     let path = config_path(install_dir);
     if !path.exists() {
@@ -176,11 +179,40 @@ pub fn write(install_dir: &Path, cfg: &NginxConfig) -> Result<PathBuf, String> {
         ));
     }
     let text = std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
-    let new_text = apply(&text, cfg);
+    let new_text = sanitize_pid(&apply(&text, cfg), install_dir);
     let tmp = path.with_extension("conf.tmp");
     std::fs::write(&tmp, &new_text).map_err(|e| format!("写入临时文件失败：{e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("替换 nginx.conf 失败：{e}"))?;
     Ok(path)
+}
+
+/// 修复历史模板的 `pid` 位置：pid 指令只允许出现在 main 上下文（文件顶部），
+/// 出现在 http{}/server{} 内会导致 nginx 拒绝启动。步骤：
+/// 1. 删除所有 `pid ...;` 行（含注释行内的误植）
+/// 2. 在首个 `worker_processes` 行后插入正确的 pid 行（找不到就插在 events 之前）
+pub fn sanitize_pid(text: &str, install_dir: &Path) -> String {
+    let home = install_dir.to_string_lossy().replace('\\', "/");
+    let correct = format!("pid        {home}/logs/nginx.pid;");
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim_start();
+        if t.starts_with("pid ") || t.starts_with("pid\t") {
+            continue; // 丢弃所有旧 pid 行（任何上下文）
+        }
+        out.push(line.to_string());
+        // main 上下文插入点：worker_processes 行之后（此时还没进任何块）
+        if t.starts_with("worker_processes") {
+            out.push(correct.clone());
+        }
+    }
+    // 模板异常（没有 worker_processes）也要保证 pid 在 main 区：插到最前
+    let joined = out.join("\n");
+    if !joined.contains(&correct) {
+        let mut lines = vec![correct];
+        lines.extend(out);
+        return lines.join("\n");
+    }
+    joined
 }
 
 #[cfg(test)]
@@ -274,6 +306,38 @@ http {
         assert_eq!(c.backend_port, "48086");
         // 未改字段保持原值
         assert_eq!(c.server_name, "localhost");
+    }
+
+    /// v0.2.29 之前的模板把 pid 写进 server 块（nginx [emerg] 拒载）——
+    /// sanitize 必须把它挪到 main 上下文顶部，其余内容原样保留。
+    #[test]
+    fn sanitize_pid_repairs_legacy_layout() {
+        let home = std::path::Path::new("C:/services/nginx");
+        let out = sanitize_pid(SAMPLE, home);
+        // 旧位置的 pid 行消失
+        assert!(!out.contains("pid        C:/services/nginx/logs/nginx.pid; }"));
+        let pid_lines: Vec<&str> = out
+            .lines()
+            .filter(|l| l.trim_start().starts_with("pid "))
+            .collect();
+        assert_eq!(pid_lines.len(), 1, "pid 应恰好出现一次: {out}");
+        // 唯一的 pid 行必须在 events { 之前（main 上下文）
+        let pid_idx = out.lines().position(|l| l.starts_with("pid ")).unwrap();
+        let events_idx = out.lines().position(|l| l.trim_start().starts_with("events")).unwrap();
+        assert!(pid_idx < events_idx, "pid 必须在 main 区: {out}");
+        // 其余指令原样
+        assert!(out.contains("worker_connections  1024;"));
+        assert!(out.contains("try_files $uri $uri/ /index.html;"));
+        assert!(out.contains("proxy_pass http://127.0.0.1:48085/admin-api/;"));
+    }
+
+    /// 新布局（pid 已在 main 区）sanitize 必须幂等——内容零变化。
+    #[test]
+    fn sanitize_pid_is_idempotent() {
+        let home = std::path::Path::new("C:/services/nginx");
+        let once = sanitize_pid(SAMPLE, home);
+        let twice = sanitize_pid(&once, home);
+        assert_eq!(once, twice, "二次修复应零变化");
     }
 
     #[test]

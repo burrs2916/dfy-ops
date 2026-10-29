@@ -428,6 +428,11 @@ fn build_nginx_conf(nginx_home: &str) -> String {
     format!(
         r#"worker_processes  1;
 
+# main 上下文：pid / error_log 只能放这里（放 server 块 nginx 会
+# 报 [emerg] "pid" directive is not allowed here 直接拒绝启动）
+error_log  {nginx_home}/logs/error.log;
+pid        {nginx_home}/logs/nginx.pid;
+
 events {{
     worker_connections  1024;
 }}
@@ -438,6 +443,8 @@ http {{
 
     sendfile        on;
     keepalive_timeout  65;
+
+    access_log {nginx_home}/logs/access.log;
 
     gzip on;
     gzip_types text/plain text/css application/json application/javascript text/xml application/xml text/javascript image/svg+xml;
@@ -463,10 +470,6 @@ http {{
             proxy_set_header X-Forwarded-Proto $scheme;
             proxy_read_timeout 120s;
         }}
-
-        error_log  {nginx_home}/logs/error.log;
-        access_log {nginx_home}/logs/access.log;
-        pid        {nginx_home}/logs/nginx.pid;
     }}
 }}
 "#

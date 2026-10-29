@@ -521,6 +521,44 @@ pub async fn service_action(
                 }));
             }
         }
+        // 启动前修复历史模板的 pid 位置（v0.2.29 之前生成的 conf 把 pid 写在
+        // server 块，nginx 拒载 [emerg]）。sanitize 幂等：新布局不变不写。
+        let nginx_dir = registry_install_dir(&state, "nginx");
+        let fixed = blocking(move || {
+            let conf = format!("{}/conf/nginx.conf", nginx_dir.trim_end_matches('/'));
+            let text = std::fs::read_to_string(&conf)
+                .map_err(|e| format!("读取 {} 失败：{e}", conf))?;
+            let fixed = crate::ops::nginx_config::sanitize_pid(&text, std::path::Path::new(nginx_dir.trim_end_matches('/')));
+            if fixed == text {
+                return Ok(false);
+            }
+            std::fs::write(&conf, &fixed)
+                .map(|_| true)
+                .map_err(|e| format!("写回 {} 失败：{e}", conf))
+        })
+        .await;
+        match fixed {
+            Ok(true) => {
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    "WARN",
+                    "service_action",
+                    "conf_repaired",
+                    "target=nginx 启动前修复了历史模板的 pid 指令位置（原 conf 会 [emerg] 拒载）",
+                );
+                state.repair.log("已自动修复 nginx.conf 的 pid 指令位置（历史模板缺陷）");
+            }
+            Err(e) => {
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    "ERROR",
+                    "service_action",
+                    "conf_repair_failed",
+                    &format!("target=nginx pid 位置修复失败：{e}"),
+                );
+            }
+            _ => {}
+        }
         let action_label = if req.action == "start" { "启动" } else { "停止" };
         let verb = req.action.clone();
         let st = state.clone();
