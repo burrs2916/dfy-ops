@@ -4,6 +4,9 @@ use std::io::Write;
 use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 
+/// debug.log 里平台托管进程启停的结构化 scope
+pub const PROC_SCOPE: &str = "Proc";
+
 /// run_cmd 中 `{java}` 占位符解析：只认环境变量——JAVA_HOME 指向的 java
 /// 优先，否则 `java`（PATH 语义）。与检测同口径：平台只支持安装版 JDK，
 /// 不再解析交付包内置 JRE。
@@ -94,13 +97,46 @@ impl ProcManager {
     /// 工作目录为 install_dir（相对路径命令如 `java -jar dfy-server/target/xxx.jar` 依赖它）。
     /// `{java}` 占位符在此统一解析为预置 JRE（exe 同级 resource/jre）——
     /// 检测与启动同源，绿色交付免安装。
+    ///
+    /// stdout/stderr 重定向到 `{install_dir}/logs/platform-spawn.log`（每次启动覆盖写）：
+    /// nginx 端口占用 / java 类找不到等「spawn 成功但进程秒退」的原因必须可见，
+    /// 否则修复中心点启动永远只能看到「已停止」而无从定位。
+    /// 同时写入 debug.log（scope=Proc），运行态复核由调用方完成。
     pub fn start(&self, id: &str, install_dir: &str, run_cmd: &str) -> std::io::Result<()> {
-        let mut map = self.children.lock().unwrap();
-        if map.contains_key(id) {
+        // 先用 is_running（内部 try_wait）复核：进程已死但句柄还挂在 map 里时
+        // 回收并继续 spawn——旧的 contains_key 短路会让「启动失败过一次」的服务
+        // 之后永远启动不起来（点启动静默跳过，状态一直「已停止」）。
+        if self.is_running(id) {
+            crate::debug_log::entry(
+                PROC_SCOPE,
+                "INFO",
+                "start",
+                "skip_running",
+                &format!("id={id} 已有存活进程，跳过重复启动"),
+            );
             return Ok(());
         }
         let resolved = resolve_java_placeholder(run_cmd);
-        let child = spawn_detached(install_dir, &resolved)?;
+        let log_path = std::path::Path::new(install_dir)
+            .join("logs")
+            .join("platform-spawn.log");
+        let log_str = log_path.to_string_lossy().to_string();
+        crate::debug_log::entry(
+            PROC_SCOPE,
+            "INFO",
+            "start",
+            "spawn",
+            &format!("id={id} cwd={install_dir} cmd={resolved} spawn_log={log_str}"),
+        );
+        let child = spawn_detached_logged(install_dir, &resolved, &log_str)?;
+        crate::debug_log::entry(
+            PROC_SCOPE,
+            "INFO",
+            "start",
+            "spawned",
+            &format!("id={id} pid={}", child.id()),
+        );
+        let mut map = self.children.lock().unwrap();
         map.insert(id.to_string(), child);
         // 显式启动解除保活抑制；并记录「平台拉起过」供看门狗接管
         self.suppressed.lock().unwrap().remove(id);
@@ -546,7 +582,9 @@ fn apply_cwd(command: &mut Command, install_dir: &str) {
     }
 }
 
-/// 按平台选择 shell 并以分离方式启动命令，丢弃全部输出。
+/// 按平台选择 shell 并以分离方式启动命令（start 统一走 [`spawn_detached_logged`]，
+/// 本函数保留给不需要输出捕获的调用方）。
+#[allow(dead_code)]
 fn spawn_detached(cwd: &str, cmd: &str) -> std::io::Result<Child> {
     let mut command = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
@@ -570,6 +608,39 @@ fn spawn_detached(cwd: &str, cmd: &str) -> std::io::Result<Child> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        .spawn()
+}
+
+/// 与 [`spawn_detached`] 相同，但 stdout+stderr 合并写入 `log_path`（覆盖写）。
+/// 用于平台托管服务的启动诊断：进程秒退时原因就在这个文件里。
+fn spawn_detached_logged(cwd: &str, cmd: &str, log_path: &str) -> std::io::Result<Child> {
+    if let Some(parent) = std::path::Path::new(log_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(log_path)?;
+    let mut command = if cfg!(target_os = "windows") {
+        let mut c = Command::new("cmd");
+        c.args(["/C", cmd]);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.args(["-c", cmd]);
+        c
+    };
+    apply_cwd(&mut command, cwd);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone()?))
+        .stderr(Stdio::from(log))
         .spawn()
 }
 

@@ -816,11 +816,49 @@ pub async fn external_config_update(
         };
         let install_dir = def.install_dir.clone();
         let written = blocking(move || crate::ops::nginx_config::write(std::path::Path::new(&install_dir), &cfg)).await;
+        // 写盘成功后自动热加载（nginx -s reload）：运行中立即生效，无需用户
+        // 手动去点重载——这就是「改了配置立刻看到效果」的闭环。nginx 没在跑时
+        // reload 必然失败，属预期，hint 里说明配置已在下次启动时生效。
+        let mut reload_note = String::new();
+        if let Ok(p) = &written {
+            let exe = std::path::Path::new(&def.install_dir).join("nginx.exe");
+            let prefix = def.install_dir.clone();
+            let reload = blocking(move || {
+                std::process::Command::new(&exe)
+                    .args(["-s", "reload", "-p", prefix.as_str()])
+                    .output()
+            })
+            .await;
+            match reload {
+                Ok(out) if out.status.success() => {
+                    reload_note = "已自动热加载（nginx -s reload），配置立即生效。".into();
+                }
+                Ok(out) => {
+                    let err = String::from_utf8_lossy(&out.stderr);
+                    reload_note = format!(
+                        "nginx 未在运行或热加载失败（{}），配置已写入，下次启动时生效。",
+                        err.trim().chars().take(160).collect::<String>()
+                    );
+                }
+                Err(e) => {
+                    reload_note = format!(
+                        "配置已写入；热加载调用失败（{e}），nginx 下次启动时生效。"
+                    );
+                }
+            }
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "INFO",
+                "nginx_config",
+                "write_and_reload",
+                &format!("path={} reload_note={reload_note}", p.display()),
+            );
+        }
         return Ok(Json(match written {
             Ok(p) => serde_json::json!({
                 "ok": true,
                 "configPath": p.display().to_string(),
-                "hint": "已写入 nginx.conf。改完配置需要 nginx 重新加载（在服务运维面板点「重载」或先停后启）。",
+                "hint": format!("已写入 nginx.conf。{reload_note}"),
             }),
             Err(e) => serde_json::json!({ "ok": false, "error": e }),
         }));

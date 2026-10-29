@@ -239,6 +239,24 @@ fn image_running(img: &str) -> bool {
     }
 }
 
+/// 读 spawn 日志文件尾部（最多 25 行）——进程秒退时把 nginx/java 的报错
+/// 直接带回给前端与 debug.log。文件不存在返回占位说明。
+fn spawn_log_tail(path: &str) -> String {
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let lines: Vec<&str> = text.lines().collect();
+            let start = lines.len().saturating_sub(25);
+            let tail = lines[start..].join(" | ");
+            if tail.trim().is_empty() {
+                "（platform-spawn.log 为空——进程可能未产生任何输出，请检查 exe 是否存在）".into()
+            } else {
+                tail
+            }
+        }
+        Err(_) => "（无 platform-spawn.log——启动命令本身可能未执行成功，检查 exe 是否存在）".into(),
+    }
+}
+
 /// 限深递归查找关键文件（只列目录条目、不读文件内容，代价可控）。
 /// 用于兼容旧版安装留下的版本子目录布局（nginx-1.28.0/nginx.exe、dist/index.html）。
 fn find_key_shallow(dir: &std::path::Path, key: &str, depth: u8) -> bool {
@@ -432,8 +450,11 @@ pub async fn service_action(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ServiceActionReq>,
 ) -> Json<serde_json::Value> {
-    // nginx：进程管理器启停（registry run_cmd = install_dir\nginx.exe，
-    // start_with_deps 自动带起依赖；stop 走 procs.kill_tree）
+    // nginx：进程管理器启停（registry run_cmd = nginx.exe -p 前缀，
+    // start_with_deps 自动带起依赖；stop 走 taskkill 进程树）。
+    // 启动后复核运行态：nginx 因端口占用/配置错误秒退时，把
+    // {install_dir}/logs/platform-spawn.log 尾部直接带回给前端——
+    // 用户点「启动」当场就能看到失败原因，而不是永远显示「已停止」。
     if req.target == "nginx" {
         if !matches!(req.action.as_str(), "start" | "stop") {
             return Json(serde_json::json!({ "ok": false, "error": format!("未知操作：{}", req.action) }));
@@ -455,19 +476,60 @@ pub async fn service_action(
             }
         })
         .await;
-        // 以 tasklist 复核实际运行态（probe 同源，状态闭环）
-        let running = blocking(|| image_running("nginx.exe")).await;
-        return match res {
-            Ok(()) => {
-                let msg = if req.action == "start" { "Nginx 已启动" } else { "Nginx 已停止" };
-                state.repair.log(format!("{msg}（进程管理器托管）"));
-                Json(serde_json::json!({ "ok": true, "running": running, "message": msg }))
-            }
-            Err(e) => Json(serde_json::json!({
+        if let Err(e) = res {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "ERROR",
+                "service_action",
+                &req.action,
+                &format!("target=nginx 调度失败：{e}"),
+            );
+            return Json(serde_json::json!({
                 "ok": false,
                 "error": format!("Nginx {}失败：{e}", if req.action == "start" { "启动" } else { "停止" })
-            })),
-        };
+            }));
+        }
+        // 运行态复核（probe 同源）：start 等待 1.2s 让 nginx master 完成绑定
+        if req.action == "start" {
+            blocking(|| std::thread::sleep(std::time::Duration::from_millis(1200))).await;
+        } else {
+            blocking(|| std::thread::sleep(std::time::Duration::from_millis(600))).await;
+        }
+        let running = blocking(|| image_running("nginx.exe")).await;
+        let install_dir = registry_install_dir(&state, "nginx");
+        crate::debug_log::entry(
+            crate::ops::process::PROC_SCOPE,
+            if running || req.action == "stop" { "INFO" } else { "ERROR" },
+            "service_action",
+            &req.action,
+            &format!("target=nginx running={running} install_dir={install_dir}"),
+        );
+        if req.action == "start" && !running {
+            // 进程秒退：把 spawn 日志尾部带回给前端（nginx bind 失败等原因就在这）
+            let tail = blocking(move || {
+                spawn_log_tail(&format!("{}/logs/platform-spawn.log", install_dir.trim_end_matches('/')))
+            })
+            .await;
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "ERROR",
+                "service_action",
+                "start_failed_detail",
+                &format!("target=nginx platform-spawn.log 尾部：{tail}"),
+            );
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": format!("Nginx 启动后立即退出（可能端口被占用或配置错误）。日志：{tail}")
+            }));
+        }
+        if req.action == "stop" && running {
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": "停止命令已执行，但仍有 nginx.exe 进程残留（可能是非平台拉起的实例），请到任务管理器确认"
+            }));
+        }
+        let msg = if req.action == "start" { "Nginx 已启动" } else { "Nginx 已停止" };
+        return Json(serde_json::json!({ "ok": true, "running": running, "message": msg }));
     }
     if !UNINSTALLABLE.contains(&req.target.as_str()) {
         return Json(serde_json::json!({ "ok": false, "error": format!("不支持的服务：{}", req.target) }));
