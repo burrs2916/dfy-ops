@@ -131,10 +131,15 @@ export const api = {
   // dir：设置页对未保存草稿目录的即时预览；缺省扫已配置的资源目录
   resources: (dir?: string) =>
     request<ResourceScan>(`/api/env/resources${dir ? `?dir=${encodeURIComponent(dir)}` : ""}`),
-  startGenericRepair: (target: string) =>
+  startGenericRepair: (
+    target: string,
+    externalConfig?: Record<string, string>,
+  ) =>
     request<GenericRepairStart>("/api/env/repair/generic", {
       method: "POST",
-      body: JSON.stringify({ target }),
+      body: JSON.stringify(
+        externalConfig ? { target, external_config: externalConfig } : { target },
+      ),
     }),
   // previousPlan + followUp：多轮追问时携带上一轮方案与用户追问
   repairPlan: (checkItems: EnvCheckItem[], previousPlan?: string, followUp?: string) =>

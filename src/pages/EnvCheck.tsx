@@ -174,13 +174,14 @@ export default function EnvCheck() {
     [pollRepair]
   );
 
-  /** 修复中心的「一键修复」：资源包优先 → java 在线兜底 → 无包提示。 */
+  /** 修复中心的「一键修复」：资源包优先 → java 在线兜底 → 无包提示。
+   *  dfy-backend 走安装前配置确认弹窗，确认后带 externalConfig 落盘。 */
   const startGenericRepair = useCallback(
-    async (target: string) => {
+    async (target: string, externalConfig?: Record<string, string>) => {
       setRepairError(null);
       setRepairNotice(null);
       try {
-        const res = await api.startGenericRepair(target);
+        const res = await api.startGenericRepair(target, externalConfig);
         if (!res.ok) {
           setRepairError(res.error || "修复启动失败");
           return;

@@ -67,6 +67,7 @@ import {
   repairTarget,
 } from "./shared";
 import { TARGET_ICON } from "./icons";
+import BackendInstallDialog, { type ExternalConfigPayload } from "./BackendInstallDialog";
 
 /** 修复中心：问题项汇总 + 一键修复（资源包→在线）+ AI 方案（代执行/复制 + 追问）+ 已安装组件卸载。 */
 export default function RepairCenter({
@@ -83,10 +84,12 @@ export default function RepairCenter({
   repairRunning: boolean;
   /** 正在执行任务的软件（卡片据此高亮"正在安装"）；null = 空闲 */
   activeTarget: string | null;
-  onRepair: (target: string) => void;
+  onRepair: (target: string, externalConfig?: Record<string, string>) => void;
   onUninstall: (target: string, removeData: boolean) => void;
 }) {
   const resourceDir = useAppSettingsStore((s) => s.settings.resourceDir);
+  // dfy-backend 安装前配置确认弹窗（一键安装/重装先弹配置，确认后才真正安装）
+  const [backendCfgOpen, setBackendCfgOpen] = useState(false);
   const [scan, setScan] = useState<ResourceScan | null>(null);
   const [installed, setInstalled] = useState<UninstallTargetStatus[]>([]);
   const [plan, setPlan] = useState<RepairPlan | null>(null);
@@ -173,6 +176,16 @@ export default function RepairCenter({
 
   /** 服务启停 / SQL 导入的进行中标记（按钮防抖 + loading） */
   const [busyOps, setBusyOps] = useState<string | null>(null);
+
+  /** 一键安装 / 重装统一入口：dfy-backend 先弹配置确认（外部配置落盘），
+   *  其余目标直接安装。 */
+  const launchInstall = useCallback(
+    (t: string) => {
+      if (t === "dfy-backend") setBackendCfgOpen(true);
+      else onRepair(t);
+    },
+    [onRepair],
+  );
 
   /** 启动 / 停止平台服务（MySQL80、Redis；net start/stop + UAC 确认），完成后即时重探 */
   const onServiceAction = useCallback(
@@ -521,7 +534,7 @@ export default function RepairCenter({
               </span>
             </Tooltip>
           )}
-          <Button size="small" variant="outlined" disabled={repairDisabled || svcBusy} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+          <Button size="small" variant="outlined" disabled={repairDisabled || svcBusy} onClick={() => launchInstall(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
             重装
           </Button>
           {/* 卸载：前置条件——服务/进程运行中时禁止卸载（反向代理硬断请求会丢数据） */}
@@ -596,7 +609,7 @@ export default function RepairCenter({
         </Stack>
       );
       actions = (
-        <Button size="small" variant="contained" disabled={repairDisabled} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
+        <Button size="small" variant="contained" disabled={repairDisabled} onClick={() => launchInstall(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
           一键安装
         </Button>
       );
@@ -965,7 +978,7 @@ export default function RepairCenter({
                             variant="contained"
                             color="warning"
                             disabled={repairDisabled}
-                            onClick={() => onRepair(target)}
+                            onClick={() => launchInstall(target)}
                             sx={{ textTransform: "none", px: 1 }}
                           >
                             一键修复
@@ -1195,6 +1208,16 @@ export default function RepairCenter({
           </Button>
         </DialogActions>
       </Dialog>
+
+      {/* DFY 后端安装前配置确认：预填生产默认值，确认后才真正安装 */}
+      <BackendInstallDialog
+        open={backendCfgOpen}
+        onClose={() => setBackendCfgOpen(false)}
+        onConfirm={(cfg: ExternalConfigPayload) => {
+          setBackendCfgOpen(false);
+          onRepair("dfy-backend", cfg as unknown as Record<string, string>);
+        }}
+      />
 
       <Snackbar
         open={snack.open}

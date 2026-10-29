@@ -530,6 +530,8 @@ pub fn start_zip_install(
 /// jar 快速拷贝管线：自研后端 dfy-boot-base 的 fat jar 直接拷贝到 install_dir 根，
 /// 重命名为 dfy-server.jar（统一命名，registry run_cmd = `{java} -jar dfy-server.jar`）。
 /// 无解压、无拍平、无 Windows 服务注册——jar 本身就是自包含部署形态。
+/// `ext_cfg`：安装前配置确认弹窗回传的外部配置（Some 时拷完 jar 生成
+/// config/application-local.yaml，Spring Boot 启动即用它覆盖 jar 内配置）。
 #[cfg(target_os = "windows")]
 pub fn start_jar_install(
     target: &'static str,
@@ -537,6 +539,7 @@ pub fn start_jar_install(
     install_dir: String,
     env_cache: EnvCache,
     state: Arc<RepairState>,
+    ext_cfg: Option<crate::ops::external_config::ExternalConfig>,
 ) -> Result<(), String> {
     if target != "dfy-backend" {
         return Err(format!(
@@ -558,7 +561,7 @@ pub fn start_jar_install(
         job.logs.clear();
     }
     tokio::spawn(async move {
-        run_jar_install(state, jar_path, install_dir, env_cache).await;
+        run_jar_install(state, jar_path, install_dir, env_cache, ext_cfg).await;
     });
     Ok(())
 }
@@ -571,6 +574,7 @@ pub fn start_jar_install(
     _install_dir: String,
     _env_cache: EnvCache,
     _state: Arc<RepairState>,
+    _ext_cfg: Option<crate::ops::external_config::ExternalConfig>,
 ) -> Result<(), String> {
     Err(format!(
         "jar 安装仅支持 Windows 目标机，{} 请手动拷贝 jar",
@@ -578,13 +582,14 @@ pub fn start_jar_install(
     ))
 }
 
-/// jar 管线主体：拷贝 → 验证。
+/// jar 管线主体：拷贝 → 写外部配置 → 验证。
 #[cfg(target_os = "windows")]
 async fn run_jar_install(
     state: Arc<RepairState>,
     jar_path: String,
     install_dir: String,
     env_cache: EnvCache,
+    ext_cfg: Option<crate::ops::external_config::ExternalConfig>,
 ) {
     state.log(format!(
         "开始安装 DFY 后端：{} → {}\\dfy-server.jar",
@@ -615,6 +620,32 @@ async fn run_jar_install(
             finish(state, env_cache, false, format!("拷贝任务异常：{e}")).await;
             return;
         }
+    }
+
+    // ===== 外部配置：安装前配置确认弹窗回传的值 → config/application-local.yaml =====
+    if let Some(cfg) = ext_cfg {
+        state.patch(|j| j.stage = "config".into());
+        let id = install_dir.clone();
+        let w = tokio::task::spawn_blocking(move || {
+            crate::ops::external_config::create(std::path::Path::new(&id), &cfg)
+        })
+        .await;
+        match w {
+            Ok(Ok(p)) => state.log(format!(
+                "外部配置已写入：{}（Spring Boot 启动时覆盖 jar 内默认配置）",
+                p.display()
+            )),
+            Ok(Err(e)) => {
+                finish(state, env_cache, false, format!("写外部配置失败：{e}")).await;
+                return;
+            }
+            Err(e) => {
+                finish(state, env_cache, false, format!("配置写入任务异常：{e}")).await;
+                return;
+            }
+        }
+    } else {
+        state.log("未提供外部配置：后端将使用 jar 内置默认配置（端口 48085 / dfy_base_db）");
     }
 
     // ===== 验证：jar 存在 =====

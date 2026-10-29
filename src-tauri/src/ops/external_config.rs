@@ -43,6 +43,29 @@ pub fn config_path(install_dir: &Path) -> PathBuf {
     install_dir.join("config").join("application-local.yaml")
 }
 
+/// 生产部署模板（与 dfy-boot-base deploy/config/application-local.yaml 结构一致），
+/// 值为生产默认参数：dfy_base_db / dfy123456 / 48085 / 18830。
+/// 安装前配置确认弹窗以此为预填基准，用户改完由 [`create`] 落盘。
+// 调用方（jar 安装管线）仅 Windows 编译，macOS dev 侧放行 dead_code
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub const TEMPLATE: &str = "server:\n  port: 48085 # 服务启动端口\n\nspring:\n  datasource:\n    dynamic:\n      datasource:\n        master:\n          url: jdbc:mysql://127.0.0.1:3306/dfy_base_db?useSSL=false&characterEncoding=utf8&serverTimezone=Asia/Shanghai\n          username: root\n          password: dfy123456\n        slave:\n          lazy: true\n          url: jdbc:mysql://127.0.0.1:3306/dfy_base_db?characterEncoding=utf8&serverTimezone=Asia/Shanghai\n          username: root\n          password: dfy123456\n  redis:\n    host: 127.0.0.1 # 地址\n    port: 6379 # 端口\n    database: 0\n    password: \"dfy123456\" # 密码\n\niot:\n  verneMq:\n    username: cloud\n    password: key@00\n    hostUrl: tcp://127.0.0.1:18830\n";
+
+/// 从模板创建外部配置（安装管线用）：write 要求模板已存在，而安装时
+/// install_dir 是全新目录——以 [`TEMPLATE`] 为底，apply 用户确认的值后原子落盘。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn create(install_dir: &Path, cfg: &ExternalConfig) -> Result<PathBuf, String> {
+    let path = config_path(install_dir);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("创建配置目录 {} 失败：{e}", parent.display()))?;
+    }
+    let new_text = apply(TEMPLATE, cfg);
+    let tmp = path.with_extension("yaml.tmp");
+    std::fs::write(&tmp, &new_text).map_err(|e| format!("写入临时文件失败：{e}"))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("替换配置文件失败：{e}"))?;
+    Ok(path)
+}
+
 /// 当前段落（跨多文档 yaml 唯一的段落 key）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Section {
@@ -255,6 +278,25 @@ mod tests {
         assert_eq!(c.vernemq_host_url, "tcp://127.0.0.1:18830");
         assert_eq!(c.vernemq_username, "cloud");
         assert_eq!(c.vernemq_password, "key@00");
+    }
+
+    /// create：从生产模板 + 用户确认值生成外部配置；空目录可建、值全部落盘。
+    #[test]
+    fn create_writes_template_with_overrides() {
+        let base = std::env::temp_dir().join(format!("dfy-ops-ext-{}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let cfg = ExternalConfig {
+            server_port: "48086".into(),
+            ..parse(TEMPLATE)
+        };
+        let path = create(&base, &cfg).unwrap();
+        assert!(path.is_file(), "配置文件应已生成");
+        let back = parse(&std::fs::read_to_string(&path).unwrap());
+        assert_eq!(back.server_port, "48086");
+        assert_eq!(back.mysql_master_url, parse(TEMPLATE).mysql_master_url);
+        assert_eq!(back.redis_password, "dfy123456");
+        assert_eq!(back.vernemq_host_url, "tcp://127.0.0.1:18830");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]

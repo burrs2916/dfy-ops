@@ -58,6 +58,10 @@ pub async fn resources(
 pub struct GenericRepairInput {
     /// 检查项 id 或目标软件名（dep-mysql / service-vernemq / java / mysql …）
     pub target: String,
+    /// 安装前配置确认弹窗回传的 dfy-backend 外部配置（仅 jar 管线使用；
+    /// 缺省时后端用 jar 内置默认配置）
+    #[serde(default)]
+    pub external_config: Option<crate::ops::external_config::ExternalConfig>,
 }
 
 /// POST /api/env/repair/generic —— 通用修复决策链：
@@ -123,6 +127,7 @@ pub async fn start_generic_repair(
             install_dir,
             state.env_cache.clone(),
             state.repair.clone(),
+            input.external_config.clone(),
         )
     } else if zip_capable && zip.is_some() {
         let install_dir = if target == "java" {
@@ -216,6 +221,24 @@ pub(crate) fn registry_install_dir(state: &AppState, target: &str) -> String {
         .unwrap_or_else(|| format!("C:\\services\\{target}"))
 }
 
+/// 按映像名探测进程是否在跑（tasklist；非 Windows 恒 false）。
+/// probe_target 与 service_action（nginx 进程启停复核）共用，保证状态同源闭环。
+fn image_running(img: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("tasklist")
+            .args(["/fi", &format!("imagename eq {img}"), "/fo", "csv", "/nh"])
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.contains(img)))
+            .unwrap_or(false)
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = img;
+        false
+    }
+}
+
 /// 限深递归查找关键文件（只列目录条目、不读文件内容，代价可控）。
 /// 用于兼容旧版安装留下的版本子目录布局（nginx-1.28.0/nginx.exe、dist/index.html）。
 fn find_key_shallow(dir: &std::path::Path, key: &str, depth: u8) -> bool {
@@ -295,27 +318,7 @@ async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
                 }
             }
             // tasklist 进程探测（Windows 可用；macOS/Linux 上恒 false 无副作用）
-            let proc = if let Some(img) = proc_image {
-                #[cfg(target_os = "windows")]
-                {
-                    std::process::Command::new("tasklist")
-                        .args(["/fi", &format!("imagename eq {img}"), "/fo", "csv", "/nh"])
-                        .output()
-                        .map(|o| {
-                            String::from_utf8_lossy(&o.stdout)
-                                .lines()
-                                .any(|l| l.contains(img))
-                        })
-                        .unwrap_or(false)
-                }
-                #[cfg(not(target_os = "windows"))]
-                {
-                    let _ = img;
-                    false
-                }
-            } else {
-                false
-            };
+            let proc = proc_image.map(image_running).unwrap_or(false);
             (dir_ok, key_ok, proc)
         })
         .await;
@@ -419,19 +422,52 @@ pub struct ServiceActionReq {
     pub action: String,
 }
 
-/// POST /api/env/repair/service —— 启动 / 停止平台注册的第三方服务
-/// （MySQL80、Redis）。net start/stop 需要管理员权限，走 runas_wait 一次 UAC；
-/// 幂等：已运行再 start、已停止再 stop 直接成功返回。
+/// POST /api/env/repair/service —— 启动 / 停止平台注册的第三方服务。
+/// 分两类：
+/// - mysql/redis/java：Windows 服务，net start/stop（runas_wait 一次 UAC）
+/// - nginx：**不注册 Windows 服务**，由平台进程管理器托管——直接复用
+///   orchestrator::start_with_deps / procs.stop（与服务运维面板同一套逻辑），
+///   修复中心卡片上的启停按钮点了就能用，而不是甩一句「去别的面板」。
 pub async fn service_action(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ServiceActionReq>,
 ) -> Json<serde_json::Value> {
-    // nginx 不注册 Windows 服务（由进程管理器托管启停），不走 net start/stop
+    // nginx：进程管理器启停（registry run_cmd = install_dir\nginx.exe，
+    // start_with_deps 自动带起依赖；stop 走 procs.kill_tree）
     if req.target == "nginx" {
-        return Json(serde_json::json!({
-            "ok": false,
-            "error": "Nginx 不注册 Windows 服务，请到「服务运维」面板（进程管理器）启停"
-        }));
+        if !matches!(req.action.as_str(), "start" | "stop") {
+            return Json(serde_json::json!({ "ok": false, "error": format!("未知操作：{}", req.action) }));
+        }
+        let verb = req.action.clone();
+        let st = state.clone();
+        let tgt = req.target.clone();
+        let res = blocking(move || {
+            if verb == "start" {
+                let results =
+                    crate::ops::orchestrator::start_with_deps(&st.procs, &st.registry, &tgt);
+                results
+                    .iter()
+                    .find(|r| !r.ok)
+                    .map(|r| Err::<(), String>(r.error.clone().unwrap_or_else(|| "启动失败".into())))
+                    .unwrap_or(Ok(()))
+            } else {
+                st.procs.stop(&tgt).map_err(|e| e.to_string())
+            }
+        })
+        .await;
+        // 以 tasklist 复核实际运行态（probe 同源，状态闭环）
+        let running = blocking(|| image_running("nginx.exe")).await;
+        return match res {
+            Ok(()) => {
+                let msg = if req.action == "start" { "Nginx 已启动" } else { "Nginx 已停止" };
+                state.repair.log(format!("{msg}（进程管理器托管）"));
+                Json(serde_json::json!({ "ok": true, "running": running, "message": msg }))
+            }
+            Err(e) => Json(serde_json::json!({
+                "ok": false,
+                "error": format!("Nginx {}失败：{e}", if req.action == "start" { "启动" } else { "停止" })
+            })),
+        };
     }
     if !UNINSTALLABLE.contains(&req.target.as_str()) {
         return Json(serde_json::json!({ "ok": false, "error": format!("不支持的服务：{}", req.target) }));
