@@ -6,6 +6,7 @@ import {
   Box,
   Button,
   CircularProgress,
+  Collapse,
   Divider,
   FormControlLabel,
   Paper,
@@ -24,6 +25,91 @@ import { REPAIR_STAGE_LABEL, STATUS_HEX, TARGET_LABEL, ackId, loadAck, saveAck }
 import Stat from "./envcheck/Stat";
 import ServiceEnvSection from "./envcheck/ServiceEnvSection";
 import RepairCenter from "./envcheck/RepairCenter";
+
+/** 日志终端：深底 mono 逐条展示。autoScroll 时每次新增日志自动滚到最新一条。 */
+function LogTerminal({ logs, autoScroll = false }: { logs: string[]; autoScroll?: boolean }) {
+  const boxRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (autoScroll && boxRef.current) {
+      boxRef.current.scrollTop = boxRef.current.scrollHeight;
+    }
+  }, [logs.length, autoScroll]);
+  return (
+    <Box
+      ref={boxRef}
+      sx={{
+        maxHeight: 200,
+        overflow: "auto",
+        bgcolor: "grey.900",
+        borderRadius: 1,
+        px: 1.25,
+        py: 0.75,
+        mt: 0.75,
+      }}
+    >
+      {logs.map((log, i) => (
+        <Typography
+          key={i}
+          variant="caption"
+          component="div"
+          sx={{
+            fontFamily: MONO_STACK,
+            color: "grey.300",
+            whiteSpace: "pre-wrap",
+            wordBreak: "break-all",
+            lineHeight: 1.6,
+            opacity: autoScroll && i < logs.length - 1 ? 0.75 : 1,
+          }}
+        >
+          {log}
+        </Typography>
+      ))}
+    </Box>
+  );
+}
+
+/** 修复任务日志查看器（任务结束后展示）：完整回看安装/卸载过程 + 一键复制传回排查。
+ *  此前任务一结束过程日志就从 UI 消失，只剩一行「安装完成」——失败现场无法回溯。 */
+function RepairLogView({ job }: { job: EnvRepairJob }) {
+  const [open, setOpen] = useState(job.ok === false); // 失败默认展开，成功折叠
+  const [copied, setCopied] = useState(false);
+  if (job.logs.length === 0) return null;
+  const opLabel = job.op === "uninstall" ? "卸载" : "安装";
+  const label = job.target ? TARGET_LABEL[job.target] ?? job.target : "";
+  const copyLog = async () => {
+    try {
+      await navigator.clipboard.writeText(job.logs.join("\n"));
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* 剪贴板不可用时静默 */
+    }
+  };
+  return (
+    <Paper variant="outlined" sx={{ px: 1.5, py: 1 }}>
+      <Stack direction="row" alignItems="center" spacing={1}>
+        <Typography variant="caption" color="text.secondary" sx={{ flex: 1 }}>
+          {label ? `${label} ` : ""}
+          {opLabel}日志 · {job.logs.length} 条
+        </Typography>
+        <Button
+          size="small"
+          startIcon={<ContentCopy />}
+          onClick={copyLog}
+          sx={{ textTransform: "none" }}
+        >
+          {copied ? "已复制" : "复制日志"}
+        </Button>
+        <Button size="small" onClick={() => setOpen((o) => !o)} sx={{ textTransform: "none" }}>
+          {open ? "收起" : "展开"}
+        </Button>
+      </Stack>
+      <Collapse in={open}>
+        <LogTerminal logs={job.logs} />
+      </Collapse>
+    </Paper>
+  );
+}
 
 export default function EnvCheck() {
   // 数据来自全局 store：App 启动时 bootstrap() 已检测一次（store 级去重），
@@ -295,7 +381,7 @@ export default function EnvCheck() {
         </Alert>
       )}
 
-      {/* 修复任务进行中：阶段 + 最近日志（两个 Tab 共享，随时可见） */}
+      {/* 修复任务进行中：阶段 + 实时日志终端（两个 Tab 共享，随时可见） */}
       {repairJob?.running && (
         <Alert
           severity="info"
@@ -306,23 +392,8 @@ export default function EnvCheck() {
             {repairJob.target ? `正在修复 ${TARGET_LABEL[repairJob.target] ?? repairJob.target}：` : ""}
             {REPAIR_STAGE_LABEL[repairJob.stage] ?? repairJob.stage}
           </Typography>
-          {/* 最近 3 条：过程可追溯（解压 → 配置 → 注册 → 验证各阶段的关键动作） */}
-          {repairJob.logs.length > 0 &&
-            repairJob.logs.slice(-3).map((log, i, arr) => (
-              <Typography
-                key={`${repairJob.logs.length}-${i}`}
-                variant="caption"
-                sx={{
-                  fontFamily: MONO_STACK,
-                  display: "block",
-                  mt: i === 0 && arr.length === 3 ? 0.5 : 0.25,
-                  wordBreak: "break-all",
-                  opacity: i === arr.length - 1 ? 1 : 0.65,
-                }}
-              >
-                {log}
-              </Typography>
-            ))}
+          {/* 过程可追溯（解压 → 配置 → 注册 → 验证各阶段的关键动作），自动滚动到最新 */}
+          {repairJob.logs.length > 0 && <LogTerminal logs={repairJob.logs} autoScroll />}
         </Alert>
       )}
 
@@ -337,6 +408,9 @@ export default function EnvCheck() {
           {repairError}
         </Alert>
       )}
+
+      {/* 任务结束后的完整日志：可回看全过程 + 一键复制传回排查（此前一结束就消失） */}
+      {!repairJob?.running && repairJob && <RepairLogView job={repairJob} />}
 
       <Tabs value={tab} onChange={(_, v: "check" | "repair") => setTab(v)}>
         <Tab value="check" label="检测结果" />

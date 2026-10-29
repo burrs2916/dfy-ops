@@ -6,6 +6,7 @@ import {
   Card,
   CardContent,
   Chip,
+  Collapse,
   CircularProgress,
   Divider,
   Grid,
@@ -21,6 +22,7 @@ import CableIcon from "@mui/icons-material/Cable";
 import DnsIcon from "@mui/icons-material/Dns";
 import FolderOpenIcon from "@mui/icons-material/FolderOpen";
 import DescriptionIcon from "@mui/icons-material/Description";
+import ExpandMoreIcon from "@mui/icons-material/ExpandMore";
 import UndoIcon from "@mui/icons-material/Undo";
 import { api } from "../api";
 import type { NginxConfig, ExternalConfigResponse, ExternalConfigWriteResult } from "../types";
@@ -107,7 +109,10 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
   const [saved, setSaved] = useState<NginxConfig | null>(null);
   /** Nginx 运行状态：true=运行中（保存即热加载）/ false=已停止（下次启动生效）/ null=探测失败 */
   const [running, setRunning] = useState<boolean | null>(null);
-  const [openingDir, setOpeningDir] = useState(false);
+  /** 正在打开的目录（conf/logs）：按钮防抖 loading */
+  const [openingDir, setOpeningDir] = useState<string | null>(null);
+  /** 高级日志路径折叠区 */
+  const [advOpen, setAdvOpen] = useState(false);
 
   const set = (k: keyof NginxConfig) => (e: React.ChangeEvent<HTMLInputElement>) => {
     setCfg((c) => (c ? { ...c, [k]: e.target.value } : c));
@@ -175,16 +180,16 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
     }
   };
 
-  /** 在系统文件管理器中打开配置目录（nginx.conf 所在目录，logs 同级）。 */
-  const openDir = async () => {
-    setOpeningDir(true);
+  /** 在系统文件管理器中打开目录：conf=配置目录（nginx.conf），logs=日志目录（access/error.log）。 */
+  const openDir = async (dir?: "logs") => {
+    setOpeningDir(dir ?? "conf");
     try {
-      const r = await api.openConfigDir(serviceId);
+      const r = await api.openConfigDir(serviceId, dir);
       if (!r.ok) setMsg({ severity: "error", text: r.error ?? "打开目录失败" });
     } catch (e) {
       setMsg({ severity: "error", text: "打开目录失败：" + (e as Error).message });
     } finally {
-      setOpeningDir(false);
+      setOpeningDir(null);
     }
   };
 
@@ -270,11 +275,26 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
           {!loading && (
             <Stack direction="row" alignItems="center" spacing={0.5}>
               {exists && (
-                <Tooltip title="打开配置所在目录（nginx.conf，logs 同级）">
-                  <IconButton size="small" onClick={openDir} disabled={openingDir}>
-                    <FolderOpenIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
+                <>
+                  <Tooltip title="打开配置目录（nginx.conf）">
+                    <IconButton size="small" onClick={() => openDir()} disabled={openingDir !== null}>
+                      {openingDir === "conf" ? (
+                        <CircularProgress size={16} />
+                      ) : (
+                        <FolderOpenIcon fontSize="small" />
+                      )}
+                    </IconButton>
+                  </Tooltip>
+                  <Tooltip title="打开日志目录（access.log / error.log）">
+                    <IconButton size="small" onClick={() => openDir("logs")} disabled={openingDir !== null}>
+                      {openingDir === "logs" ? (
+                        <CircularProgress size={16} />
+                      ) : (
+                        <DescriptionIcon fontSize="small" />
+                      )}
+                    </IconButton>
+                  </Tooltip>
+                </>
               )}
               <Chip
                 size="small"
@@ -455,19 +475,31 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
 
                   {/* ④ 日志（高级，默认折叠） */}
                   <Grid item xs={12}>
-                    <Paper variant="outlined" sx={{ px: 1.75, py: 1.25 }}>
-                      <details>
-                        <summary
-                          style={{
-                            cursor: "pointer",
-                            fontSize: 12,
-                            color: "#6b7280",
-                            userSelect: "none",
-                          }}
-                        >
-                          高级 · 日志路径（一般不用改）
-                        </summary>
-                        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ mt: 1.25 }}>
+                    <Paper variant="outlined" sx={{ px: 1.75, py: 0.75 }}>
+                      <Button
+                        fullWidth
+                        size="small"
+                        color="inherit"
+                        onClick={() => setAdvOpen((o) => !o)}
+                        sx={{
+                          justifyContent: "space-between",
+                          textTransform: "none",
+                          color: "text.secondary",
+                          px: 0.5,
+                        }}
+                        endIcon={
+                          <ExpandMoreIcon
+                            sx={{
+                              transform: advOpen ? "rotate(180deg)" : "none",
+                              transition: "transform 0.2s",
+                            }}
+                          />
+                        }
+                      >
+                        高级 · 日志路径（一般不用改）
+                      </Button>
+                      <Collapse in={advOpen}>
+                        <Stack direction={{ xs: "column", sm: "row" }} spacing={1.5} sx={{ pb: 1.25, pt: 0.5 }}>
                           <TextField
                             size="small"
                             label="访问日志（access_log）"
@@ -485,7 +517,7 @@ export default function NginxConfigPanel({ serviceId }: { serviceId: string }) {
                             InputProps={{ sx: { fontFamily: MONO_STACK, fontSize: 13 } }}
                           />
                         </Stack>
-                      </details>
+                      </Collapse>
                     </Paper>
                   </Grid>
                 </Grid>

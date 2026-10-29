@@ -538,11 +538,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify(config),
     }),
-  // 打开服务配置文件所在目录（nginx → conf/，dfy-backend → config/）
-  openConfigDir: (id: string) =>
-    request<{ ok: boolean; dir?: string; error?: string }>(`/api/services/${id}/open-config-dir`, {
-      method: "POST",
-    }),
+  // 打开服务配置/日志所在目录（nginx：conf/ 或 ?dir=logs → logs/；dfy-backend → config/）
+  openConfigDir: (id: string, dir?: "logs") =>
+    request<{ ok: boolean; dir?: string; error?: string }>(
+      `/api/services/${id}/open-config-dir${dir ? `?dir=${dir}` : ""}`,
+      { method: "POST" },
+    ),
 };
 
 /** 保存类接口的统一解包：失败直接抛错，成功返回最新配置。 */

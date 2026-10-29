@@ -970,30 +970,57 @@ pub async fn external_config_update(
     }
 }
 
-/// 在系统文件管理器中打开服务配置文件所在目录（只读便利操作）。
-/// nginx → conf/（nginx.conf）；dfy-backend → config/（application-local.yaml）。
+/// `open-config-dir` 查询参数：缺省打开配置目录；`dir=logs` 打开日志目录。
+#[derive(Debug, Deserialize)]
+pub struct OpenDirQuery {
+    dir: Option<String>,
+}
+
+/// 在系统文件管理器中打开服务配置/日志目录（只读便利操作）。
+/// 缺省：nginx → conf/（nginx.conf）；dfy-backend → config/（application-local.yaml）。
+/// `?dir=logs`：nginx → logs/（access.log / error.log，未创建时顺带建目录）。
 /// 纯浏览不入 ops_events 审计，debug_log 留痕即可。
 pub async fn open_config_dir(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(q): Query<OpenDirQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
+    let want_logs = q.dir.as_deref() == Some("logs");
+    let install = std::path::Path::new(&def.install_dir);
     let path = if def.id == "nginx" {
-        crate::ops::nginx_config::config_path(std::path::Path::new(&def.install_dir))
+        if want_logs {
+            install.join("logs").join("access.log")
+        } else {
+            crate::ops::nginx_config::config_path(install)
+        }
     } else {
+        if want_logs {
+            return Ok(Json(serde_json::json!({
+                "ok": false,
+                "error": "该服务暂不支持打开日志目录",
+            })));
+        }
         crate::ops::external_config::config_path(&backend_install_dir(&state, def))
     };
     let dir = match path.parent() {
         Some(d) => d.to_path_buf(),
         None => {
-            return Ok(Json(serde_json::json!({ "ok": false, "error": "配置路径异常：无父目录" })));
+            return Ok(Json(serde_json::json!({ "ok": false, "error": "路径异常：无父目录" })));
         }
     };
     if !dir.exists() {
-        return Ok(Json(serde_json::json!({
-            "ok": false,
-            "error": format!("目录不存在：{}（服务可能未安装）", dir.display()),
-        })));
+        // 日志目录没生成过（nginx 装完未启动过）顺带创建，避免用户第一次点就报错；
+        // 配置目录不存在说明服务未安装，如实报错
+        if want_logs {
+            let _ = std::fs::create_dir_all(&dir);
+        }
+        if !dir.exists() {
+            return Ok(Json(serde_json::json!({
+                "ok": false,
+                "error": format!("目录不存在：{}（服务可能未安装）", dir.display()),
+            })));
+        }
     }
     match open_in_file_manager(&dir) {
         Ok(_) => {
@@ -1002,7 +1029,7 @@ pub async fn open_config_dir(
                 "INFO",
                 "open_config_dir",
                 "open",
-                &format!("打开配置目录：{}", dir.display()),
+                &format!("open-config-dir target={} dir={}", id, dir.display()),
             );
             Ok(Json(serde_json::json!({ "ok": true, "dir": dir.display().to_string() })))
         }
@@ -1012,7 +1039,7 @@ pub async fn open_config_dir(
                 "WARN",
                 "open_config_dir",
                 "open_failed",
-                &format!("打开配置目录 {} 失败：{e}", dir.display()),
+                &format!("打开目录 {} 失败：{e}", dir.display()),
             );
             Ok(Json(serde_json::json!({
                 "ok": false,
