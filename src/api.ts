@@ -147,9 +147,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ command }),
     }),
-  // 卸载 / 维护（当前覆盖 MySQL/Redis）
+  // 卸载 / 维护（覆盖 MySQL/Redis/Java + 云端三件套 nginx/dfy-backend/dfy-ui）
   uninstallStatus: () =>
-    request<{ targets: UninstallTargetStatus[] }>("/api/env/repair/uninstall/status"),
+    request<{ targets: UninstallTargetStatus[]; probeVersion?: string }>(
+      "/api/env/repair/uninstall/status",
+    ),
   startUninstall: (target: string, removeData: boolean) =>
     request<GenericUninstallStart>("/api/env/repair/uninstall", {
       method: "POST",

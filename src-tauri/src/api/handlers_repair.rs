@@ -14,6 +14,7 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::api::server::AppState;
+use crate::debug_log;
 use crate::ops::ai;
 use crate::ops::resource;
 
@@ -281,6 +282,17 @@ async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
             let mut key_ok = dir.join(&key_filename).is_file();
             if dir_ok && !key_ok {
                 key_ok = find_key_shallow(dir, &key_filename, 3);
+                if key_ok {
+                    debug_log::entry(
+                        debug_log::APP_SCOPE,
+                        "WARN",
+                        "uninstall_status",
+                        "legacy_layout",
+                        &format!(
+                            "{install_dir} 根上无 {key_filename}，限深兜底在子目录命中（旧版安装布局，建议重装归一）"
+                        ),
+                    );
+                }
             }
             // tasklist 进程探测（Windows 可用；macOS/Linux 上恒 false 无副作用）
             let proc = if let Some(img) = proc_image {
@@ -332,10 +344,25 @@ async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
 /// GET /api/env/repair/uninstall/status —— 可探测组件的安装痕迹探测。
 /// 覆盖 mysql/redis/java 以及三个云端组件 nginx、dfy-backend、dfy-ui。
 /// 修复中心「已安装组件管理」卡片和 AI 方案上下文共用（每次实时探，sc query 很快）。
+///
+/// 每次探测都写 debug.log 明细（scope=Probe）：install_dir 实际值 + 三项探测结果，
+/// 带 CARGO_PKG_VERSION 版本指纹——用户反馈「状态不更新」时，日志直接区分
+/// 旧版构建（无此行/版本号旧）与新版探测失配（install_dir 与实际安装位置不符）。
 pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let mut targets = Vec::new();
     for t in PROBEABLE {
         let (service_installed, dir_exists, service_running) = probe_target(&state, t).await;
+        let install_dir = registry_install_dir(&state, t);
+        debug_log::entry(
+            debug_log::APP_SCOPE,
+            "INFO",
+            "uninstall_status",
+            t,
+            &format!(
+                "v{} dir={install_dir} installed={service_installed} dirExists={dir_exists} running={service_running}",
+                env!("CARGO_PKG_VERSION")
+            ),
+        );
         // java 补充实测信息：平台托管主目录 + 实跑 java -version 的版本号
         // （MSI 装的从卸载条目名提取主版本）+ 注册表核实的 JAVA_HOME 配置态，
         // 让「装好了没、什么版本、环境变量配了没」在卡片上一眼可见
@@ -367,7 +394,7 @@ pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_
             "installDir": if t == "java" {
                 java_dir.unwrap_or_default()
             } else {
-                registry_install_dir(&state, t)
+                install_dir
             },
             "version": java_version,
             "javaHomeConfigured": java_home_ok,
@@ -378,7 +405,11 @@ pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_
             "canUninstall": service_installed || dir_exists,
         }));
     }
-    Json(serde_json::json!({ "targets": targets }))
+    Json(serde_json::json!({
+        "targets": targets,
+        // 版本指纹：前端 console 可直接核对探测数据出自哪个构建
+        "probeVersion": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 #[derive(Deserialize)]

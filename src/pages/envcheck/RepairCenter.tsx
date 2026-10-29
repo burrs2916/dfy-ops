@@ -145,6 +145,17 @@ export default function RepairCenter({
     api
       .uninstallStatus()
       .then((s) => {
+        // 探测明细进 console：target/serviceInstalled/installDir 一目了然，
+        // probeVersion 用于核对探测数据出自哪个构建（排查「改了没生效」）
+        console.info(
+          "[RepairCenter] 探测结果 probeVersion=%s",
+          s.probeVersion ?? "?",
+          s.targets.map((x: UninstallTargetStatus) => ({
+            t: x.target,
+            installed: x.serviceInstalled,
+            dir: x.installDir,
+          })),
+        );
         setInstalled(s.targets);
         setProbeFailed(false);
       })

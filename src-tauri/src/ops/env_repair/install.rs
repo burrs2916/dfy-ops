@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use super::{EnvCache, RepairState};
 #[cfg(target_os = "windows")]
+use crate::debug_log;
+#[cfg(target_os = "windows")]
 use super::{finish, JDK_DEFAULT_MAJOR, JDK_MANAGED_HOME};
 #[cfg(target_os = "windows")]
 use super::jdk::{ensure_user_path_entry, find_compatible, probe_home_version, set_user_java_home};
@@ -995,6 +997,19 @@ async fn run_zip_install(
         match v {
             Ok(Ok(())) => {
                 state.log("验证通过：nginx.exe + conf/nginx.conf + logs/ 均就绪，请到「服务运维」面板启动");
+                // 探测基准明示：修复中心「已安装」判定就看这个路径下的 nginx.exe，
+                // 与上面「解压完成，程序目录」对照——两处不一致即状态不更新的根因
+                state.log(format!(
+                    "[状态自检] 修复中心探测基准：{}\\nginx.exe 存在 = 已安装",
+                    install_dir
+                ));
+                debug_log::entry(
+                    debug_log::APP_SCOPE,
+                    "INFO",
+                    "install_verify",
+                    "nginx",
+                    &format!("基准 {}\\nginx.exe；home={}", install_dir, home),
+                );
                 finish(state, env_cache, true, String::new()).await;
             }
             Ok(Err(e)) => finish(state, env_cache, false, e).await,
@@ -1017,6 +1032,17 @@ async fn run_zip_install(
         match v {
             Ok(Ok(())) => {
                 state.log("验证通过：dfy-ui 前端静态文件已就绪，请到「服务运维」面板启动 nginx 访问");
+                state.log(format!(
+                    "[状态自检] 修复中心探测基准：{}\\index.html 存在 = 已安装",
+                    install_dir
+                ));
+                debug_log::entry(
+                    debug_log::APP_SCOPE,
+                    "INFO",
+                    "install_verify",
+                    "dfy-ui",
+                    &format!("基准 {}\\index.html；home={}", install_dir, home),
+                );
                 finish(state, env_cache, true, String::new()).await;
             }
             Ok(Err(e)) => finish(state, env_cache, false, e).await,
