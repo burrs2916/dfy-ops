@@ -135,6 +135,15 @@ async fn finish(state: Arc<RepairState>, env_cache: EnvCache, ok: bool, error: S
                 format!("任务失败：{}", error.chars().take(160).collect::<String>())
             };
             let actor = if op == "uninstall" { "user" } else { "installer" };
+            // debug.log 同步留痕：ops_events 只进事件时间轴（可被用户清理），
+            // 排查「装完状态没更新/成功没成功」时 debug.log 必须有完成行兜底
+            crate::debug_log::entry(
+                crate::debug_log::APP_SCOPE,
+                if ok { "INFO" } else { "ERROR" },
+                "repair_job",
+                "finish",
+                &format!("op={op} target={t} 结果={} {detail}", if ok { "成功" } else { "失败" }),
+            );
             crate::ops_events::record(actor, t, &op, ok, &detail);
         }
     }

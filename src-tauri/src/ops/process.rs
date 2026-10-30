@@ -128,7 +128,21 @@ impl ProcManager {
             "spawn",
             &format!("id={id} cwd={install_dir} cmd={resolved} spawn_log={log_str}"),
         );
-        let child = spawn_detached_logged(install_dir, &resolved, &log_str)?;
+        let child = match spawn_detached_logged(install_dir, &resolved, &log_str) {
+            Ok(c) => c,
+            Err(e) => {
+                // spawn 失败必须落日志：java 路径不存在/logs 目录不可写等原因
+                // 只从返回值看是「启动失败」，原因在这里才有第一现场
+                crate::debug_log::entry(
+                    PROC_SCOPE,
+                    "ERROR",
+                    "start",
+                    "spawn_failed",
+                    &format!("id={id} cmd={resolved} 错误：{e}"),
+                );
+                return Err(e);
+            }
+        };
         crate::debug_log::entry(
             PROC_SCOPE,
             "INFO",

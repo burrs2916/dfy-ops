@@ -496,7 +496,9 @@ export default function RepairCenter({
               title={
                 t === "nginx"
                   ? "Nginx 是常驻服务：安装完成时已自动启动；此按钮用于因端口占用等原因启动失败后的重试。"
-                  : "启动平台托管的服务"
+                  : t === "dfy-backend"
+                    ? "启动 DFY 后端（Spring Boot，首次约 10~30 秒就绪）；会自动先带起 MySQL / Redis 依赖。"
+                    : "启动平台托管的服务"
               }
             >
               <Button
@@ -516,7 +518,9 @@ export default function RepairCenter({
               title={
                 t === "nginx"
                   ? "停止后前端页面与 /admin-api/ 接口将全部不可访问，请确认没有用户正在使用系统。"
-                  : "停止平台托管的服务"
+                  : t === "dfy-backend"
+                    ? "停止 DFY 后端（只结束本平台拉起的 Java 进程，不影响其他 Java 程序）。"
+                    : "停止平台托管的服务"
               }
             >
               <Button

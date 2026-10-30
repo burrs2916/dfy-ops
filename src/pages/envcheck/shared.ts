@@ -93,7 +93,7 @@ export const SOFTWARE_ORDER = [
   "greptime",
 ];
 /** 注册了 Windows 服务、可启停的软件（与后端 service_spec 口径一致；java 无服务） */
-export const SERVICE_TARGETS = new Set(["mysql", "nginx"]);
+export const SERVICE_TARGETS = new Set(["mysql", "nginx", "dfy-backend"]);
 /** 一句话说清每个软件是干嘛的（卡片副标题，消灭抽象概念） */
 export const TARGET_DESC: Record<string, string> = {
   mysql: "数据库",

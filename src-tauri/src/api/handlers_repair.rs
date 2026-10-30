@@ -128,6 +128,8 @@ pub async fn start_generic_repair(
             state.env_cache.clone(),
             state.repair.clone(),
             input.external_config.clone(),
+            state.procs.clone(),
+            state.registry.clone(),
         )
     } else if zip_capable && zip.is_some() {
         let install_dir = if target == "java" {
@@ -351,13 +353,14 @@ async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
             "dfy-ui" => "index.html".into(),
             _ => unreachable!(),
         };
-        // 需要探测运行态的目标（dfy-ui 是静态目录，无进程）
+        // 运行态探测口径：dfy-backend 用 48085 端口（image_running("java.exe")
+        // 会把任何 Java 程序误判成后端在跑）；nginx 仍按进程名；dfy-ui 无进程
         let proc_image: Option<&'static str> = match target {
             "nginx" => Some("nginx.exe"),
-            "dfy-backend" => Some("java.exe"), // Spring Boot jar 由 java.exe 运行
-            "dfy-ui" => None,
+            "dfy-backend" | "dfy-ui" => None,
             _ => unreachable!(),
         };
+        let backend_by_port = target == "dfy-backend";
         let (dir_exists, key_file_exists, proc_running) = blocking(move || {
             let dir = std::path::Path::new(&install_dir);
             let dir_ok = dir.is_dir();
@@ -380,8 +383,11 @@ async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
                     );
                 }
             }
-            // tasklist 进程探测（Windows 可用；macOS/Linux 上恒 false 无副作用）
-            let proc = proc_image.map(image_running).unwrap_or(false);
+            let proc = if backend_by_port {
+                port_holder(48085).is_some()
+            } else {
+                proc_image.map(image_running).unwrap_or(false)
+            };
             (dir_ok, key_ok, proc)
         })
         .await;
@@ -826,6 +832,122 @@ pub async fn service_action(
             &format!("手动{action_label}成功（80 端口监听状态：{running}）"),
         );
         return Json(serde_json::json!({ "ok": true, "running": running, "message": final_msg }));
+    }
+    // dfy-backend：进程管理器通道（registry run_cmd = {java} -jar dfy-server.jar，
+    // start_with_deps 自动带起 MySQL/Redis）。此前没有任何启动入口——装完提示
+    // 「到服务运维启动」但该面板没有启停按钮，用户无从下手。
+    if req.target == "dfy-backend" {
+        if !matches!(req.action.as_str(), "start" | "stop") {
+            return Json(serde_json::json!({ "ok": false, "error": format!("未知操作：{}", req.action) }));
+        }
+        let running_before = blocking(|| port_holder(48085)).await.is_some();
+        crate::debug_log::entry(
+            crate::ops::process::PROC_SCOPE,
+            "INFO",
+            "service_action",
+            "request",
+            &format!(
+                "target=dfy-backend action={} 操作前={}（进程管理器通道）",
+                req.action,
+                if running_before { "运行中" } else { "已停止" }
+            ),
+        );
+        let action_label = if req.action == "start" { "启动" } else { "停止" };
+        let verb = req.action.clone();
+        let st = state.clone();
+        let res = blocking(move || {
+            if verb == "start" {
+                let results =
+                    crate::ops::orchestrator::start_with_deps(&st.procs, &st.registry, "dfy-backend");
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    "INFO",
+                    "start",
+                    "deps_started",
+                    &results
+                        .iter()
+                        .map(|r| format!("{}:{}", r.id, if r.ok { "ok" } else { "失败" }))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+                results
+                    .iter()
+                    .find(|r| !r.ok)
+                    .map(|r| Err::<(), String>(r.error.clone().unwrap_or_else(|| "启动失败".into())))
+                    .unwrap_or(Ok(()))
+            } else {
+                // 停止：句柄树 taskkill（精确杀本平台拉起的 java 进程，不误伤其他 Java 程序）
+                if let Err(e) = st.procs.stop("dfy-backend") {
+                    return Err(format!("停止指令执行失败：{e}"));
+                }
+                Ok(())
+            }
+        })
+        .await;
+        match res {
+            Ok(()) => {}
+            Err(e) => {
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    "ERROR",
+                    "service_action",
+                    "action_failed",
+                    &format!("target=dfy-backend action={} 失败：{e}", req.action),
+                );
+                crate::ops_events::record("user", "dfy-backend", &req.action, false, &e);
+                return Json(serde_json::json!({ "ok": false, "error": e }));
+            }
+        }
+        // 复核：Spring Boot 启动需要 10~30s，立即探测只区分「端口已监听 / 正在启动」。
+        // 未监听时把 spawn 日志尾部带回——Spring Boot 报错（类找不到/配置错误/端口被占）
+        // 当场可见，不用用户翻文件（与 nginx 启动复核同口径）。
+        let up = blocking(|| port_holder(48085)).await.is_some();
+        let spawn_tail = if req.action == "start" && !up {
+            let dir = registry_install_dir(&state, "dfy-backend");
+            blocking(move || {
+                std::fs::read_to_string(format!("{dir}\\logs\\platform-spawn.log"))
+                    .map(|t| {
+                        let ls: Vec<&str> = t.lines().collect();
+                        let start = ls.len().saturating_sub(5);
+                        ls[start..].join(" | ")
+                    })
+                    .unwrap_or_default()
+            })
+            .await
+        } else {
+            String::new()
+        };
+        let msg = if req.action == "start" {
+            if up {
+                "DFY 后端已启动（48085 已监听）".to_string()
+            } else {
+                let hint = if spawn_tail.is_empty() {
+                    "Spring Boot 首次启动约 10~30 秒，请稍后刷新状态确认".to_string()
+                } else {
+                    format!("启动未就绪，进程输出：{spawn_tail}")
+                };
+                format!("DFY 后端启动命令已下发（{hint}）")
+            }
+        } else if up {
+            "停止命令已执行，但 48085 仍被监听——可能有非平台拉起的 Java 进程，请到任务管理器确认".to_string()
+        } else {
+            "DFY 后端已停止".to_string()
+        };
+        crate::debug_log::entry(
+            crate::ops::process::PROC_SCOPE,
+            "INFO",
+            "service_action",
+            "done",
+            &format!("target=dfy-backend action={} 复核 48085={} 耗时={:?}", req.action, up, t0.elapsed()),
+        );
+        crate::ops_events::record(
+            "user",
+            "dfy-backend",
+            &req.action,
+            req.action != "start" || up,
+            &format!("手动{action_label}（48085 监听状态：{up}）"),
+        );
+        return Json(serde_json::json!({ "ok": true, "running": up, "message": msg }));
     }
     if !UNINSTALLABLE.contains(&req.target.as_str()) {
         return Json(serde_json::json!({ "ok": false, "error": format!("不支持的服务：{}", req.target) }));

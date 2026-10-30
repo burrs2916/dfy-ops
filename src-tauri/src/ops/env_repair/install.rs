@@ -540,6 +540,7 @@ pub fn start_zip_install(
 /// `ext_cfg`：安装前配置确认弹窗回传的外部配置（Some 时拷完 jar 生成
 /// config/application-local.yaml，Spring Boot 启动即用它覆盖 jar 内配置）。
 #[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
 pub fn start_jar_install(
     target: &'static str,
     jar_path: String,
@@ -547,6 +548,8 @@ pub fn start_jar_install(
     env_cache: EnvCache,
     state: Arc<RepairState>,
     ext_cfg: Option<crate::ops::external_config::ExternalConfig>,
+    procs: Arc<crate::ops::process::ProcManager>,
+    registry: Vec<crate::ops::registry::ServiceDef>,
 ) -> Result<(), String> {
     if target != "dfy-backend" {
         return Err(format!(
@@ -568,13 +571,14 @@ pub fn start_jar_install(
         job.logs.clear();
     }
     tokio::spawn(async move {
-        run_jar_install(state, jar_path, install_dir, env_cache, ext_cfg).await;
+        run_jar_install(state, jar_path, install_dir, env_cache, ext_cfg, procs, registry).await;
     });
     Ok(())
 }
 
 /// 非 Windows：dev 机不提供 jar 管线（交付平台是 Windows）。
 #[cfg(not(target_os = "windows"))]
+#[allow(clippy::too_many_arguments)]
 pub fn start_jar_install(
     target: &'static str,
     _jar_path: String,
@@ -582,6 +586,8 @@ pub fn start_jar_install(
     _env_cache: EnvCache,
     _state: Arc<RepairState>,
     _ext_cfg: Option<crate::ops::external_config::ExternalConfig>,
+    _procs: Arc<crate::ops::process::ProcManager>,
+    _registry: Vec<crate::ops::registry::ServiceDef>,
 ) -> Result<(), String> {
     Err(format!(
         "jar 安装仅支持 Windows 目标机，{} 请手动拷贝 jar",
@@ -589,7 +595,7 @@ pub fn start_jar_install(
     ))
 }
 
-/// jar 管线主体：拷贝 → 写外部配置 → 验证。
+/// jar 管线主体：拷贝 → 写外部配置 → 验证 → 自动启动（与 nginx 同理念：安装即运行）。
 #[cfg(target_os = "windows")]
 async fn run_jar_install(
     state: Arc<RepairState>,
@@ -597,6 +603,8 @@ async fn run_jar_install(
     install_dir: String,
     env_cache: EnvCache,
     ext_cfg: Option<crate::ops::external_config::ExternalConfig>,
+    procs: Arc<crate::ops::process::ProcManager>,
+    registry: Vec<crate::ops::registry::ServiceDef>,
 ) {
     state.log(format!(
         "开始安装 DFY 后端：{} → {}\\dfy-server.jar",
@@ -671,8 +679,98 @@ async fn run_jar_install(
     };
     match v {
         Ok(Ok(())) => {
-            state.log("验证通过：dfy-server.jar 已就位，请到「服务运维」面板启动后端服务");
-            state.log("提示：首次启动前请确认 JDK 8+ 已安装且 JAVA_HOME 已配置");
+            state.log("验证通过：dfy-server.jar 已就位");
+            // ===== 安装即运行：与 nginx 同理念。start_with_deps 自动带起
+            // MySQL/Redis；Java 未就绪时如实提示（resolve {java} 失败会带原因），
+            // 不再让用户拿着「到服务运维启动」的提示找不到按钮。
+            state.log("正在自动启动 DFY 后端（会先带起 MySQL / Redis 依赖）…");
+            let results = crate::ops::orchestrator::start_with_deps(&procs, &registry, "dfy-backend");
+            for r in &results {
+                if !r.ok {
+                    state.log(format!("依赖启动失败：{} —— {}", r.id, r.error.clone().unwrap_or_default()));
+                }
+            }
+            let backend_err = results
+                .iter()
+                .find(|r| r.id == "dfy-backend" && !r.ok)
+                .and_then(|r| r.error.clone());
+            if let Some(e) = backend_err {
+                state.log(format!(
+                    "DFY 后端自动启动失败：{e}。常见原因：Java 未安装或 JAVA_HOME 未配置——请先在「安装维护」安装 Java（或点「修复环境变量」），再到已安装页 Nginx 页签旁手动点「启动」"
+                ));
+                crate::ops_events::record(
+                    "installer",
+                    "dfy-backend",
+                    "autostart",
+                    false,
+                    &format!("安装完成但自动启动失败：{e}"),
+                );
+            } else {
+                // Spring Boot 启动 10~30s，这里只确认「命令已下发」；真正就绪看 48085。
+                // 2s 后仍未监听：区分「还在启动」与「已经报错秒退」——把 spawn 日志
+                // 尾部带回（nginx 自动启动同款口径），报错当场可见。
+                tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+                let up = crate::ops::process::port_holder(48085).is_some();
+                if up {
+                    state.log("DFY 后端已自动启动（48085 已监听，可通过 Nginx 反代访问页面）");
+                    crate::ops_events::record(
+                        "installer",
+                        "dfy-backend",
+                        "autostart",
+                        true,
+                        "安装完成自动启动（48085 已监听）",
+                    );
+                    debug_log::entry(
+                        debug_log::APP_SCOPE,
+                        "INFO",
+                        "install_autostart",
+                        "dfy-backend",
+                        "自动启动成功（48085 已监听）",
+                    );
+                } else {
+                    let spawn_tail = std::fs::read_to_string(format!(
+                        "{}\\logs\\platform-spawn.log",
+                        install_dir.trim_end_matches('\\')
+                    ))
+                    .map(|t| {
+                        let ls: Vec<&str> = t.lines().collect();
+                        let start = ls.len().saturating_sub(5);
+                        ls[start..].join(" | ")
+                    })
+                    .unwrap_or_default();
+                    state.log(format!(
+                        "DFY 后端启动命令已下发，2 秒内未监听 48085（Spring Boot 正常需 10~30 秒；若一直未就绪说明启动报错）。进程输出：{spawn_tail}"
+                    ));
+                    crate::ops_events::record(
+                        "installer",
+                        "dfy-backend",
+                        "autostart",
+                        true,
+                        &format!("自动启动已下发（2s 内 48085 未监听，Spring Boot 启动中或报错）。spawn 日志：{spawn_tail}"),
+                    );
+                    debug_log::entry(
+                        debug_log::APP_SCOPE,
+                        "WARN",
+                        "install_autostart",
+                        "dfy-backend",
+                        &format!("启动已下发但 2s 内未监听 48085；spawn 日志：{spawn_tail}"),
+                    );
+                }
+            }
+            debug_log::entry(
+                debug_log::APP_SCOPE,
+                "INFO",
+                "install_autostart",
+                "dfy-backend",
+                &format!(
+                    "自动启动已执行（deps={}）",
+                    results
+                        .iter()
+                        .map(|r| format!("{}:{}", r.id, if r.ok { "ok" } else { "失败" }))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ),
+            );
             finish(state, env_cache, true, String::new()).await;
         }
         Ok(Err(e)) => finish(state, env_cache, false, e).await,
