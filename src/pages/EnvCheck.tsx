@@ -117,7 +117,12 @@ export default function EnvCheck() {
   // Windows 上一次要十几秒）
   const { envMap, loading, error, lastUpdate, bootstrap, refreshEnvAll } =
     useOpsStore();
-  const [tab, setTab] = useState<"check" | "repair">("check");
+  const [searchParams, setSearchParams] = useSearchParams();
+  // 「去安装/去修复」跨页跳入时的初始页签：?tab=repair 直达安装维护（ReadinessCard 的
+  // 未安装项跳这里；缺省仍是 check）。只消费一次，之后用户可自由切换。
+  const [tab, setTab] = useState<"check" | "repair">(() =>
+    searchParams.get("tab") === "repair" ? "repair" : "check",
+  );
   const [refreshing, setRefreshing] = useState(false);
   const [copiedAll, setCopiedAll] = useState(false);
   const [acked, setAcked] = useState<Set<string>>(() => loadAck());
@@ -125,7 +130,6 @@ export default function EnvCheck() {
   const [hideAcked, setHideAcked] = useState(false);
   // 轮询开关默认关闭：默认策略「启动检测一次 + 按需手动复检」，与总览一致
   const [live, setLive] = useState(false);
-  const [searchParams, setSearchParams] = useSearchParams();
   // 「去修复」跳入时的目标服务：滚动定位 + 短暂高亮，让用户不用在长页里翻找
   const [highlightId, setHighlightId] = useState<string | null>(null);
 

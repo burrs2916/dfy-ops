@@ -1,13 +1,17 @@
-import { Box, Button, Card, Chip, CircularProgress, Stack, Typography } from "@mui/material";
+import { Box, Button, Card, Chip, CircularProgress, Snackbar, Stack, Typography } from "@mui/material";
 import {
   Build,
   CheckCircle,
+  ContentCopy,
   Dns,
+  Launch,
   PlayArrow,
   RocketLaunchOutlined,
   SettingsSuggest,
 } from "@mui/icons-material";
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { api } from "../api";
 import type { ServiceEnvReport, ServiceStatus } from "../types";
 
 type Tone = "success" | "warning" | "error";
@@ -48,6 +52,58 @@ export default function ReadinessCard({
   onStartService?: (id: string) => void;
 }) {
   const navigate = useNavigate();
+  // 闭环快捷入口的状态反馈：打开平台 / 复制诊断（操作结果短暂提示）
+  const [hint, setHint] = useState("");
+  const [busy, setBusy] = useState<"open" | "diag" | null>(null);
+
+  /** 打开平台页面：后端按 nginx 实际监听端口生成 URL，默认浏览器打开 */
+  const openPlatform = async () => {
+    setBusy("open");
+    try {
+      const r = await api.openPlatform();
+      if (r.ok) {
+        // Nginx 没起来时页面必然 502/拒连，先说清楚去哪启动，别让用户以为是按钮坏了
+        setHint(r.warning ? `已打开 ${r.url}，但${r.warning}` : `已在浏览器打开 ${r.url}`);
+      } else {
+        setHint(r.error || "打开失败");
+      }
+    } catch (e) {
+      setHint("打开失败：" + (e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  /** 一键诊断：生成快照并复制到剪贴板，粘给维护方即可定位问题 */
+  const copyDiagnostics = async () => {
+    setBusy("diag");
+    try {
+      const r = await api.diagnosticsSnapshot();
+      if (r.ok && r.snapshot) {
+        const text = JSON.stringify(r.snapshot, null, 2);
+        try {
+          await navigator.clipboard.writeText(text);
+          setHint("诊断快照已复制到剪贴板（版本 / 服务状态 / 端口占用 / 最近事件 / 日志尾部）");
+        } catch {
+          // 剪贴板 API 被拒绝（非安全上下文等）：退化为直接下载，保住内容不丢
+          const blob = new Blob([text], { type: "application/json" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = "dfy-diagnostics.json";
+          a.click();
+          URL.revokeObjectURL(a.href);
+          setHint("剪贴板不可用，诊断快照已下载为 dfy-diagnostics.json");
+        }
+      } else {
+        setHint(r.error || "生成诊断快照失败");
+      }
+    } catch (e) {
+      setHint("生成诊断失败：" + (e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
   // 全部服务计入分母（桌面客户端平等参与）。
   const managed = services;
   const own = managed.filter((s) => !s.thirdParty);
@@ -109,7 +165,8 @@ export default function ReadinessCard({
       });
       continue;
     }
-    // 2. 未安装：明确判定缺失
+    // 2. 未安装：明确判定缺失。安装入口在修复中心（EnvCheck repair 页签），
+    //    跳服务详情是死路——详情页没有安装按钮（实测反馈）
     if (!s.installed && !s.thirdParty) {
       actions.push({
         key: `missing-${s.id}`,
@@ -117,7 +174,7 @@ export default function ReadinessCard({
         icon: <RocketLaunchOutlined fontSize="small" />,
         text: `${s.name}：尚未安装`,
         action: "去安装",
-        onAct: () => navigate(`/service/${s.id}`),
+        onAct: () => navigate(`/env?tab=repair&service=${s.id}`),
       });
       continue;
     }
@@ -277,9 +334,20 @@ export default function ReadinessCard({
       {/* 待办行动：每条问题点名缺失内容 + 一键解决；全部就绪时给明确绿灯 */}
       {actions.length > 0 ? (
         <Box sx={{ mt: 2 }}>
-          <Typography variant="caption" color="text.secondary">
-            待处理（{actions.length}）——按严重度排序：
-          </Typography>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" sx={{ mb: 0.75 }}>
+            <Typography variant="caption" color="text.secondary">
+              待处理（{actions.length}）——按严重度排序：
+            </Typography>
+            <Button
+              size="small"
+              startIcon={<ContentCopy />}
+              onClick={copyDiagnostics}
+              disabled={busy === "diag"}
+              sx={{ flexShrink: 0 }}
+            >
+              复制诊断
+            </Button>
+          </Stack>
           <Stack spacing={0.75} sx={{ mt: 0.75 }}>
             {actions.map((a) => (
               <Stack
@@ -310,13 +378,35 @@ export default function ReadinessCard({
           </Stack>
         </Box>
       ) : (
-        <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 2 }}>
-          <CheckCircle color="success" fontSize="small" />
-          <Typography variant="body2" sx={{ fontWeight: 600 }}>
-            一切就绪：所有服务运行正常，环境全部满足
+        <Stack spacing={1} sx={{ mt: 2 }}>
+          <Stack direction="row" spacing={1} alignItems="center">
+            <CheckCircle color="success" fontSize="small" />
+            <Typography variant="body2" sx={{ fontWeight: 600, flex: 1 }}>
+              一切就绪：所有服务运行正常，环境全部满足
+            </Typography>
+            <Button
+              size="small"
+              variant="contained"
+              startIcon={<Launch />}
+              onClick={openPlatform}
+              disabled={busy === "open"}
+              sx={{ flexShrink: 0 }}
+            >
+              打开平台
+            </Button>
+          </Stack>
+          <Typography variant="caption" color="text.secondary">
+            平台页面即业务系统入口（http://localhost/）——装完即可直接使用，无需手动敲地址。
           </Typography>
         </Stack>
       )}
+      <Snackbar
+        open={!!hint}
+        autoHideDuration={3500}
+        onClose={() => setHint("")}
+        message={hint}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      />
     </Card>
   );
 }

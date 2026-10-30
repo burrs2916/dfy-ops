@@ -547,6 +547,22 @@ export const api = {
       `/api/services/${id}/open-config-dir${dir ? `?dir=${dir}` : ""}`,
       { method: "POST" },
     ),
+  // 一键打开平台页面（后端按 nginx 实际监听端口生成 URL，默认浏览器打开）
+  openPlatform: () =>
+    request<{
+      ok: boolean;
+      url?: string;
+      nginxRunning?: boolean;
+      warning?: string;
+      error?: string;
+    }>("/api/platform/open", {
+      method: "POST",
+    }),
+  // 一键诊断快照（版本+服务状态+端口占用+最近事件），复制给维护方即可定位
+  diagnosticsSnapshot: () =>
+    request<{ ok: boolean; snapshot?: Record<string, unknown>; error?: string }>(
+      "/api/diagnostics/snapshot",
+    ),
 };
 
 /** 保存类接口的统一解包：失败直接抛错，成功返回最新配置。 */

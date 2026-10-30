@@ -184,6 +184,13 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/services/:id/open-config-dir",
             axum::routing::post(handlers::open_config_dir),
         )
+        // 一键打开平台页面（按 nginx 实际监听端口生成 URL，默认浏览器打开）
+        .route("/api/platform/open", axum::routing::post(handlers::platform_open))
+        // 一键诊断快照（版本+服务状态+端口占用+最近事件，复制给维护方即可定位）
+        .route(
+            "/api/diagnostics/snapshot",
+            axum::routing::get(handlers::diagnostics_snapshot),
+        )
         // 环境修复：POST 启动（分级：无需修复/配置指引/自动安装），GET 轮询任务状态
         .route(
             "/api/env/repair",

@@ -1063,6 +1063,148 @@ pub async fn open_config_dir(
     }
 }
 
+/// 一键打开平台页面：读取 nginx 实际监听端口生成 URL，用默认浏览器打开。
+/// 安装完成后闭环的最后一厘米——不再让用户自己开浏览器敲 localhost。
+/// URL 以 nginx.conf 的 listen 为准（用户改过端口也能打开对的地址）。
+pub async fn platform_open(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    // 读 nginx.conf 的 listen（未装/读取失败时兜底 80）
+    let port = match find_def(&state, "nginx") {
+        Some(def) => {
+            let dir = std::path::PathBuf::from(&def.install_dir);
+            match crate::ops::nginx_config::read(&dir) {
+                Ok(Some(c)) if !c.listen_port.trim().is_empty() => c.listen_port.trim().to_string(),
+                _ => "80".to_string(),
+            }
+        }
+        None => "80".to_string(),
+    };
+    let url = format!("http://localhost:{port}/");
+    // 打开前探测 Nginx 运行态：浏览器能开但页面 502（Nginx 没跑/后端没跑）时
+    // 用户会以为按钮坏了——如实在响应里预警，前端展示提醒
+    let nginx_running = tokio::task::spawn_blocking(|| {
+        crate::api::handlers_repair::image_running("nginx.exe")
+    })
+    .await
+    .unwrap_or(false);
+    let url_for_cmd = url.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            std::process::Command::new("cmd")
+                .args(["/C", "start", "", &url_for_cmd])
+                .creation_flags(0x0800_0000)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            std::process::Command::new("open")
+                .arg(&url_for_cmd)
+                .spawn()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
+        }
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {
+            crate::debug_log::entry(
+                crate::debug_log::APP_SCOPE,
+                "INFO",
+                "platform_open",
+                "open",
+                &format!("打开平台页面 {url}"),
+            );
+            crate::ops_events::record("user", "nginx", "platform_open", true, &format!("浏览器打开 {url}"));
+            Json(serde_json::json!({
+                "ok": true,
+                "url": url,
+                "nginxRunning": nginx_running,
+                "warning": if nginx_running { None } else {
+                    Some("Nginx 未运行，页面可能无法访问——请先到「安装维护 → 已安装」启动 Nginx".to_string())
+                },
+            }))
+        }
+        Ok(Err(m)) => {
+            crate::debug_log::entry(
+                crate::debug_log::APP_SCOPE,
+                "WARN",
+                "platform_open",
+                "open_failed",
+                &format!("打开 {url} 失败：{m}"),
+            );
+            Json(serde_json::json!({ "ok": false, "error": format!("打开浏览器失败：{m}"), "url": url }))
+        }
+        Err(j) => {
+            crate::debug_log::entry(
+                crate::debug_log::APP_SCOPE,
+                "WARN",
+                "platform_open",
+                "open_failed",
+                &format!("打开 {url} 任务异常：{j}"),
+            );
+            Json(serde_json::json!({ "ok": false, "error": format!("打开浏览器失败：{j}"), "url": url }))
+        }
+    }
+}
+
+/// 一键诊断快照：把「排查一次故障要看的所有状态」汇总成一段 JSON——
+/// 版本、各服务安装/运行态、关键端口占用、最近 20 条运维事件。
+/// 用户点「复制诊断」粘给维护方（或 AI），不用再手动翻 debug.log。
+pub async fn diagnostics_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    // 各服务判定：复用修复中心的探测口径（install_dir + 关键文件 + 运行态）
+    let mut services = serde_json::Map::new();
+    for id in ["mysql", "redis", "java", "nginx", "dfy-backend", "dfy-ui"] {
+        let (installed, dir_ok, running) =
+            crate::api::handlers_repair::probe_target(&state, id).await;
+        services.insert(
+            id.to_string(),
+            serde_json::json!({ "installed": installed, "dirOk": dir_ok, "running": running }),
+        );
+    }
+    // 关键端口占用（48085=后端，80=平台入口；占用者一并给出）
+    let ports = tokio::task::spawn_blocking(|| {
+        let b = crate::api::handlers_repair::port_holder(48085)
+            .map(|(pid, n)| format!("{pid} {n}"));
+        let n = crate::api::handlers_repair::port_holder(80).map(|(pid, n)| format!("{pid} {n}"));
+        serde_json::json!({ "48085": b, "80": n })
+    })
+    .await
+    .unwrap_or(serde_json::json!({}));
+    // 最近 20 条运维事件（时间轴快照）
+    let events = crate::ops_events::recent(20)
+        .into_iter()
+        .map(|e| {
+            serde_json::json!({
+                "ts": e.ts, "actor": e.actor, "target": e.target,
+                "action": e.action, "ok": e.ok, "detail": e.detail,
+            })
+        })
+        .collect::<Vec<_>>();
+    // debug.log 尾部 30 行：最近的日志现场直接进快照，维护方少一步要文件
+    let debug_log_tail = tokio::task::spawn_blocking(|| crate::debug_log::tail_lines(30))
+        .await
+        .unwrap_or_default();
+    let snapshot = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "generatedAt": chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        "services": services,
+        "ports": ports,
+        "recentEvents": events,
+        "debugLogTail": debug_log_tail,
+    });
+    crate::debug_log::entry(
+        crate::debug_log::APP_SCOPE,
+        "INFO",
+        "diagnostics",
+        "snapshot",
+        &format!("生成诊断快照（{} 字节）", snapshot.to_string().len()),
+    );
+    Json(serde_json::json!({ "ok": true, "snapshot": snapshot }))
+}
+
 /// 环境检查全量结果的缓存有效期：全量探测含多次子进程调用（java/-version 等），开销大。
 const ENV_CACHE_TTL: Duration = Duration::from_secs(60);
 

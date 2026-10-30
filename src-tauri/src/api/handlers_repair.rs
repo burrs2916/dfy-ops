@@ -282,7 +282,7 @@ pub(crate) fn port_holder(port: u16) -> Option<(u32, String)> {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn port_holder(_port: u16) -> Option<(u32, String)> {
+pub(crate) fn port_holder(_port: u16) -> Option<(u32, String)> {
     None
 }
 
@@ -334,7 +334,7 @@ fn find_key_shallow(dir: &std::path::Path, key: &str, depth: u8) -> bool {
 ///    按 install_dir 根 + nginx.exe 判已装（根上没有时限深搜子目录兜底）
 /// 4. dfy-backend/dfy-ui — 无 service_spec（jar 拷贝管线 / 静态目录），按
 ///    install_dir + 关键文件（dfy-server.jar / index.html）判已装（同样限深兜底）
-async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
+pub(crate) async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
     if target == "java" {
         let installed = blocking(|| {
             !crate::ops::env_repair::java_msi_entries().is_empty()

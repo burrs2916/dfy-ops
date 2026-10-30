@@ -37,6 +37,35 @@ pub fn registered_paths() -> Vec<PathBuf> {
     PATHS.get().map(|p| p.as_ref().clone()).unwrap_or_default()
 }
 
+/// 读取 debug.log 尾部 n 行（取第一个读得到的已注册路径）。
+/// 供诊断快照回显——用户把快照贴给维护方时，最近的日志现场一起带上，
+/// 省一次打开文件的来回。未初始化/读不到时返回空（快照照常生成）。
+pub fn tail_lines(n: usize) -> Vec<String> {
+    let Some(paths) = PATHS.get() else {
+        return Vec::new();
+    };
+    for path in paths.iter() {
+        let Ok(content) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        let lines: Vec<&str> = content.lines().collect();
+        let start = lines.len().saturating_sub(n);
+        return lines[start..]
+            .iter()
+            .map(|l| {
+                // entry 已限 4096 字符，但 write_line 直写不限——防个别长行撑爆快照
+                if l.chars().count() > 500 {
+                    let head: String = l.chars().take(500).collect();
+                    format!("{head}…")
+                } else {
+                    (*l).to_string()
+                }
+            })
+            .collect();
+    }
+    Vec::new()
+}
+
 /// 追加一行到单个 debug.log 文件。
 /// Best-effort：返回 Result 但调用方可以 `.ok()` 忽略——debug.log 挂了不能拖垮主流程。
 /// 文件超过 5MB 时先截断再写。
