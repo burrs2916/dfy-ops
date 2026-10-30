@@ -132,7 +132,7 @@ async fn finish(state: Arc<RepairState>, env_cache: EnvCache, ok: bool, error: S
             let detail = if error.is_empty() {
                 "任务完成".to_string()
             } else {
-                format!("任务失败：{}", &error.chars().take(160).collect::<String>())
+                format!("任务失败：{}", error.chars().take(160).collect::<String>())
             };
             let actor = if op == "uninstall" { "user" } else { "installer" };
             crate::ops_events::record(actor, t, &op, ok, &detail);
