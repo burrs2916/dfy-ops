@@ -31,8 +31,15 @@ const ACTOR_LABEL: Record<string, string> = {
 };
 
 /** 运维启停事件时间轴：谁在何时对哪个组件做了什么、结果如何。
- *  `refreshKey` 变化时重新拉取（父级在启停/安装完成后递增）。 */
-export default function OpsEventTimeline({ refreshKey }: { refreshKey: number }) {
+ *  `refreshKey` 变化时重新拉取（父级在启停/安装完成后递增）。
+ *  `target` 传入时只展示该组件的事件（服务自己的页签内展示自己的历史）。 */
+export default function OpsEventTimeline({
+  refreshKey,
+  target,
+}: {
+  refreshKey: number;
+  target?: string;
+}) {
   const [events, setEvents] = useState<OpsEventItem[] | null>(null);
   const [expanded, setExpanded] = useState(false);
 
@@ -49,7 +56,8 @@ export default function OpsEventTimeline({ refreshKey }: { refreshKey: number })
     void load();
   }, [load, refreshKey]);
 
-  const shown = expanded ? (events ?? []).slice(0, 20) : (events ?? []).slice(0, 6);
+  const scoped = target ? (events ?? []).filter((e) => e.target === target) : events ?? [];
+  const shown = expanded ? scoped.slice(0, 20) : scoped.slice(0, 6);
 
   return (
     <Paper variant="outlined" sx={{ px: 2, py: 1.5 }}>
@@ -115,10 +123,10 @@ export default function OpsEventTimeline({ refreshKey }: { refreshKey: number })
               </Typography>
             </Stack>
           ))}
-          {(events?.length ?? 0) > 6 && (
+          {scoped.length > 6 && (
             <Box>
               <Button size="small" onClick={() => setExpanded((v) => !v)} sx={{ textTransform: "none" }}>
-                {expanded ? "收起" : `展开更多（共 ${events?.length ?? 0} 条）`}
+                {expanded ? "收起" : `展开更多（共 ${scoped.length} 条）`}
               </Button>
             </Box>
           )}

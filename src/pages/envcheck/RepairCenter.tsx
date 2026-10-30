@@ -369,6 +369,8 @@ export default function RepairCenter({
 
   // 安装与维护的子页签（待安装/已安装/远程部署）
   const [instTab, setInstTab] = useState<"toInstall" | "installed" | "remote">("toInstall");
+  /** 已安装页签内当前查看的服务（二级 Tab）；切换探测结果后自动校正为列表首项 */
+  const [instSvcTab, setInstSvcTab] = useState<string>("");
 
   // 固定远程服务的托管端点（远程部署卡片直接展示各自的检测目标）：
   // 与「远程部署」配置面板同一可信源；未配置时值为 null（引导先去配置）。
@@ -905,9 +907,27 @@ export default function RepairCenter({
                         hint="在「待安装」页一键安装后，软件会出现在这里（可重装 / 卸载）"
                       />
                     ) : (
-                      installedList.map((t) => renderCard(t))
+                      <>
+                        {/* 每个服务一个页签：独占整页宽度，启停事件跟随服务展示，
+                            不再所有卡片竖排 + 全局事件堆底（分不清是谁的事件） */}
+                        <Tabs
+                          value={installedList.includes(instSvcTab) ? instSvcTab : installedList[0]}
+                          onChange={(_, v: string) => setInstSvcTab(v)}
+                          sx={{ "& .MuiTab-root": { textTransform: "none", minHeight: 44 } }}
+                        >
+                          {installedList.map((t) => (
+                            <Tab key={t} value={t} label={TARGET_LABEL[t] ?? t.toUpperCase()} />
+                          ))}
+                        </Tabs>
+                        {renderCard(
+                          installedList.includes(instSvcTab) ? instSvcTab : installedList[0],
+                        )}
+                        <OpsEventTimeline
+                          refreshKey={eventRefresh}
+                          target={installedList.includes(instSvcTab) ? instSvcTab : installedList[0]}
+                        />
+                      </>
                     )}
-                    <OpsEventTimeline refreshKey={eventRefresh} />
                   </Stack>
                 )}
 

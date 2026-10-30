@@ -620,6 +620,14 @@ fn spawn_detached(cwd: &str, cmd: &str) -> std::io::Result<Child> {
     let mut command = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
         c.args(["/C", cmd]);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            // GUI 应用 spawn cmd /C 会弹黑色控制台框（nginx 启停首当其冲，
+            // 用户还会误关窗口连带杀掉服务进程），必须隐藏
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            c.creation_flags(CREATE_NO_WINDOW);
+        }
         c
     } else {
         let mut c = Command::new("sh");
@@ -656,6 +664,13 @@ fn spawn_detached_logged(cwd: &str, cmd: &str, log_path: &str) -> std::io::Resul
     let mut command = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
         c.args(["/C", cmd]);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            // 同 spawn_detached：隐藏控制台窗口，避免每次启停弹黑框
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            c.creation_flags(CREATE_NO_WINDOW);
+        }
         c
     } else {
         let mut c = Command::new("sh");
@@ -685,6 +700,13 @@ fn spawn_to_log(cwd: &str, cmd: &str, log_path: &str) -> std::io::Result<Child> 
     let mut command = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
         c.args(["/C", cmd]);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            // 同 spawn_detached：隐藏控制台窗口，避免每次启停弹黑框
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            c.creation_flags(CREATE_NO_WINDOW);
+        }
         c
     } else {
         let mut c = Command::new("sh");

@@ -485,6 +485,61 @@ pub struct ServiceActionReq {
     pub action: String,
 }
 
+/// nginx 停止兜底清理（Windows）：procs.stop 只杀「平台句柄对应的那棵树」；
+/// 看门狗自动拉起或多实例场景下，其他 nginx.exe 实例不在这棵树里（实测：
+/// taskkill 成功后探测仍 running=true，二次点停止时句柄已回收连 taskkill 都
+/// 不再执行）。这里依次：nginx -s stop（优雅，按 PID 文件通知 master 收尾
+/// 全部 worker）→ 轮询确认 → 仍残留则按镜像名 taskkill 清场（nginx.exe 由
+/// 平台独占托管，镜像级清理安全）。
+#[cfg(target_os = "windows")]
+fn force_stop_nginx(install_dir: &str) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    // 1) 优雅停止信号：pid 文件失效（多实例/无 pid）时 nginx 报错，忽略即可
+    let stop = std::process::Command::new(format!("{install_dir}/nginx.exe"))
+        .args(["-p", install_dir, "-c", "conf/nginx.conf", "-s", "stop"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    crate::debug_log::entry(
+        crate::ops::process::PROC_SCOPE,
+        if stop.as_ref().map(|o| o.status.success()).unwrap_or(false) { "INFO" } else { "WARN" },
+        "stop",
+        "nginx_signal",
+        &format!(
+            "nginx -s stop 退出码：{}（pid 文件失效时报错属预期）",
+            stop.as_ref().map(|o| o.status.code().unwrap_or(-1)).unwrap_or(-1)
+        ),
+    );
+    // 2) 轮询确认（最多 ~3s），给优雅退出留时间
+    for _ in 0..6 {
+        if !image_running("nginx.exe") {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+    // 3) 镜像级兜底：连 worker 树一起清
+    let out = std::process::Command::new("taskkill")
+        .args(["/IM", "nginx.exe", "/T", "/F"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output();
+    crate::debug_log::entry(
+        crate::ops::process::PROC_SCOPE,
+        if out.as_ref().map(|o| o.status.success()).unwrap_or(false) { "INFO" } else { "WARN" },
+        "stop",
+        "nginx_killall",
+        &format!(
+            "taskkill /IM nginx.exe 兜底：{}",
+            out.as_ref()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().chars().take(80).collect::<String>())
+                .unwrap_or_else(|e| format!("调用失败：{e}"))
+        ),
+    );
+}
+
+/// 非 Windows（dev 机）：无进程托管，空实现。
+#[cfg(not(target_os = "windows"))]
+fn force_stop_nginx(_install_dir: &str) {}
+
 /// POST /api/env/repair/service —— 启动 / 停止平台注册的第三方服务。
 /// 分两类：
 /// - mysql/redis/java：Windows 服务，net start/stop（runas_wait 一次 UAC）
@@ -573,7 +628,13 @@ pub async fn service_action(
                     .map(|r| Err::<(), String>(r.error.clone().unwrap_or_else(|| "启动失败".into())))
                     .unwrap_or(Ok(()))
             } else {
-                st.procs.stop(&tgt).map_err(|e| e.to_string())
+                let r = st.procs.stop(&tgt).map_err(|e| e.to_string());
+                // 兜底清理：句柄树之外可能有看门狗拉起/历史实例的 nginx.exe
+                // 残留（procs.stop 在句柄已回收时是 no-op），必须补优雅信号
+                // 与镜像级清场，否则「停止成功」探测仍 running=true
+                let dir = registry_install_dir(&st, "nginx");
+                force_stop_nginx(&dir);
+                r
             }
         })
         .await;
