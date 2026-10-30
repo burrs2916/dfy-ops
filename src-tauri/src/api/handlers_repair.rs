@@ -247,7 +247,7 @@ pub fn image_running(img: &str) -> bool {
 /// tasklist 反查进程名。查不到名字（如 PID 4 = System/http.sys）时返回占位说明。
 /// 仅 Windows；非 Windows 恒 None。
 #[cfg(target_os = "windows")]
-fn port_holder(port: u16) -> Option<(u32, String)> {
+pub(crate) fn port_holder(port: u16) -> Option<(u32, String)> {
     let out = std::process::Command::new("netstat")
         .args(["-ano", "-p", "tcp"])
         .output()

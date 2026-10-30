@@ -710,7 +710,7 @@ async fn run_jar_install(
                 // 2s 后仍未监听：区分「还在启动」与「已经报错秒退」——把 spawn 日志
                 // 尾部带回（nginx 自动启动同款口径），报错当场可见。
                 tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
-                let up = crate::ops::process::port_holder(48085).is_some();
+                let up = crate::api::handlers_repair::port_holder(48085).is_some();
                 if up {
                     state.log("DFY 后端已自动启动（48085 已监听，可通过 Nginx 反代访问页面）");
                     crate::ops_events::record(
