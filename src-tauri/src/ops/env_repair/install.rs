@@ -903,9 +903,9 @@ async fn run_zip_install(
         && std::fs::read_dir(&install_dir).map(|d| d.count()).unwrap_or(0) > 0;
     if reinstalling {
         let busy = match target {
-            "nginx" => crate::ops::process::image_running("nginx.exe"),
-            "mysql" => crate::ops::process::image_running("mysqld.exe"),
-            "redis" => crate::ops::process::image_running("redis-server.exe"),
+            "nginx" => crate::api::handlers_repair::image_running("nginx.exe"),
+            "mysql" => crate::api::handlers_repair::image_running("mysqld.exe"),
+            "redis" => crate::api::handlers_repair::image_running("redis-server.exe"),
             _ => false,
         };
         state.log(format!("检测到 {label} 已有安装目录，本次为覆盖安装（重装）"));
