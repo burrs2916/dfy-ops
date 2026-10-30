@@ -207,9 +207,9 @@ pub async fn start_generic_repair(
 // ===== 卸载 / 维护 =====
 
 /// 平台内卸载覆盖：mysql/redis（zip 管线，服务+目录全由平台掌控）+ java
-/// （MSI 注册表条目静默卸载）+ nginx（Windows 服务可选注册，先优雅停服再删目录）。
-/// dfy-backend/dfy-ui 暂不支持平台内卸载（无服务注册，jar 拷贝产物/静态目录）。
-pub const UNINSTALLABLE: [&str; 4] = ["mysql", "redis", "java", "nginx"];
+/// （MSI 注册表条目静默卸载）+ nginx（Windows 服务可选注册，先优雅停服再删目录）
+/// + dfy-backend/dfy-ui（无服务注册，停平台进程 + 删目录）。
+pub const UNINSTALLABLE: [&str; 6] = ["mysql", "redis", "java", "nginx", "dfy-backend", "dfy-ui"];
 
 /// 可探测安装痕迹的全部目标（= UNINSTALLABLE + 三个云端组件）。
 /// 这三个云端组件不注册 Windows 服务、不走 net start/stop，但需要在修复中心
@@ -940,6 +940,36 @@ pub async fn service_action(
             "done",
             &format!("target=dfy-backend action={} 复核 48085={} 耗时={:?}", req.action, up, t0.elapsed()),
         );
+        // 启动未就绪 → 30 秒后回看一次：Spring Boot 到底起来没有，给日志一个
+        // 最终结论（start_confirm）。没有这个闭环，「一直起不来」在日志里查无实据。
+        if req.action == "start" && !up {
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let ok = tokio::task::spawn_blocking(|| port_holder(48085).is_some()).await;
+                let ready = matches!(ok, Ok(true));
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    if ready { "INFO" } else { "WARN" },
+                    "service_action",
+                    "start_confirm",
+                    &format!(
+                        "target=dfy-backend 启动 30s 后复核 48085={}——{}",
+                        ready,
+                        if ready { "Spring Boot 已就绪" } else { "仍未监听：进程可能已退出，查 watchdog/start_failed 或 platform-spawn.log" }
+                    ),
+                );
+                crate::ops_events::record(
+                    "platform",
+                    "dfy-backend",
+                    "start_confirm",
+                    ready,
+                    &format!(
+                        "启动 30s 后确认：{}",
+                        if ready { "48085 已监听，服务就绪" } else { "48085 未监听，请查看启动日志定位" }
+                    ),
+                );
+            });
+        }
         crate::ops_events::record(
             "user",
             "dfy-backend",
@@ -1852,7 +1882,29 @@ pub async fn uninstall(
     // 关联影响探测：nginx 是前端 SPA 的反代入口，卸载直接影响页面可达性；
     // 后端留痕 + 返回提示，前端确认框据此显示强警告
     let mut notices: Vec<String> = Vec::new();
-    if target == "nginx" {
+    if target == "dfy-backend" {
+        let backend_up = blocking(|| port_holder(48085)).await.is_some();
+        debug_log::entry(
+            debug_log::APP_SCOPE,
+            "INFO",
+            "uninstall",
+            "dependency_check",
+            &format!(
+                "target=dfy-backend 48085监听={backend_up} —— 卸载后反代 /admin-api/ 将 502，前端页面不可用"
+            ),
+        );
+        notices.push("卸载后 Nginx 反代 /admin-api/ 将返回 502，前端页面不可用（重新安装后恢复）".into());
+        notices.push("将停止平台拉起的 Java 进程（不影响机器上其他 Java 程序）".into());
+    } else if target == "dfy-ui" {
+        debug_log::entry(
+            debug_log::APP_SCOPE,
+            "INFO",
+            "uninstall",
+            "dependency_check",
+            "target=dfy-ui —— 卸载后 Nginx root 指向目录消失，前端页面将 404",
+        );
+        notices.push("卸载后 Nginx 的 root 指向目录消失，前端页面将返回 404（重新安装后恢复）".into());
+    } else if target == "nginx" {
         let backend_port_free = blocking(|| port_holder(48085)).await.is_none();
         let running_before = blocking(|| image_running("nginx.exe")).await;
         debug_log::entry(
@@ -1896,6 +1948,7 @@ pub async fn uninstall(
         input.remove_data,
         install_dir,
         state.config_dir.to_string_lossy().to_string(),
+        state.procs.clone(),
         state.env_cache.clone(),
         state.repair.clone(),
     ) {

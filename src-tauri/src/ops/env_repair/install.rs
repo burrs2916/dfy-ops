@@ -663,14 +663,14 @@ async fn run_jar_install(
         state.log("未提供外部配置：后端将使用 jar 内置默认配置（端口 48085 / dfy_base_db）");
     }
 
-    // ===== 验证：jar 存在 =====
+    // ===== 验证：jar 存在（大小一并落日志，拷贝完整性可对照） =====
     state.patch(|j| j.stage = "verify".into());
     let v = {
         let id = install_dir.clone();
         tokio::task::spawn_blocking(move || {
             let p = std::path::Path::new(&id).join("dfy-server.jar");
             if p.is_file() {
-                Ok(())
+                Ok(std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0))
             } else {
                 Err(format!("拷贝完成但未找到 dfy-server.jar：{}", p.display()))
             }
@@ -678,8 +678,10 @@ async fn run_jar_install(
         .await
     };
     match v {
-        Ok(Ok(())) => {
-            state.log("验证通过：dfy-server.jar 已就位");
+        Ok(Ok(jar_len)) => {
+            state.log(format!(
+                "验证通过：dfy-server.jar 已就位（{jar_len} 字节）"
+            ));
             // ===== 安装即运行：与 nginx 同理念。start_with_deps 自动带起
             // MySQL/Redis；Java 未就绪时如实提示（resolve {java} 失败会带原因），
             // 不再让用户拿着「到服务运维启动」的提示找不到按钮。
@@ -1274,13 +1276,35 @@ async fn run_zip_install(
             if !idx.is_file() {
                 Err(format!("未找到 index.html：{}（解压后前端文件不完整）", idx.display()))
             } else {
-                Ok(())
+                // dist 规模一并落日志：识别「装了但 zip 是空包/只有半包」
+                fn count(d: &std::path::Path, n: &mut u64, bytes: &mut u64, depth: u32) {
+                    if depth > 6 {
+                        return;
+                    }
+                    if let Ok(rd) = std::fs::read_dir(d) {
+                        for e in rd.flatten() {
+                            let p = e.path();
+                            if p.is_dir() {
+                                count(&p, n, bytes, depth + 1);
+                            } else if let Ok(m) = e.metadata() {
+                                *n += 1;
+                                *bytes += m.len();
+                            }
+                        }
+                    }
+                }
+                let mut n = 0u64;
+                let mut bytes = 0u64;
+                count(p, &mut n, &mut bytes, 0);
+                Ok((n, bytes))
             }
         })
         .await;
         match v {
-            Ok(Ok(())) => {
-                state.log("验证通过：dfy-ui 前端静态文件已就绪，请到「服务运维」面板启动 nginx 访问");
+            Ok(Ok((files, bytes))) => {
+                state.log(format!(
+                    "验证通过：dfy-ui 前端静态文件已就绪（{files} 个文件 / {bytes} 字节）"
+                ));
                 state.log(format!(
                     "[状态自检] 修复中心探测基准：{}\\index.html 存在 = 已安装",
                     install_dir
@@ -1291,6 +1315,43 @@ async fn run_zip_install(
                     "install_verify",
                     "dfy-ui",
                     &format!("基准 {}\\index.html；home={}", install_dir, home),
+                );
+                // ===== 装完页面立刻可达：前端是静态目录，由 nginx 托管——
+                // nginx 未启动时拉起（已在跑则 skip_running 跳过）。
+                // 与 dfy-backend 同理念：默认自动启动，运维启停走独立按钮。
+                state.log("正在确保 Nginx 运行（前端页面由 Nginx 托管）…");
+                let results = crate::ops::orchestrator::start_with_deps(&procs, &registry, "nginx");
+                for r in &results {
+                    if !r.ok {
+                        state.log(format!(
+                            "Nginx 启动失败：{}（页面暂时打不开——请先解决 Nginx 再访问）",
+                            r.error.clone().unwrap_or_default()
+                        ));
+                    }
+                }
+                let nginx_ok = results.iter().all(|r| r.ok);
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                let up = crate::api::handlers_repair::image_running("nginx.exe");
+                if nginx_ok && up {
+                    state.log("Nginx 运行中：现在可直接访问前端页面（http://localhost/）");
+                } else if nginx_ok {
+                    state.log("Nginx 启动命令已下发（1.5s 内未探到进程，请稍后刷新状态确认）");
+                }
+                crate::ops_events::record(
+                    "installer",
+                    "dfy-ui",
+                    "autostart",
+                    nginx_ok,
+                    &format!("安装完成确保 Nginx 托管（nginx.exe 进程探测：{up}）"),
+                );
+                debug_log::entry(
+                    debug_log::APP_SCOPE,
+                    if nginx_ok { "INFO" } else { "WARN" },
+                    "install_autostart",
+                    "dfy-ui",
+                    &format!(
+                        "确保 Nginx 运行：deps_ok={nginx_ok} nginx.exe 进程={up}（页面可达的前置条件）"
+                    ),
                 );
                 finish(state, env_cache, true, String::new()).await;
             }

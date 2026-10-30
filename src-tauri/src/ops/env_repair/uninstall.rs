@@ -165,12 +165,16 @@ pub fn start_uninstall(
     remove_data: bool,
     install_dir: String,
     config_dir: String,
+    procs: Arc<crate::ops::process::ProcManager>,
     env_cache: EnvCache,
     state: Arc<RepairState>,
 ) -> Result<(), String> {
-    if !matches!(target, "mysql" | "redis" | "java" | "nginx") {
+    if !matches!(
+        target,
+        "mysql" | "redis" | "java" | "nginx" | "dfy-backend" | "dfy-ui"
+    ) {
         return Err(format!(
-            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis/Java/Nginx），请使用 AI 方案或控制面板手动卸载",
+            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis/Java/Nginx/DFY 后端/DFY 前端），请使用 AI 方案或控制面板手动卸载",
             crate::ops::resource::target_label(target)
         ));
     }
@@ -188,7 +192,7 @@ pub fn start_uninstall(
         job.logs.clear();
     }
     tokio::spawn(async move {
-        run_uninstall(state, target, remove_data, install_dir, config_dir, env_cache).await;
+        run_uninstall(state, target, remove_data, install_dir, config_dir, procs, env_cache).await;
     });
     Ok(())
 }
@@ -200,6 +204,7 @@ pub fn start_uninstall(
     _remove_data: bool,
     _install_dir: String,
     _config_dir: String,
+    _procs: Arc<crate::ops::process::ProcManager>,
     _env_cache: EnvCache,
     _state: Arc<RepairState>,
 ) -> Result<(), String> {
@@ -209,6 +214,152 @@ pub fn start_uninstall(
     ))
 }
 
+/// dfy-backend / dfy-ui 通用卸载：无服务注册、无 MSI 条目，产物是「平台进程 + 目录」。
+/// - dfy-backend：先停平台拉起的 java 进程树（不误伤其他 Java 程序），再删目录
+/// - dfy-ui：纯目录删除（nginx root 指向它，卸载后页面 404——日志提示）
+/// 成败以复核为准：目录不存在 = 成功。
+#[cfg(target_os = "windows")]
+async fn run_flat_dir_uninstall(
+    state: Arc<RepairState>,
+    target: &'static str,
+    install_dir: String,
+    procs: Arc<crate::ops::process::ProcManager>,
+    env_cache: EnvCache,
+) {
+    use crate::ops::resource::target_label;
+    let label = target_label(target);
+    let is_backend = target == "dfy-backend";
+
+    // 前置探测：目录与进程现状（用户在卸载前看清要删什么）
+    let dir_exists = std::path::Path::new(&install_dir).is_dir();
+    let backend_up = is_backend
+        && crate::api::handlers_repair::port_holder(48085).is_some();
+    state.log(format!("开始卸载 {label}（目录 {install_dir}）"));
+    state.log(format!(
+        "当前状态：安装目录 {}，后端 48085 {}",
+        if dir_exists { "存在" } else { "不存在" },
+        if backend_up { "监听中（将先停止）" } else { "未监听" }
+    ));
+    if !dir_exists {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!("未检测到 {label} 的安装痕迹（目录 {install_dir} 不存在），无需卸载"),
+        )
+        .await;
+        return;
+    }
+    if is_backend {
+        state.log("提示：卸载后 Nginx 反代 /admin-api/ 将返回 502，前端页面不可用（重新安装后恢复）");
+    } else {
+        state.log("提示：卸载后 Nginx 的 root 指向目录消失，前端页面将返回 404（重新安装后恢复）");
+    }
+
+    state.patch(|j| j.stage = "uninstall".into());
+
+    // dfy-backend 运行中：先停进程树（平台句柄精确杀；停止动作已写 debug.log）
+    if is_backend {
+        if backend_up {
+            state.log("后端运行中 → 先停止平台拉起的 Java 进程…");
+            state.patch(|j| j.stage = "stop".into());
+            if let Err(e) = procs.stop("dfy-backend") {
+                state.log(format!(
+                    "停止指令执行失败：{e}（目录删除后进程自然失去工作目录，复核仍会确认 48085）"
+                ));
+            }
+        } else {
+            state.log("后端未在运行，跳过进程停止");
+        }
+    }
+
+    state.patch(|j| j.stage = "delete".into());
+    // 删除前记录目录规模（文件数/字节数）：事后确认「删了什么、删干净没有」的唯一证据
+    let scale = {
+        let dir = install_dir.clone();
+        tokio::task::spawn_blocking(move || {
+            fn walk(d: &std::path::Path, n: &mut u64, bytes: &mut u64, depth: u32) {
+                if depth > 8 {
+                    return;
+                }
+                if let Ok(rd) = std::fs::read_dir(d) {
+                    for e in rd.flatten() {
+                        let p = e.path();
+                        if p.is_dir() {
+                            walk(&p, n, bytes, depth + 1);
+                        } else if let Ok(m) = e.metadata() {
+                            *n += 1;
+                            *bytes += m.len();
+                        }
+                    }
+                }
+            }
+            let mut n = 0u64;
+            let mut bytes = 0u64;
+            walk(std::path::Path::new(&dir), &mut n, &mut bytes, 0);
+            (n, bytes)
+        })
+        .await
+        .unwrap_or((0, 0))
+    };
+    crate::debug_log::entry(
+        crate::debug_log::APP_SCOPE,
+        "INFO",
+        "uninstall",
+        "pre_delete",
+        &format!(
+            "target={target} 待删除目录 {install_dir}：{scale0} 个文件 / {scale1} 字节",
+            scale0 = scale.0,
+            scale1 = scale.1
+        ),
+    );
+    // 目录删除走 UAC 脚本（与 nginx 同款）：rmdir /s /q；日志目录一并随目录删除
+    let script = format!("rmdir /s /q \"{install_dir}\"");
+    state.log("请在 UAC 弹窗中点击「是」…");
+    let run =
+        tokio::task::spawn_blocking(move || runas_wait("cmd.exe", &format!("/c {script}"))).await;
+    match run {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => state.log(format!("清理命令返回：{e}（将以实际状态复核）")),
+        Err(e) => {
+            finish(state, env_cache, false, format!("卸载任务异常：{e}")).await;
+            return;
+        }
+    }
+
+    // ===== 复核：目录消失 = 卸载成功 =====
+    state.patch(|j| j.stage = "verify".into());
+    let dir_gone = !std::path::Path::new(&install_dir).is_dir();
+    let residue = is_backend
+        && crate::api::handlers_repair::port_holder(48085).is_some();
+    let dir = install_dir.clone();
+    crate::debug_log::entry(
+        crate::debug_log::APP_SCOPE,
+        if dir_gone { "INFO" } else { "ERROR" },
+        "uninstall",
+        target,
+        &format!(
+            "复核：目录已删除={dir_gone} 后端残留监听={residue} dir={dir}"
+        ),
+    );
+    if dir_gone {
+        state.log(format!("{label} 已卸载：安装目录已删除，安装痕迹清零"));
+        if residue {
+            state.log("警告：48085 仍有监听——可能存在非平台拉起的 Java 进程，请到任务管理器确认");
+        }
+        finish(state, env_cache, true, String::new()).await;
+    } else {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!("卸载未完成：目录 {install_dir} 仍存在（可能被资源管理器占用），请关闭占用后重试"),
+        )
+        .await;
+    }
+}
+
+/// 通用卸载分派：按 target 路由到各管线（java/nginx/dfy/mysql/redis）。
 #[cfg(target_os = "windows")]
 async fn run_uninstall(
     state: Arc<RepairState>,
@@ -216,6 +367,7 @@ async fn run_uninstall(
     remove_data: bool,
     install_dir: String,
     config_dir: String,
+    procs: Arc<crate::ops::process::ProcManager>,
     env_cache: EnvCache,
 ) {
     if target == "java" {
@@ -224,6 +376,13 @@ async fn run_uninstall(
     }
     if target == "nginx" {
         run_nginx_uninstall(state, remove_data, install_dir, env_cache).await;
+        return;
+    }
+    // dfy-backend / dfy-ui：无服务注册、无 MSI 条目——停平台进程 + 删目录即可。
+    // dfy-backend 卸载后 nginx 反代 /admin-api/ 会 502；dfy-ui 卸载后 nginx root
+    // 指向的目录消失，页面 404——都提示但不阻止（用户主动行为）。
+    if matches!(target, "dfy-backend" | "dfy-ui") {
+        run_flat_dir_uninstall(state, target, install_dir, procs, env_cache).await;
         return;
     }
     let label = crate::ops::resource::target_label(target);

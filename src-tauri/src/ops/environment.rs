@@ -626,8 +626,16 @@ pub fn check_service_env_with(
                         // 依赖在跑但端口不可达：非致命，但功能可能受限
                         (CheckStatus::Warn, format!("运行中但端口不可达（{ports_txt}）"))
                     } else {
-                        // 依赖没跑：致命——先把它拉起来，启动本服务没有意义
-                        (CheckStatus::Fail, "未运行".to_string())
+                        // 依赖没跑：致命——先把它拉起来，启动本服务没有意义。
+                        // detail 必须给出路：只写「未运行」用户会以为本服务装坏了
+                        //（实测反馈：「前端报错就是缺失」）。
+                        let hint = if def.run_cmd.is_empty() {
+                            // 静态站点（VueSpa）：没有自己的启动动作，页面可达性完全靠依赖
+                            format!("未运行——{dep_id} 起来后页面才可达；请到「安装维护 → 已安装」启动它")
+                        } else {
+                            "未运行——请到「安装维护 → 已安装」页签启动，或在本服务详情页重新检查".to_string()
+                        };
+                        (CheckStatus::Fail, hint)
                     };
                     item(
                         &format!("dep-{dep_id}"),
