@@ -10,9 +10,11 @@
 //! 格式：每行一条 JSON，超过 512KB 截断（审计不需要无限历史）。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
 static EVENTS_PATH: OnceLock<PathBuf> = OnceLock::new();
+static SEQ: AtomicU64 = AtomicU64::new(0);
 const MAX_FILE_SIZE: u64 = 512 * 1024;
 /// 读接口最多返回的事件条数（界面时间轴 + 展开都用它封顶）
 pub const RECENT_LIMIT: usize = 100;
@@ -43,7 +45,14 @@ pub fn record(actor: &str, target: &str, action: &str, ok: bool, detail: &str) {
         }
     }
     let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    // id：毫秒时间戳 + 进程内序号，唯一且单调——前端单条删除按它定位
+    let id = format!(
+        "{}-{:06}",
+        chrono::Local::now().timestamp_millis(),
+        SEQ.fetch_add(1, Ordering::Relaxed) % 1_000_000
+    );
     let line = serde_json::json!({
+        "id": id,
         "ts": ts.to_string(),
         "actor": actor,
         "target": target,
@@ -60,6 +69,7 @@ pub fn record(actor: &str, target: &str, action: &str, ok: bool, detail: &str) {
 /// 事件条目（API 返回给前端的形态）。
 #[derive(serde::Serialize, Clone)]
 pub struct OpsEvent {
+    pub id: String,
     pub ts: String,
     pub actor: String,
     pub target: String,
@@ -79,6 +89,7 @@ pub fn recent(limit: usize) -> Vec<OpsEvent> {
         .filter_map(|l| {
             let v: serde_json::Value = serde_json::from_str(l).ok()?;
             Some(OpsEvent {
+                id: v["id"].as_str().unwrap_or("").into(),
                 ts: v["ts"].as_str().unwrap_or("").into(),
                 actor: v["actor"].as_str().unwrap_or("").into(),
                 target: v["target"].as_str().unwrap_or("").into(),
@@ -89,4 +100,70 @@ pub fn recent(limit: usize) -> Vec<OpsEvent> {
         })
         .rev()
         .collect()
+}
+
+/// 清空全部事件（用户在时间轴上点「清空」）。
+pub fn clear() {
+    let Some(p) = path() else { return };
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::File::create(p);
+    crate::debug_log::entry(
+        crate::ops::process::PROC_SCOPE,
+        "INFO",
+        "ops_events",
+        "clear",
+        "用户清空了运维事件时间轴",
+    );
+}
+
+/// 删除单条事件（按 id 定位；旧格式无 id 的行保留不动）。
+pub fn remove(id: &str) -> bool {
+    let Some(p) = path() else { return false };
+    let Ok(text) = std::fs::read_to_string(p) else { return false };
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|l| {
+            serde_json::from_str::<serde_json::Value>(l)
+                .ok()
+                .and_then(|v| v["id"].as_str().map(|s| s.to_string()))
+                .as_deref()
+                != Some(id)
+        })
+        .collect();
+    if kept.len() == text.lines().count() {
+        return false; // 没找到目标行
+    }
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    match std::fs::write(p, {
+        let mut s = kept.join("\n");
+        if !s.is_empty() {
+            s.push('\n');
+        }
+        s
+    }) {
+        Ok(()) => {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "INFO",
+                "ops_events",
+                "remove",
+                &format!("删除单条运维事件 id={id}"),
+            );
+            true
+        }
+        Err(e) => {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "ERROR",
+                "ops_events",
+                "remove_failed",
+                &format!("删除事件 id={id} 失败：{e}"),
+            );
+            false
+        }
+    }
 }

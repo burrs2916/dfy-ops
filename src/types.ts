@@ -282,6 +282,7 @@ export interface ExternalConfigWriteResult {
 
 /** 运维操作事件（启停/安装/卸载审计，ops-events.jsonl） */
 export interface OpsEventItem {
+  id: string;
   ts: string;
   actor: string;
   target: string;

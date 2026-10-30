@@ -122,6 +122,11 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .route("/api/services", axum::routing::get(handlers::list_services))
         .route("/api/ops-events", axum::routing::get(handlers_repair::ops_events_list))
+        .route("/api/ops-events", axum::routing::delete(handlers_repair::ops_events_clear))
+        .route(
+            "/api/ops-events/:id",
+            axum::routing::delete(handlers_repair::ops_events_delete),
+        )
         .route(
             "/api/services/:id",
             axum::routing::get(handlers::get_service),

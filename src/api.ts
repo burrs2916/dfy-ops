@@ -533,6 +533,9 @@ export const api = {
     request<ExternalConfigResponse>(`/api/services/${id}/external-config`),
   getOpsEvents: (limit = 50) =>
     request<{ events: OpsEventItem[] }>(`/api/ops-events?limit=${limit}`),
+  clearOpsEvents: () => request<{ ok: boolean }>("/api/ops-events", { method: "DELETE" }),
+  deleteOpsEvent: (id: string) =>
+    request<{ ok: boolean }>(`/api/ops-events/${encodeURIComponent(id)}`, { method: "DELETE" }),
   updateExternalConfig: (id: string, config: any) =>
     request<ExternalConfigWriteResult>(`/api/services/${id}/external-config`, {
       method: "POST",

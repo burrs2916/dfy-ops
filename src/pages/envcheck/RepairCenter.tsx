@@ -183,13 +183,15 @@ export default function RepairCenter({
   const [busyOps, setBusyOps] = useState<string | null>(null);
 
   /** 一键安装 / 重装统一入口：dfy-backend 先弹配置确认（外部配置落盘），
-   *  其余目标直接安装。 */
+   *  其余目标直接安装。任务进行中拒绝重复发起——实测连续点击会并发出多轮
+   *  「解压→拍平→自动启动」，互相踩安装目录。 */
   const launchInstall = useCallback(
     (t: string) => {
+      if (repairRunning) return;
       if (t === "dfy-backend") setBackendCfgOpen(true);
       else onRepair(t);
     },
-    [onRepair],
+    [onRepair, repairRunning],
   );
 
   /** 启动 / 停止平台服务（MySQL80、Redis；net start/stop + UAC 确认），完成后即时重探；
@@ -562,8 +564,14 @@ export default function RepairCenter({
               </span>
             </Tooltip>
           )}
-          <Button size="small" variant="outlined" disabled={repairDisabled || svcBusy} onClick={() => launchInstall(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
-            重装
+          <Button
+            size="small"
+            variant="outlined"
+            disabled={repairDisabled || svcBusy || repairRunning}
+            onClick={() => launchInstall(t)}
+            sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+          >
+            {repairRunning ? "任务进行中…" : "重装"}
           </Button>
           {/* 卸载：前置条件——服务/进程运行中时禁止卸载（反向代理硬断请求会丢数据） */}
           {(() => {
@@ -637,8 +645,14 @@ export default function RepairCenter({
         </Stack>
       );
       actions = (
-        <Button size="small" variant="contained" disabled={repairDisabled} onClick={() => launchInstall(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
-          一键安装
+        <Button
+          size="small"
+          variant="contained"
+          disabled={repairDisabled || repairRunning}
+          onClick={() => launchInstall(t)}
+          sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+        >
+          {repairRunning ? "任务进行中…" : "一键安装"}
         </Button>
       );
     } else {
@@ -653,8 +667,14 @@ export default function RepairCenter({
         </Stack>
       );
       actions = t === "java" ? (
-        <Button size="small" variant="contained" disabled={repairDisabled} onClick={() => onRepair(t)} sx={{ textTransform: "none", whiteSpace: "nowrap" }}>
-          一键安装（在线）
+        <Button
+          size="small"
+          variant="contained"
+          disabled={repairDisabled || repairRunning}
+          onClick={() => onRepair(t)}
+          sx={{ textTransform: "none", whiteSpace: "nowrap" }}
+        >
+          {repairRunning ? "任务进行中…" : "一键安装（在线）"}
         </Button>
       ) : null;
     }
@@ -1214,15 +1234,43 @@ export default function RepairCenter({
           ) : (
             <>
               <Typography variant="body2">
-                将停止并注销 Windows 服务
-                <b>{uninstallTarget ? `（${uninstallTarget.target === "mysql" ? "MySQL80" : "Redis"}）` : ""}</b>，
-                安装目录：
+                {uninstallTarget?.target === "nginx" ? (
+                  <>卸载后将<b>删除 Nginx 程序与配置</b>（由平台进程管理器托管，无需注销服务），安装目录：</>
+                ) : (
+                  <>
+                    将停止并注销 Windows 服务
+                    <b>{uninstallTarget ? `（${uninstallTarget.target === "mysql" ? "MySQL80" : "Redis"}）` : ""}</b>，
+                    安装目录：
+                  </>
+                )}
               </Typography>
               <Paper variant="outlined" sx={{ p: 1.5, mt: 1, bgcolor: "action.hover" }}>
                 <Typography variant="body2" sx={{ fontFamily: MONO_STACK, wordBreak: "break-all" }}>
                   {uninstallTarget?.installDir}
                 </Typography>
               </Paper>
+              {/* nginx 关联影响强警告：它是前端页面唯一入口，卸载 = 页面立即不可达 */}
+              {uninstallTarget?.target === "nginx" && (
+                <Alert severity="warning" sx={{ mt: 1.5 }}>
+                  <b>关联影响提示：</b>
+                  <Box component="div" sx={{ mt: 0.5 }}>
+                    · 卸载后<b>前端页面将无法访问</b>（Nginx 是唯一的页面入口）
+                  </Box>
+                  {(() => {
+                    const backend = installedOf("dfy-backend");
+                    if (backend?.serviceRunning) {
+                      return <Box component="div">· DFY 后端正在运行，卸载 Nginx 后 API 将失去代理入口（页面 502）</Box>;
+                    }
+                    if (!backend?.serviceInstalled) {
+                      return <Box component="div">· DFY 后端尚未安装，重装后需重新配置 Nginx 反代</Box>;
+                    }
+                    return <Box component="div">· DFY 后端已安装但未运行，下次启动后端前需先恢复 Nginx</Box>;
+                  })()}
+                  <Box component="div" sx={{ mt: 0.5 }}>
+                    如仍在使用本平台页面，请先确认再继续卸载。
+                  </Box>
+                </Alert>
+              )}
               <FormControlLabel
                 sx={{ mt: 1.5, alignItems: "flex-start" }}
                 control={

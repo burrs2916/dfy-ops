@@ -897,6 +897,27 @@ async fn run_zip_install(
     let spec = service_spec(target);
     state.log(format!("开始安装 {label}（免安装版）：{zip_path} → {install_dir}"));
 
+    // ===== 重装检测：目标目录已存在 = 覆盖安装（重装）而非首装 =====
+    // 留痕点：用户反馈"重装行为不符合预期"时，第一手证据就是这次安装到底是首装还是重装
+    let reinstalling = std::path::Path::new(&install_dir).is_dir()
+        && std::fs::read_dir(&install_dir).map(|d| d.count()).unwrap_or(0) > 0;
+    if reinstalling {
+        let busy = match target {
+            "nginx" => crate::ops::process::image_running("nginx.exe"),
+            "mysql" => crate::ops::process::image_running("mysqld.exe"),
+            "redis" => crate::ops::process::image_running("redis-server.exe"),
+            _ => false,
+        };
+        state.log(format!("检测到 {label} 已有安装目录，本次为覆盖安装（重装）"));
+        crate::debug_log::entry(
+            crate::debug_log::APP_SCOPE,
+            "INFO",
+            "install",
+            "reinstall_check",
+            &format!("target={target} 覆盖安装 安装目录={install_dir} 运行中={busy}"),
+        );
+    }
+
     // ===== 解压 + 定位主目录 =====
     state.patch(|j| j.stage = "extract".into());
     state.log("正在解压安装包（大包需 1-2 分钟）…");
@@ -941,6 +962,13 @@ async fn run_zip_install(
     // zip 顶层版本目录（nginx-x.y.z/、dist/）会把关键文件埋进子目录，而探测、
     // registry requires、nginx root 全按 install_dir 根解析——不搬平就会出现
     // 「安装完成但待安装状态不更新」。搬平后 home 归一为 install_dir。
+    // 重装保护：搬平是同名覆盖，会把用户在配置面板改过的 nginx.conf 冲回默认版，
+    // 先把现有配置读进内存，搬平+写默认配置之后再恢复。
+    let user_nginx_conf: Option<String> = if target == "nginx" && reinstalling {
+        std::fs::read_to_string(format!("{install_dir}\\conf\\nginx.conf")).ok()
+    } else {
+        None
+    };
     if matches!(target, "nginx" | "dfy-ui") {
         let home_was_root = home == install_dir;
         let idd = install_dir.clone();
@@ -979,6 +1007,35 @@ async fn run_zip_install(
         Err(e) => {
             finish(state, env_cache, false, format!("配置任务异常：{e}")).await;
             return;
+        }
+    }
+
+    // ===== 重装配置恢复：configure 刚写入的默认 nginx.conf 换回用户版 =====
+    // configure_zip_target 无条件写默认模板（首装依赖它），重装时在这里覆盖回用户配置，
+    // 保证「重装=修复程序文件，配置不动」。恢复失败则保留默认版并明确告知。
+    if let Some(saved) = user_nginx_conf {
+        let conf_path = format!("{home}\\conf\\nginx.conf");
+        match std::fs::write(&conf_path, &saved) {
+            Ok(()) => {
+                state.log("已保留你修改过的 nginx.conf（重置为默认请卸载后重装，或在配置面板手动改）");
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "INFO",
+                    "install",
+                    "conf_preserve",
+                    &format!("target=nginx 重装保留用户配置（{conf_path}，{} 字节）", saved.len()),
+                );
+            }
+            Err(e) => {
+                state.log(format!("恢复原 nginx.conf 失败（{e}），当前为默认配置，请到 Nginx 配置面板重新调整"));
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "ERROR",
+                    "install",
+                    "conf_preserve_failed",
+                    &format!("target=nginx 恢复用户配置失败：{e}（已回退默认配置）"),
+                );
+            }
         }
     }
 

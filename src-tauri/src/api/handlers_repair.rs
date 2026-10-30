@@ -419,6 +419,17 @@ pub async fn uninstall_status(State(state): State<Arc<AppState>>) -> Json<serde_
     for t in PROBEABLE {
         let (service_installed, dir_exists, service_running) = probe_target(&state, t).await;
         let install_dir = registry_install_dir(&state, t);
+        // 探测矛盾留痕：登记为已安装但目录消失（典型如 java 的 zip/MSI 被手工删除），
+        // 是「卡片显示已装但操作异常」类问题的第一手线索
+        if service_installed && !dir_exists {
+            debug_log::entry(
+                debug_log::APP_SCOPE,
+                "WARN",
+                "uninstall_status",
+                "install_state_mismatch",
+                &format!("target={t} 标记为已安装但目录不存在（install_dir={install_dir}）——可能被外部删除，建议卸载清理后重装"),
+            );
+        }
         debug_log::entry(
             debug_log::APP_SCOPE,
             "INFO",
@@ -789,6 +800,24 @@ pub async fn service_action(
             }));
         }
         let msg = if req.action == "start" { "Nginx 已启动" } else { "Nginx 已停止" };
+        // 启动关联提示：反代目标（DFY 后端 48085）不可达时，用户打开页面只会看到 502，
+        // 不提示就会误判「nginx 挂了」。这里探测并追加说明。
+        let mut final_msg = msg.to_string();
+        if req.action == "start" {
+            let backend_up = blocking(|| port_holder(48085)).await.is_some();
+            if !backend_up {
+                final_msg = format!(
+                    "{msg}，但 DFY 后端（48085）未运行——前端页面此时会 502。请先在已安装页启动 dfy-backend"
+                );
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    "WARN",
+                    "service_action",
+                    "start_backend_down",
+                    "target=nginx 启动成功但 DFY 后端 48085 未监听，反代目标不可达",
+                );
+            }
+        }
         crate::ops_events::record(
             "user",
             "nginx",
@@ -796,7 +825,7 @@ pub async fn service_action(
             true,
             &format!("手动{action_label}成功（80 端口监听状态：{running}）"),
         );
-        return Json(serde_json::json!({ "ok": true, "running": running, "message": msg }));
+        return Json(serde_json::json!({ "ok": true, "running": running, "message": final_msg }));
     }
     if !UNINSTALLABLE.contains(&req.target.as_str()) {
         return Json(serde_json::json!({ "ok": false, "error": format!("不支持的服务：{}", req.target) }));
@@ -918,6 +947,20 @@ pub async fn ops_events_list(
         .min(crate::ops_events::RECENT_LIMIT);
     let events = blocking(move || crate::ops_events::recent(limit)).await;
     Json(serde_json::json!({ "events": events }))
+}
+
+/// DELETE /api/ops-events —— 清空运维事件时间轴（用户主动维护）。
+pub async fn ops_events_clear() -> Json<serde_json::Value> {
+    blocking(crate::ops_events::clear).await;
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// DELETE /api/ops-events/:id —— 删除单条运维事件。
+pub async fn ops_events_delete(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Json<serde_json::Value> {
+    let found = blocking(move || crate::ops_events::remove(&id)).await;
+    Json(serde_json::json!({ "ok": found }))
 }
 
 #[derive(Deserialize)]
@@ -1681,9 +1724,30 @@ pub async fn uninstall(
         return Json(serde_json::json!({"ok": false, "error": "未知的目标组件"}));
     };
     if !UNINSTALLABLE.contains(&target) {
-        return Json(serde_json::json!({"ok": false, "error": "该组件暂不支持平台内卸载（当前覆盖 MySQL/Redis/Java），请使用 AI 方案或控制面板手动卸载"}));
+        return Json(serde_json::json!({"ok": false, "error": "该组件暂不支持平台内卸载，请使用 AI 方案或控制面板手动卸载"}));
     }
     let install_dir = registry_install_dir(&state, target);
+    // 关联影响探测：nginx 是前端 SPA 的反代入口，卸载直接影响页面可达性；
+    // 后端留痕 + 返回提示，前端确认框据此显示强警告
+    let mut notices: Vec<String> = Vec::new();
+    if target == "nginx" {
+        let backend_port_free = blocking(|| port_holder(48085)).await.is_none();
+        let running_before = blocking(|| image_running("nginx.exe")).await;
+        debug_log::entry(
+            debug_log::APP_SCOPE,
+            "INFO",
+            "uninstall",
+            "dependency_check",
+            &format!(
+                "target=nginx 运行中={running_before} DFY后端(48085)监听={} 前端反代链路即将中断",
+                if backend_port_free { "无" } else { "存在" }
+            ),
+        );
+        notices.push("卸载后前端页面将无法访问（Nginx 是唯一的页面入口）".into());
+        if !backend_port_free {
+            notices.push("DFY 后端正在运行，卸载 Nginx 后 API 将失去代理入口".into());
+        }
+    }
     let message = if target == "java" {
         "开始卸载 Java 运行时（枚举 MSI 条目 → 静默逐条卸载）→ 管理员确认 → 复核，进度见下方任务状态".to_string()
     } else {
@@ -1713,7 +1777,12 @@ pub async fn uninstall(
         state.env_cache.clone(),
         state.repair.clone(),
     ) {
-        Ok(()) => Json(serde_json::json!({"ok": true, "action": "uninstall", "message": message})),
+        Ok(()) => {
+            for n in &notices {
+                crate::ops_events::record("user", target, "uninstall", true, &format!("影响提示：{n}"));
+            }
+            Json(serde_json::json!({"ok": true, "action": "uninstall", "message": message, "notices": notices}))
+        }
         Err(e) => {
             // 发起失败（已有任务在执行等）：完成事件由 finish() 记，这里补「试过但没成」
             crate::ops_events::record("user", target, "uninstall", false, &e);
