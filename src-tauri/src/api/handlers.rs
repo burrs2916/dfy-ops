@@ -859,9 +859,22 @@ pub async fn external_config_update(
             let exe = std::path::Path::new(&def.install_dir).join("nginx.exe");
             let prefix = def.install_dir.clone();
             let reload = blocking(move || {
-                std::process::Command::new(&exe)
-                    .args(["-s", "reload", "-p", prefix.as_str()])
-                    .output()
+                #[cfg(target_os = "windows")]
+                {
+                    use std::os::windows::process::CommandExt;
+                    // 隐藏控制台窗口：不隐藏的话每次保存配置都会弹黑色 cmd 框
+                    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+                    std::process::Command::new(&exe)
+                        .args(["-s", "reload", "-p", prefix.as_str()])
+                        .creation_flags(CREATE_NO_WINDOW)
+                        .output()
+                }
+                #[cfg(not(target_os = "windows"))]
+                {
+                    std::process::Command::new(&exe)
+                        .args(["-s", "reload", "-p", prefix.as_str()])
+                        .output()
+                }
             })
             .await;
             match reload {

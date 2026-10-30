@@ -47,7 +47,7 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../api";
-import { useAppSettingsStore } from "../../store";
+import { useAppSettingsStore, useOpsStore } from "../../store";
 import type { EnvCheckItem, RepairPlan, ResourceScan, UninstallTargetStatus } from "../../types";
 import { MONO_STACK } from "../../theme";
 import EmptyBlock from "./EmptyBlock";
@@ -210,6 +210,9 @@ export default function RepairCenter({
         setBusyOps(null);
         probeStatus();
         setEventRefresh((k) => k + 1);
+        // 全局联动：概览/服务运维/顶栏同吃 ops store，启停后立刻同步该服务状态，
+        // 避免「修复中心已停止、切个页面还显示运行中」的陈旧提示
+        void useOpsStore.getState().refreshServices([target]);
       }
     },
     [probeStatus],
@@ -909,14 +912,35 @@ export default function RepairCenter({
                     ) : (
                       <>
                         {/* 每个服务一个页签：独占整页宽度，启停事件跟随服务展示，
-                            不再所有卡片竖排 + 全局事件堆底（分不清是谁的事件） */}
+                            不再所有卡片竖排 + 全局事件堆底（分不清是谁的事件）。
+                            页签名实时显示运行状态圆点（启停后 probeStatus 刷新即变色） */}
                         <Tabs
                           value={installedList.includes(instSvcTab) ? instSvcTab : installedList[0]}
                           onChange={(_, v: string) => setInstSvcTab(v)}
                           sx={{ "& .MuiTab-root": { textTransform: "none", minHeight: 44 } }}
                         >
                           {installedList.map((t) => (
-                            <Tab key={t} value={t} label={TARGET_LABEL[t] ?? t.toUpperCase()} />
+                            <Tab
+                              key={t}
+                              value={t}
+                              label={
+                                <Stack direction="row" spacing={0.75} alignItems="center">
+                                  <span>{TARGET_LABEL[t] ?? t.toUpperCase()}</span>
+                                  <Box
+                                    component="span"
+                                    sx={{
+                                      width: 7,
+                                      height: 7,
+                                      borderRadius: "50%",
+                                      bgcolor: installedOf(t)?.serviceRunning
+                                        ? "success.main"
+                                        : "text.disabled",
+                                      flexShrink: 0,
+                                    }}
+                                  />
+                                </Stack>
+                              }
+                            />
                           ))}
                         </Tabs>
                         {renderCard(

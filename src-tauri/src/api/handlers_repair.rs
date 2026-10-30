@@ -485,17 +485,24 @@ pub struct ServiceActionReq {
     pub action: String,
 }
 
-/// nginx 停止兜底清理（Windows）：procs.stop 只杀「平台句柄对应的那棵树」；
-/// 看门狗自动拉起或多实例场景下，其他 nginx.exe 实例不在这棵树里（实测：
-/// taskkill 成功后探测仍 running=true，二次点停止时句柄已回收连 taskkill 都
-/// 不再执行）。这里依次：nginx -s stop（优雅，按 PID 文件通知 master 收尾
-/// 全部 worker）→ 轮询确认 → 仍残留则按镜像名 taskkill 清场（nginx.exe 由
-/// 平台独占托管，镜像级清理安全）。
+/// nginx 优雅停止信号（nginx -s stop，Windows）：按 PID 文件通知 master 收尾
+/// 全部 worker。对「平台句柄树之外」的实例（看门狗拉起/历史遗留）同样有效；
+/// pid 文件失效（多实例/无 pid）时 nginx 报错，属预期，忽略。
 #[cfg(target_os = "windows")]
-fn force_stop_nginx(install_dir: &str) {
+fn nginx_signal_stop(install_dir: &str) {
+    // 未安装（registry 无记录，install_dir 为空）时跳过：避免空路径调用
+    if install_dir.trim().is_empty() {
+        crate::debug_log::entry(
+            crate::ops::process::PROC_SCOPE,
+            "WARN",
+            "stop",
+            "nginx_signal_skipped",
+            "nginx 未安装（install_dir 为空），跳过优雅停止信号",
+        );
+        return;
+    }
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    // 1) 优雅停止信号：pid 文件失效（多实例/无 pid）时 nginx 报错，忽略即可
     let stop = std::process::Command::new(format!("{install_dir}/nginx.exe"))
         .args(["-p", install_dir, "-c", "conf/nginx.conf", "-s", "stop"])
         .creation_flags(CREATE_NO_WINDOW)
@@ -510,14 +517,37 @@ fn force_stop_nginx(install_dir: &str) {
             stop.as_ref().map(|o| o.status.code().unwrap_or(-1)).unwrap_or(-1)
         ),
     );
-    // 2) 轮询确认（最多 ~3s），给优雅退出留时间
-    for _ in 0..6 {
+}
+
+/// nginx 停止兜底（Windows）：轮询确认（~3s，给优雅退出留时间）→ 仍残留则
+/// 按镜像名 taskkill 连 worker 树清场（nginx.exe 由平台独占托管，镜像级清理
+/// 安全）。procs.stop 只杀「平台句柄对应的那棵树」，看门狗自动拉起或多实例
+/// 场景下的 nginx.exe 不在树里（实测：taskkill 成功后探测仍 running=true，
+/// 二次点停止时句柄已回收连 taskkill 都不再执行）。
+#[cfg(target_os = "windows")]
+fn force_stop_nginx() {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    for n in 1..=6 {
         if !image_running("nginx.exe") {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "INFO",
+                "stop",
+                "nginx_poll_clean",
+                &format!("优雅停止生效，第 {n} 轮探测确认无 nginx.exe 进程"),
+            );
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    // 3) 镜像级兜底：连 worker 树一起清
+    crate::debug_log::entry(
+        crate::ops::process::PROC_SCOPE,
+        "WARN",
+        "stop",
+        "nginx_poll_timeout",
+        "优雅停止 3s 后仍有 nginx.exe 残留，进入镜像级清场",
+    );
     let out = std::process::Command::new("taskkill")
         .args(["/IM", "nginx.exe", "/T", "/F"])
         .creation_flags(CREATE_NO_WINDOW)
@@ -538,7 +568,12 @@ fn force_stop_nginx(install_dir: &str) {
 
 /// 非 Windows（dev 机）：无进程托管，空实现。
 #[cfg(not(target_os = "windows"))]
-fn force_stop_nginx(_install_dir: &str) {}
+#[allow(unused_variables)]
+fn nginx_signal_stop(install_dir: &str) {}
+
+/// 非 Windows（dev 机）：无进程托管，空实现。
+#[cfg(not(target_os = "windows"))]
+fn force_stop_nginx() {}
 
 /// POST /api/env/repair/service —— 启动 / 停止平台注册的第三方服务。
 /// 分两类：
@@ -550,6 +585,8 @@ pub async fn service_action(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ServiceActionReq>,
 ) -> Json<serde_json::Value> {
+    // 全程耗时基准：出口日志（复核/失败/残留）统一带 elapsed，还原执行时间线
+    let t0 = std::time::Instant::now();
     // nginx：进程管理器启停（registry run_cmd = nginx.exe -p 前缀，
     // start_with_deps 自动带起依赖；stop 走 taskkill 进程树）。
     // 启动后复核运行态：nginx 因端口占用/配置错误秒退时，把
@@ -559,6 +596,19 @@ pub async fn service_action(
         if !matches!(req.action.as_str(), "start" | "stop") {
             return Json(serde_json::json!({ "ok": false, "error": format!("未知操作：{}", req.action) }));
         }
+        // 操作入口：action + 操作前运行态（区分「重复启动」「停止本就没跑」等场景）
+        let running_before = blocking(|| image_running("nginx.exe")).await;
+        crate::debug_log::entry(
+            crate::ops::process::PROC_SCOPE,
+            "INFO",
+            "service_action",
+            "request",
+            &format!(
+                "target=nginx action={} 操作前={}（进程管理器通道）",
+                req.action,
+                if running_before { "运行中" } else { "已停止" }
+            ),
+        );
         // 启动前置：80 端口占用检测（nginx bind 失败的头号原因）。
         // 直接指出占用者（PID + 进程名），用户立刻知道改端口还是停程序。
         if req.action == "start" {
@@ -622,18 +672,32 @@ pub async fn service_action(
             if verb == "start" {
                 let results =
                     crate::ops::orchestrator::start_with_deps(&st.procs, &st.registry, &tgt);
+                // 依赖启动汇总：目标+每个依赖的成败一目了然，失败时不用再猜链上哪环断了
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    "INFO",
+                    "start",
+                    "deps_started",
+                    &results
+                        .iter()
+                        .map(|r| format!("{}:{}", r.id, if r.ok { "ok" } else { "失败" }))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
                 results
                     .iter()
                     .find(|r| !r.ok)
                     .map(|r| Err::<(), String>(r.error.clone().unwrap_or_else(|| "启动失败".into())))
                     .unwrap_or(Ok(()))
             } else {
-                let r = st.procs.stop(&tgt).map_err(|e| e.to_string());
-                // 兜底清理：句柄树之外可能有看门狗拉起/历史实例的 nginx.exe
-                // 残留（procs.stop 在句柄已回收时是 no-op），必须补优雅信号
-                // 与镜像级清场，否则「停止成功」探测仍 running=true
+                // 停止三段式：优雅信号（覆盖句柄树外的实例）→ 句柄树 taskkill
+                // → 轮询确认 + 残留镜像清场。procs.stop 在句柄已回收时是
+                // no-op，漏网实例只有镜像级清理能覆盖，否则「已停止」探测
+                // 仍 running=true
                 let dir = registry_install_dir(&st, "nginx");
-                force_stop_nginx(&dir);
+                nginx_signal_stop(&dir);
+                let r = st.procs.stop(&tgt).map_err(|e| e.to_string());
+                force_stop_nginx();
                 r
             }
         })
@@ -671,7 +735,10 @@ pub async fn service_action(
             if running || req.action == "stop" { "INFO" } else { "ERROR" },
             "service_action",
             &req.action,
-            &format!("target=nginx running={running} install_dir={install_dir}"),
+            &format!(
+                "target=nginx running={running} install_dir={install_dir} 耗时={:?}",
+                t0.elapsed()
+            ),
         );
         if req.action == "start" && !running {
             // 进程秒退：把 spawn 日志尾部带回给前端（nginx bind 失败等原因就在这）
@@ -691,7 +758,7 @@ pub async fn service_action(
                 "ERROR",
                 "service_action",
                 "start_failed_detail",
-                &format!("target=nginx platform-spawn.log 尾部：{tail}"),
+                &format!("target=nginx platform-spawn.log 尾部：{tail} 耗时={:?}", t0.elapsed()),
             );
             return Json(serde_json::json!({
                 "ok": false,
@@ -699,6 +766,16 @@ pub async fn service_action(
             }));
         }
         if req.action == "stop" && running {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "ERROR",
+                "service_action",
+                "stop_residue",
+                &format!(
+                    "target=nginx 三段式停止（优雅信号/句柄树/镜像清场）全部执行后仍探测到 nginx.exe（总耗时={:?}）——大概率是用户手工另起的实例，需人工确认",
+                    t0.elapsed()
+                ),
+            );
             crate::ops_events::record(
                 "user",
                 "nginx",
@@ -737,7 +814,27 @@ pub async fn service_action(
     let svc = svc.to_string();
     let svc_probe = svc.clone();
     let running_now = blocking(move || crate::ops::env_repair::service_running(&svc_probe)).await;
+    // 操作入口：target/action/操作前运行态——配合后续事件的时间戳即可还原
+    // 完整执行时间线（谁在几点对哪个服务做了什么、当时是什么状态、耗时多少）
+    crate::debug_log::entry(
+        crate::ops::process::PROC_SCOPE,
+        "INFO",
+        "service_action",
+        "service_request",
+        &format!(
+            "target={} action={verb} 操作前={} （net start/stop 通道）",
+            req.target,
+            if running_now { "运行中" } else { "已停止" }
+        ),
+    );
     if running_now == (verb == "start") {
+        crate::debug_log::entry(
+            crate::ops::process::PROC_SCOPE,
+            "INFO",
+            "service_action",
+            "service_noop",
+            &format!("target={} 已是目标状态（{}），跳过 {}", req.target, if running_now { "运行中" } else { "已停止" }, verb),
+        );
         return Json(serde_json::json!({ "ok": true, "running": running_now, "message": "已是目标状态，无需操作" }));
     }
     let args = format!("{verb} {svc}");
@@ -747,6 +844,18 @@ pub async fn service_action(
         Ok(()) => {
             let svc2 = svc.clone();
             let running = blocking(move || crate::ops::env_repair::service_running(&svc2)).await;
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "INFO",
+                "service_action",
+                "service_done",
+                &format!(
+                    "target={} net {verb} 执行成功，复核 {}，耗时={:?}",
+                    req.target,
+                    if running { "运行中" } else { "已停止" },
+                    t0.elapsed()
+                ),
+            );
             // net stop 后 STATE 短暂过渡，以复核为准；失败给出明确原因
             if running == (verb == "start") {
                 state.repair.log(format!("{label} 完成"));
@@ -759,6 +868,14 @@ pub async fn service_action(
                 );
                 Json(serde_json::json!({ "ok": true, "running": running, "message": format!("{label}成功") }))
             } else {
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    "WARN",
+                    "service_action",
+                    "service_state_mismatch",
+                    &format!("target={} net {verb} 后状态未达预期（当前{}），可能 STATE 处于过渡态或服务异常",
+                        req.target, if running { "运行中" } else { "已停止" }),
+                );
                 crate::ops_events::record(
                     "user",
                     &req.target,
@@ -770,6 +887,13 @@ pub async fn service_action(
             }
         }
         Err(e) => {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "ERROR",
+                "service_action",
+                "service_error",
+                &format!("target={} net {verb} 调用失败：{e}，耗时={:?}", req.target, t0.elapsed()),
+            );
             crate::ops_events::record(
                 "user",
                 &req.target,

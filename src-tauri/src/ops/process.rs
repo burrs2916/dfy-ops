@@ -156,6 +156,8 @@ impl ProcManager {
     pub fn stop(&self, id: &str) -> std::io::Result<()> {
         let mut map = self.children.lock().unwrap();
         if let Some(mut child) = map.remove(id) {
+            // 整树终止耗时：定位「停止卡住/假死」用（正常 <1s，秒级以上说明有进程在抵抗）
+            let t0 = std::time::Instant::now();
             crate::debug_log::entry(
                 PROC_SCOPE,
                 "INFO",
@@ -212,8 +214,9 @@ impl ProcManager {
                 "stop",
                 "done",
                 &format!(
-                    "id={id} 句柄回收{}",
-                    waited.map(|s| format!("exit={}", s.code().unwrap_or(-1))).unwrap_or_else(|e| format!("失败：{e}"))
+                    "id={id} 句柄回收{} 耗时={:?}",
+                    waited.map(|s| format!("exit={}", s.code().unwrap_or(-1))).unwrap_or_else(|e| format!("失败：{e}")),
+                    t0.elapsed()
                 ),
             );
         }
