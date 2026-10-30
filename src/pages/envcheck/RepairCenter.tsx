@@ -1240,6 +1240,10 @@ export default function RepairCenter({
               <Typography variant="body2">
                 {uninstallTarget?.target === "nginx" ? (
                   <>卸载后将<b>删除 Nginx 程序与配置</b>（由平台进程管理器托管，无需注销服务），安装目录：</>
+                ) : uninstallTarget?.target === "dfy-backend" ? (
+                  <>卸载将<b>停止平台拉起的后端进程并删除安装目录</b>（不影响机器上其他 Java 程序），安装目录：</>
+                ) : uninstallTarget?.target === "dfy-ui" ? (
+                  <>卸载将<b>删除前端静态目录</b>（Nginx root 指向它，无需停任何进程），安装目录：</>
                 ) : (
                   <>
                     将停止并注销 Windows 服务
@@ -1253,6 +1257,32 @@ export default function RepairCenter({
                   {uninstallTarget?.installDir}
                 </Typography>
               </Paper>
+              {/* dfy-backend 关联影响强警告：它是反代上游，卸载 = API 断供页面 502 */}
+              {uninstallTarget?.target === "dfy-backend" && (
+                <Alert severity="warning" sx={{ mt: 1.5 }}>
+                  <b>关联影响提示：</b>
+                  <Box component="div" sx={{ mt: 0.5 }}>
+                    · 卸载后 Nginx 反代 /admin-api/ 将返回 <b>502</b>，前端页面不可用（重新安装后恢复）
+                  </Box>
+                  <Box component="div">· 停止的是本平台拉起的 Java 进程，机器上其他 Java 程序不受影响</Box>
+                  <Box component="div" sx={{ mt: 0.5 }}>
+                    如仍在使用本平台页面，请先确认再继续卸载。
+                  </Box>
+                </Alert>
+              )}
+              {/* dfy-ui 关联影响强警告：nginx root 指向它，卸载 = 页面 404 */}
+              {uninstallTarget?.target === "dfy-ui" && (
+                <Alert severity="warning" sx={{ mt: 1.5 }}>
+                  <b>关联影响提示：</b>
+                  <Box component="div" sx={{ mt: 0.5 }}>
+                    · 卸载后 Nginx 的 root 指向目录消失，前端页面将返回 <b>404</b>（重新安装后恢复）
+                  </Box>
+                  <Box component="div">· API 不受影响（后端服务独立运行）</Box>
+                  <Box component="div" sx={{ mt: 0.5 }}>
+                    如仍在使用本平台页面，请先确认再继续卸载。
+                  </Box>
+                </Alert>
+              )}
               {/* nginx 关联影响强警告：它是前端页面唯一入口，卸载 = 页面立即不可达 */}
               {uninstallTarget?.target === "nginx" && (
                 <Alert severity="warning" sx={{ mt: 1.5 }}>

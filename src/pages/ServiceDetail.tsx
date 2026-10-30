@@ -391,10 +391,12 @@ export default function ServiceDetail() {
           {/* nginx: 反向代理可视化配置运维 */}
           {id === "nginx" && <NginxConfigPanel serviceId={id} />}
 
-          {/* 其他服务：提示暂无外部化配置面板 */}
+          {/* 其他服务：说明配置形态（前端是静态目录由 Nginx 托管，无需配置） */}
           {id !== "dfy-backend" && id !== "nginx" && (
             <Alert severity="info">
-              此服务暂无外部化配置面板。安装目录下的配置文件请手动编辑。
+              {id === "dfy-ui"
+                ? "前端是静态目录（Vue3 构建产物），由 Nginx 统一托管，无需单独配置。页面入口与 API 反代都在「Nginx 反向代理」面板调整。"
+                : "此服务暂无外部化配置面板。安装目录下的配置文件请手动编辑。"}
             </Alert>
           )}
         </Stack>
