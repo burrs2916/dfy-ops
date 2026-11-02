@@ -850,32 +850,34 @@ mod tests {
         }
     }
 
-    /// {java} 占位符解析（只认环境变量）：有 JAVA_HOME 的机器解析到安装版 java
-    /// 绝对路径，否则回退 PATH java；无占位符原样返回。
+    /// {java} 占位符解析（2026-11-03 起 PATH 优先）：用户手动安装、PATH 生效的
+    /// java 最先命中（CMD java/javac 有输出的那套）；否则 JAVA_HOME；都没有
+    /// 回退裸 `java`。无占位符原样返回。
     #[test]
     fn java_placeholder_env_only() {
         let resolved = crate::ops::process::resolve_java_placeholder("{java} -jar x.jar");
         let exe = if cfg!(target_os = "windows") { "java.exe" } else { "java" };
-        let has_env_java = std::env::var("JAVA_HOME")
-            .map(|h| {
-                let bin = std::path::Path::new(&h)
-                    .join("bin")
-                    .join(exe);
-                bin.exists()
-            })
-            .unwrap_or(false);
-        if has_env_java {
-            let frag = format!("bin{}{exe} ", std::path::MAIN_SEPARATOR);
-            assert!(
-                resolved.contains(&frag),
-                "有 JAVA_HOME 的机器应解析到安装版 java: {resolved}"
-            );
-        } else {
-            assert_eq!(
-                resolved, "java -jar x.jar",
-                "无 JAVA_HOME 且无预置 JRE 的机器应回退 PATH java"
-            );
-        }
+        let path_java = std::env::var("PATH").ok().and_then(|paths| {
+            std::env::split_paths(&paths)
+                .map(|dir| dir.join(exe))
+                .find(|p| p.is_file())
+                .map(|p| p.to_string_lossy().to_string())
+        });
+        let home_java = std::env::var("JAVA_HOME")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .and_then(|home| {
+                let bin = home.join("bin").join(exe);
+                bin.exists().then(|| bin.to_string_lossy().to_string())
+            });
+        let expected = path_java
+            .or(home_java)
+            .unwrap_or_else(|| "java".to_string());
+        assert_eq!(
+            resolved,
+            format!("{expected} -jar x.jar"),
+            "应按 PATH → JAVA_HOME → 裸 java 的顺序解析: {resolved}"
+        );
         assert_eq!(
             crate::ops::process::resolve_java_placeholder("nginx -c x.conf"),
             "nginx -c x.conf",

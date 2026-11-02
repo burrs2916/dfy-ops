@@ -749,7 +749,7 @@ async fn run_jar_install(
                 .and_then(|r| r.error.clone());
             if let Some(e) = backend_err {
                 state.log(format!(
-                    "DFY 后端自动启动失败：{e}。常见原因：Java 未安装或 JAVA_HOME 未配置——请先在「安装维护」安装 Java（或点「修复环境变量」），再到已安装页 Nginx 页签旁手动点「启动」"
+                    "DFY 后端自动启动失败：{e}。常见原因：JDK 版本与 jar 不匹配（如 jdk8 的 jar 被 JDK17 拉起，看上方警告）或依赖服务异常——按上方预检结果与进程输出尾部处理后，再到已安装页手动点「启动」"
                 ));
                 crate::ops_events::record(
                     "installer",

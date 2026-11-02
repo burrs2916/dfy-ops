@@ -7,23 +7,41 @@ use std::sync::Mutex;
 /// debug.log 里平台托管进程启停的结构化 scope
 pub const PROC_SCOPE: &str = "Proc";
 
-/// run_cmd 中 `{java}` 占位符解析：只认环境变量——JAVA_HOME 指向的 java
-/// 优先，否则 `java`（PATH 语义）。与检测同口径：平台只支持安装版 JDK，
-/// 不再解析交付包内置 JRE。
+/// run_cmd 中 `{java}` 占位符解析（2026-11-03 调整）：**PATH 上的 java 优先**，
+/// 其次 JAVA_HOME 指向的 java，都没有才裸 `java`（CreateProcess 的 PATH 语义）。
+///
+/// 之前是 JAVA_HOME 优先——但 java-env-fix 会把用户级 JAVA_HOME 指到平台托管的
+/// JDK17，掩盖了用户手动安装的 JDK（CMD 里 java/javac 有输出的那套）。用户实测
+/// 明确要求：以手动安装、系统环境变量生效的 JDK 为准。PATH 命中返回绝对路径，
+/// spawn 日志的 cmd= 里能直接看出用的是哪套 JDK。
 pub fn resolve_java_placeholder(cmd: &str) -> String {
     if !cmd.contains("{java}") {
         return cmd.to_string();
     }
-    let java_home = std::env::var("JAVA_HOME").ok().map(std::path::PathBuf::from);
-    let env_java = java_home.and_then(|home| {
-        let bin = if cfg!(target_os = "windows") {
-            home.join("bin").join("java.exe")
-        } else {
-            home.join("bin").join("java")
-        };
-        bin.exists().then(|| bin.to_string_lossy().to_string())
+    let exe = if cfg!(target_os = "windows") {
+        "java.exe"
+    } else {
+        "java"
+    };
+    // 1) PATH 命中（用户手动安装的 JDK 走这里）
+    let path_java = std::env::var("PATH").ok().and_then(|paths| {
+        std::env::split_paths(&paths)
+            .map(|dir| dir.join(exe))
+            .find(|p| p.is_file())
+            .map(|p| p.to_string_lossy().to_string())
     });
-    cmd.replace("{java}", &env_java.unwrap_or_else(|| "java".to_string()))
+    // 2) JAVA_HOME 兜底（PATH 没配 JDK 时）
+    let home_java = std::env::var("JAVA_HOME")
+        .ok()
+        .map(std::path::PathBuf::from)
+        .and_then(|home| {
+            let bin = home.join("bin").join(exe);
+            bin.exists().then(|| bin.to_string_lossy().to_string())
+        });
+    cmd.replace(
+        "{java}",
+        &path_java.or(home_java).unwrap_or_else(|| "java".to_string()),
+    )
 }
 
 /// 进程管理器：以 shell 启动本地服务，并记录子进程句柄以便停止。

@@ -59,18 +59,19 @@ fn wait_ready(
         if elapsed >= timeout_secs {
             if !procs.is_running(id) {
                 // 进程已退出：退出码 + 输出尾部直接带回——JVM 报错
-                // （类版本不兼容/配置解析失败/端口被占）当场可见
+                // （类版本不兼容/配置解析失败/端口被占）当场可见。
+                // 尾部 40 行：8 行只有栈底，异常标题（第一因）在更高处
                 let code = procs
                     .last_exit_code(id)
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "未知".into());
-                let tail = ProcManager::spawn_log_tail(&def.install_dir, 8).join(" | ");
+                let tail = ProcManager::spawn_log_tail(&def.install_dir, 40).join(" | ");
                 return Err(format!(
                     "启动失败：进程已退出（exit={code}），端口 {ports} 未监听。进程输出尾部：{tail}（完整输出见 {}\\logs\\platform-spawn.log）",
                     def.install_dir
                 ));
             }
-            let tail = ProcManager::spawn_log_tail(&def.install_dir, 4).join(" | ");
+            let tail = ProcManager::spawn_log_tail(&def.install_dir, 24).join(" | ");
             return Err(format!(
                 "启动后未在超时内就绪：进程仍在运行但端口 {ports} 未监听（已等待 {timeout_secs}s）。进程输出尾部：{tail}"
             ));

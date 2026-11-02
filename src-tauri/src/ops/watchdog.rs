@@ -65,7 +65,7 @@ fn run_loop(procs: Arc<ProcManager>, defs: Vec<ServiceDef>, interval: Duration) 
                         .last_exit_code(&id)
                         .map(|c| format!("exit={c}"))
                         .unwrap_or_else(|| "exit=未知".to_string());
-                    let tail = ProcManager::spawn_log_tail(&def.install_dir, 6).join(" | ");
+                    let tail = ProcManager::spawn_log_tail(&def.install_dir, 20).join(" | ");
                     crate::debug_log::entry(
                         WATCHDOG_SCOPE,
                         "WARN",
