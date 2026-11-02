@@ -37,10 +37,10 @@ export const BACKEND_PROD_DEFAULTS: ExternalConfigPayload = {
   mysqlPassword: "dfy123456",
   mysqlSlaveUrl:
     "jdbc:mysql://127.0.0.1:3306/dfy_base_db?characterEncoding=utf8&serverTimezone=Asia/Shanghai",
-  redisHost: "127.0.0.1",
+  redisHost: "192.168.56.101",
   redisPort: "6379",
   redisPassword: "dfy123456",
-  vernemqHostUrl: "tcp://127.0.0.1:18830",
+  vernemqHostUrl: "tcp://192.168.56.101:18830",
   vernemqUsername: "cloud",
   vernemqPassword: "key@00",
 };

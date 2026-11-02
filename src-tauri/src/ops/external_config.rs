@@ -48,7 +48,7 @@ pub fn config_path(install_dir: &Path) -> PathBuf {
 /// 安装前配置确认弹窗以此为预填基准，用户改完由 [`create`] 落盘。
 // 调用方（jar 安装管线）仅 Windows 编译，macOS dev 侧放行 dead_code
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub const TEMPLATE: &str = "server:\n  port: 48085 # 服务启动端口\n\nspring:\n  datasource:\n    dynamic:\n      datasource:\n        master:\n          url: jdbc:mysql://127.0.0.1:3306/dfy_base_db?useSSL=false&characterEncoding=utf8&serverTimezone=Asia/Shanghai\n          username: root\n          password: dfy123456\n        slave:\n          lazy: true\n          url: jdbc:mysql://127.0.0.1:3306/dfy_base_db?characterEncoding=utf8&serverTimezone=Asia/Shanghai\n          username: root\n          password: dfy123456\n  redis:\n    host: 127.0.0.1 # 地址\n    port: 6379 # 端口\n    database: 0\n    password: \"dfy123456\" # 密码\n\niot:\n  verneMq:\n    username: cloud\n    password: key@00\n    hostUrl: tcp://127.0.0.1:18830\n";
+pub const TEMPLATE: &str = "server:\n  port: 48085 # 服务启动端口\n\nspring:\n  datasource:\n    dynamic:\n      datasource:\n        master:\n          url: jdbc:mysql://127.0.0.1:3306/dfy_base_db?useSSL=false&characterEncoding=utf8&serverTimezone=Asia/Shanghai\n          username: root\n          password: dfy123456\n        slave:\n          lazy: true\n          url: jdbc:mysql://127.0.0.1:3306/dfy_base_db?characterEncoding=utf8&serverTimezone=Asia/Shanghai\n          username: root\n          password: dfy123456\n  redis:\n    host: 192.168.56.101 # 地址（Redis 为远程部署，默认指向 VM）\n    port: 6379 # 端口\n    database: 0\n    password: \"dfy123456\" # 密码\n\niot:\n  verneMq:\n    username: cloud\n    password: key@00\n    hostUrl: tcp://192.168.56.101:18830\n";
 
 /// 从模板创建外部配置（安装管线用）：write 要求模板已存在，而安装时
 /// install_dir 是全新目录——以 [`TEMPLATE`] 为底，apply 用户确认的值后原子落盘。
@@ -295,7 +295,7 @@ mod tests {
         assert_eq!(back.server_port, "48086");
         assert_eq!(back.mysql_master_url, parse(TEMPLATE).mysql_master_url);
         assert_eq!(back.redis_password, "dfy123456");
-        assert_eq!(back.vernemq_host_url, "tcp://127.0.0.1:18830");
+        assert_eq!(back.vernemq_host_url, "tcp://192.168.56.101:18830");
         std::fs::remove_dir_all(&base).ok();
     }
 
