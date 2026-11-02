@@ -682,6 +682,57 @@ async fn run_jar_install(
             state.log(format!(
                 "验证通过：dfy-server.jar 已就位（{jar_len} 字节）"
             ));
+            // ===== 启动前预检：外部配置里的 MySQL/Redis/MQTT 先探连通性 =====
+            // 依赖连不上时后端必然启动失败（用户只看到「未在超时内就绪」的猜谜）。
+            // 预检不通过直接点名依赖与地址并跳过自动启动——安装本身仍算成功
+            // （启动是启动、安装是安装，自动启动失败不影响安装结果）。
+            state.patch(|j| j.stage = "preflight".into());
+            let pre_dir = install_dir.clone();
+            let pre = tokio::task::spawn_blocking(move || {
+                crate::ops::env_repair::preflight::check_backend(&pre_dir)
+            })
+            .await
+            .unwrap_or_default();
+            if pre.is_empty() {
+                state.log("未找到外部配置（config/application-local.yaml），跳过依赖预检");
+            }
+            for c in &pre {
+                if c.ok {
+                    state.log(format!("预检通过：{}（{}）", c.name, c.addr));
+                } else {
+                    state.log(format!("预检失败：{}（{}）——{}", c.name, c.addr, c.detail));
+                }
+            }
+            // jar 标注 JDK 版本与实际启动 JDK 不一致时提示（jdk8 jar + JDK17：
+            // 用了 JDK9+ 移除的 API 会启动即退——2026-11-02 实测秒退的高危可疑点）
+            if let Some(w) = crate::ops::env_repair::preflight::jdk_mismatch_warning(
+                &jar_path,
+                &crate::ops::process::resolve_java_placeholder("{java}"),
+            ) {
+                state.log(w);
+            }
+            if pre.iter().any(|c| !c.ok) {
+                state.log("预检未通过：依赖连不上时后端必然启动失败，已跳过自动启动。请先启动对应依赖或修改外部配置（config/application-local.yaml），再到「已安装」页手动点「启动」".to_string());
+                crate::ops_events::record(
+                    "installer",
+                    "dfy-backend",
+                    "autostart",
+                    false,
+                    "启动前预检未通过，跳过自动启动",
+                );
+                debug_log::entry(
+                    debug_log::APP_SCOPE,
+                    "WARN",
+                    "install_autostart",
+                    "preflight_failed",
+                    &format!(
+                        "dfy-backend 启动前预检未通过：{} 项依赖连不上",
+                        pre.iter().filter(|c| !c.ok).count()
+                    ),
+                );
+                finish(state, env_cache, true, String::new()).await;
+                return;
+            }
             // ===== 安装即运行：与 nginx 同理念。start_with_deps 自动带起
             // MySQL/Redis；Java 未就绪时如实提示（resolve {java} 失败会带原因），
             // 不再让用户拿着「到服务运维启动」的提示找不到按钮。

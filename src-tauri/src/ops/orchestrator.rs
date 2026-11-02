@@ -16,28 +16,74 @@ pub struct ActionResult {
     pub error: Option<String>,
 }
 
-/// 启动后等待服务就绪的超时（秒）。
-const READY_TIMEOUT_SECS: u64 = 30;
+/// 启动后等待服务就绪的超时（秒）。30s 对 300MB 的 Spring Boot 冷启动不够
+/// （2026-11-02 实测装完即报「未在超时内就绪」但进程其实还在起）——放宽到 90s。
+const READY_TIMEOUT_SECS: u64 = 90;
 /// 就绪轮询间隔（毫秒）。
 const READY_POLL_MS: u64 = 500;
+/// 等待进度日志间隔（秒）。
+const READY_PROGRESS_SECS: u64 = 10;
 
 /// 等待服务端口全部可连（无端口的桌面客户端仅短暂等待）。
-fn wait_ready(def: &ServiceDef, timeout_secs: u64) -> bool {
+///
+/// 超时不再返回笼统的「未就绪」：进程已退出时带回**退出码 + spawn 输出尾部**
+/// （秒退的原因就在 platform-spawn.log 里），仍在运行时说明端口未监听——
+/// 让「为什么起不来」在日志与任务回显里当场可见。
+fn wait_ready(
+    procs: &ProcManager,
+    id: &str,
+    def: &ServiceDef,
+    timeout_secs: u64,
+) -> Result<(), String> {
     if def.ports.is_empty() {
         thread::sleep(Duration::from_millis(500));
-        return true;
+        return Ok(());
     }
+    let ports = def
+        .ports
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join("/");
     let start = Instant::now();
+    let mut next_progress = READY_PROGRESS_SECS;
     loop {
         if def
             .ports
             .iter()
             .all(|p| health::check_tcp("127.0.0.1", *p, 800))
         {
-            return true;
+            return Ok(());
         }
-        if start.elapsed().as_secs() >= timeout_secs {
-            return false;
+        let elapsed = start.elapsed().as_secs();
+        if elapsed >= timeout_secs {
+            if !procs.is_running(id) {
+                // 进程已退出：退出码 + 输出尾部直接带回——JVM 报错
+                // （类版本不兼容/配置解析失败/端口被占）当场可见
+                let code = procs
+                    .last_exit_code(id)
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "未知".into());
+                let tail = ProcManager::spawn_log_tail(&def.install_dir, 8).join(" | ");
+                return Err(format!(
+                    "启动失败：进程已退出（exit={code}），端口 {ports} 未监听。进程输出尾部：{tail}（完整输出见 {}\\logs\\platform-spawn.log）",
+                    def.install_dir
+                ));
+            }
+            let tail = ProcManager::spawn_log_tail(&def.install_dir, 4).join(" | ");
+            return Err(format!(
+                "启动后未在超时内就绪：进程仍在运行但端口 {ports} 未监听（已等待 {timeout_secs}s）。进程输出尾部：{tail}"
+            ));
+        }
+        if elapsed >= next_progress {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "INFO",
+                "wait_ready",
+                "progress",
+                &format!("id={id} 已等待 {elapsed}s，端口 {ports} 未就绪，继续等待…"),
+            );
+            next_progress += READY_PROGRESS_SECS;
         }
         thread::sleep(Duration::from_millis(READY_POLL_MS));
     }
@@ -144,15 +190,11 @@ pub fn start_all(procs: &ProcManager, defs: &[ServiceDef]) -> Vec<ActionResult> 
                         });
                     }
                 }
-                let ready = wait_ready(def, READY_TIMEOUT_SECS);
+                let res = wait_ready(procs, &id, def, READY_TIMEOUT_SECS);
                 Some(ActionResult {
                     id,
-                    ok: ready,
-                    error: if ready {
-                        None
-                    } else {
-                        Some("启动后未在超时内就绪".into())
-                    },
+                    ok: res.is_ok(),
+                    error: res.err(),
                 })
             })
             .collect(),
@@ -216,15 +258,11 @@ pub fn start_with_deps(procs: &ProcManager, defs: &[ServiceDef], id: &str) -> Ve
                         });
                     }
                 }
-                let ready = wait_ready(def, READY_TIMEOUT_SECS);
+                let res = wait_ready(procs, &sid, def, READY_TIMEOUT_SECS);
                 Some(ActionResult {
                     id: sid,
-                    ok: ready,
-                    error: if ready {
-                        None
-                    } else {
-                        Some("启动后未在超时内就绪".into())
-                    },
+                    ok: res.is_ok(),
+                    error: res.err(),
                 })
             })
             .collect(),

@@ -34,6 +34,10 @@ pub struct ProcManager {
     /// 平台至少成功拉起过一次的服务：保活只管自己拉起过的，
     /// 平台没碰过的外部服务（detected）不由看门狗接管。
     ever_started: Mutex<HashMap<String, ()>>,
+    /// 最近一次观测到的退出码（按服务 id）。看门狗/等待就绪超时给出
+    /// 「exit=多少」——2026-11-02 实测 dfy-backend 启动秒退却查无死因，
+    /// 根因就是退出码和子进程输出从未被带回。
+    last_exit: Mutex<HashMap<String, i32>>,
 }
 
 impl ProcManager {
@@ -42,6 +46,7 @@ impl ProcManager {
             children: Mutex::new(HashMap::new()),
             suppressed: Mutex::new(HashMap::new()),
             ever_started: Mutex::new(HashMap::new()),
+            last_exit: Mutex::new(HashMap::new()),
         }
     }
 
@@ -72,25 +77,63 @@ impl ProcManager {
     /// 移除记录，返回 false；仍在跑返回 true。这样「进程崩溃但我们还握着句柄」不会一直
     /// 误报 running=true，也不会留下僵尸进程占用 PID 表。
     pub fn is_running(&self, id: &str) -> bool {
-        let mut map = self.children.lock().unwrap();
-        if let Some(child) = map.get_mut(id) {
+        // 第一段：探测（持锁）。Ok(None)=仍在跑；Some(退出码)=已退出；Err=异常按退出处理。
+        let exited: Option<i32> = {
+            let mut map = self.children.lock().unwrap();
+            let Some(child) = map.get_mut(id) else {
+                return false;
+            };
             match child.try_wait() {
-                // 子进程已退出：回收并清理记录
-                Ok(Some(_)) => {
-                    map.remove(id);
-                    false
-                }
-                // 仍在运行
-                Ok(None) => true,
-                // 等待出错（权限/平台异常等）：保守移除，避免僵尸堆积
-                Err(_) => {
-                    map.remove(id);
-                    false
-                }
+                Ok(None) => return true,
+                Ok(Some(status)) => Some(status.code().unwrap_or(-1)),
+                Err(_) => Some(-1),
             }
-        } else {
-            false
-        }
+        };
+        // 第二段：回收 + 记录（锁已释放）。回收每个死进程只发生一次，
+        // 所以这条日志天然去重——不会随状态轮询刷屏。
+        let code = exited.unwrap_or(-1);
+        self.children.lock().unwrap().remove(id);
+        self.last_exit.lock().unwrap().insert(id.to_string(), code);
+        crate::debug_log::entry(
+            PROC_SCOPE,
+            "WARN",
+            "exit",
+            "exited",
+            &format!("id={id} 进程已退出 exit={code}（输出尾部随看门狗/启动超时日志带回；完整输出见安装目录 logs/platform-spawn.log）"),
+        );
+        false
+    }
+
+    /// 最近一次观测到的退出码（从未观测到退出返回 None）。
+    pub fn last_exit_code(&self, id: &str) -> Option<i32> {
+        self.last_exit.lock().unwrap().get(id).copied()
+    }
+
+    /// 读取 `{install_dir}/logs/platform-spawn.log` 尾部至多 max_lines 行
+    /// （每行截断到 200 字符、去空行）。进程秒退的原因就在这个文件里——
+    /// 由看门狗重启 / 启动超时的日志直接带回，用户不用再翻文件。
+    pub fn spawn_log_tail(install_dir: &str, max_lines: usize) -> Vec<String> {
+        let path = std::path::Path::new(install_dir)
+            .join("logs")
+            .join("platform-spawn.log");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return Vec::new();
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let start = lines.len().saturating_sub(max_lines);
+        lines[start..]
+            .iter()
+            .filter(|l| !l.trim().is_empty())
+            .map(|l| {
+                let t = l.trim_end();
+                if t.chars().count() > 200 {
+                    let head: String = t.chars().take(200).collect();
+                    format!("{head}…")
+                } else {
+                    t.to_string()
+                }
+            })
+            .collect()
     }
 
     /// 启动服务（若已在运行则忽略）。run_cmd 以系统 shell 执行，

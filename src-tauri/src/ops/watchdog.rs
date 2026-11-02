@@ -59,14 +59,24 @@ fn run_loop(procs: Arc<ProcManager>, defs: Vec<ServiceDef>, interval: Duration) 
             // start() 内部已有 Proc scope 日志，这里补「为什么会被拉起」的上下文与审计
             match procs.start(&id, &def.install_dir, &def.run_cmd) {
                 Ok(()) => {
+                    // 退出码 + spawn 输出尾部随重启日志带回：crash-loop 不再是
+                    // 「进程已退出」四字猜谜（2026-11-02 dfy-backend 秒退实测）
+                    let exit_note = procs
+                        .last_exit_code(&id)
+                        .map(|c| format!("exit={c}"))
+                        .unwrap_or_else(|| "exit=未知".to_string());
+                    let tail = ProcManager::spawn_log_tail(&def.install_dir, 6).join(" | ");
                     crate::debug_log::entry(
                         WATCHDOG_SCOPE,
                         "WARN",
                         "keepalive",
                         "restart",
-                        &format!("服务 {id} 进程已退出，已自动拉起（run_cmd={}）", def.run_cmd),
+                        &format!(
+                            "服务 {id} 进程已退出（{exit_note}），已自动拉起（run_cmd={}，输出尾部：{tail}）",
+                            def.run_cmd
+                        ),
                     );
-                    crate::ops_events::record("watchdog", &id, "autostart", true, "进程退出，看门狗自动拉起");
+                    crate::ops_events::record("watchdog", &id, "autostart", true, &format!("进程退出（{exit_note}），看门狗自动拉起"));
                 }
                 Err(e) => {
                     crate::debug_log::entry(

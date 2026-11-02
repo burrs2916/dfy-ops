@@ -857,6 +857,21 @@ pub async fn service_action(
         let st = state.clone();
         let res = blocking(move || {
             if verb == "start" {
+                // 启动前预检：依赖连不上时后端必然启动失败——直接点名依赖与地址，
+                // 不让用户从「未就绪」里猜（无外部配置时 check_backend 返回空 = 跳过）
+                let dir = registry_install_dir(&st, "dfy-backend");
+                let pre = crate::ops::env_repair::preflight::check_backend(&dir);
+                let bad: Vec<String> = pre
+                    .iter()
+                    .filter(|c| !c.ok)
+                    .map(|c| format!("{}（{}）：{}", c.name, c.addr, c.detail))
+                    .collect();
+                if !bad.is_empty() {
+                    return Err(format!(
+                        "启动前预检未通过：{}。请先启动对应依赖或修改外部配置（config/application-local.yaml）再启动",
+                        bad.join("；")
+                    ));
+                }
                 let results =
                     crate::ops::orchestrator::start_with_deps(&st.procs, &st.registry, "dfy-backend");
                 crate::debug_log::entry(

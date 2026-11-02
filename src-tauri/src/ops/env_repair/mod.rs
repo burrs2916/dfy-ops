@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 
 pub mod jdk;
 pub mod install;
+pub mod preflight;
 pub mod uninstall;
 
 pub use jdk::*;
