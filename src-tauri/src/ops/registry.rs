@@ -128,7 +128,8 @@ fn builtin() -> Vec<ServiceDef> {
             process_names: vec!["java".into(), "dfy-server".into()],
             product_names: vec![],
             health_url: None,
-            log_paths: vec!["C:/services/dfy-boot-base/logs/app.log".into()],
+            // 运行日志：外部配置 logging.file.name（相对运行目录）→ install_dir/logs/dfy-server.log
+            log_paths: vec!["C:/services/dfy-boot-base/logs/dfy-server.log".into()],
             depends_on: vec!["mysql".into(), "redis".into()],
             is_daemon: true,
             third_party: false,

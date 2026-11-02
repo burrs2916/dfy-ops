@@ -26,6 +26,7 @@ export type ExternalConfigPayload = {
   vernemqHostUrl: string;
   vernemqUsername: string;
   vernemqPassword: string;
+  logFilePath: string;
 };
 
 /** 生产默认参数（与后端 external_config::TEMPLATE 同源：dfy_base_db / dfy123456 / 48085 / 18830）。 */
@@ -43,6 +44,7 @@ export const BACKEND_PROD_DEFAULTS: ExternalConfigPayload = {
   vernemqHostUrl: "tcp://192.168.56.101:18830",
   vernemqUsername: "cloud",
   vernemqPassword: "key@00",
+  logFilePath: "logs/dfy-server.log",
 };
 
 interface Props {
@@ -148,6 +150,19 @@ export default function BackendInstallDialog({ open, onConfirm, onClose }: Props
               sx={{ flex: 1 }}
             />
           </Box>
+          <Divider>
+            <Typography variant="caption" color="text.secondary">
+              运行日志
+            </Typography>
+          </Divider>
+          <TextField
+            size="small"
+            label="日志文件（logging.file.name，相对运行目录）"
+            value={cfg.logFilePath}
+            onChange={set("logFilePath")}
+            placeholder="logs/dfy-server.log"
+            helperText="平台「日志」页签实时读取该文件（10MB 按天滚动，保留 30 天）"
+          />
           <Divider>
             <Typography variant="caption" color="text.secondary">
               VerneMQ（MQTT 消息）

@@ -33,6 +33,7 @@ const EMPTY: ExternalConfig = {
   vernemqHostUrl: "",
   vernemqUsername: "",
   vernemqPassword: "",
+  logFilePath: "",
 };
 
 /** 一个配置分组：标题 + 字段网格。 */
@@ -203,6 +204,17 @@ export default function ExternalConfigPanel({ serviceId }: { serviceId: string }
                   sx={{ maxWidth: 240 }}
                 />
               </Stack>
+            </FieldGroup>
+
+            <FieldGroup title="运行日志（平台「日志」页签读取的就是这个文件）">
+              <TextField
+                size="small"
+                label="日志文件（logging.file.name，相对运行目录）"
+                value={cfg.logFilePath}
+                onChange={set("logFilePath")}
+                sx={{ maxWidth: 360 }}
+                placeholder="logs/dfy-server.log"
+              />
             </FieldGroup>
 
             <FieldGroup title="VerneMQ（IoT MQTT 连接）">

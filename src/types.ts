@@ -260,6 +260,8 @@ export interface ExternalConfig {
   vernemqHostUrl: string;
   vernemqUsername: string;
   vernemqPassword: string;
+  /** 运行日志文件（logging.file.name → logback ${LOG_FILE}），相对运行目录 */
+  logFilePath: string;
 }
 
 /** GET /api/services/:id/external-config 响应 */
