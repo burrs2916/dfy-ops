@@ -65,6 +65,13 @@ pub fn create(install_dir: &Path, cfg: &ExternalConfig) -> Result<PathBuf, Strin
             .map_err(|e| format!("创建配置目录 {} 失败：{e}", parent.display()))?;
     }
     let new_text = apply(TEMPLATE, cfg);
+    let dups = find_duplicate_keys(&new_text);
+    if !dups.is_empty() {
+        return Err(format!(
+            "生成外部配置时发现重复键（模板或输入值异常）：{}",
+            dups.join("；")
+        ));
+    }
     let tmp = path.with_extension("yaml.tmp");
     std::fs::write(&tmp, &new_text).map_err(|e| format!("写入临时文件失败：{e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("替换配置文件失败：{e}"))?;
@@ -72,7 +79,7 @@ pub fn create(install_dir: &Path, cfg: &ExternalConfig) -> Result<PathBuf, Strin
 }
 
 /// 当前段落（跨多文档 yaml 唯一的段落 key）。
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Section {
     Root,
     Server,
@@ -144,6 +151,48 @@ fn unquote(v: &str) -> String {
 /// 新值是否需要双引号包裹（含 yaml 特殊字符时）。
 fn needs_quote(v: &str) -> bool {
     v.contains('#') || v.contains('"') || v.contains(": ") || v.starts_with(' ')
+}
+
+/// 扫描 yaml 文本中的重复键（同一段落内同一叶子键出现两次且都未注释）。
+/// 返回人类可读的问题列表（空 = 干净）。背景：交付方手改过 jar 内置
+/// application-local.yaml，引入了同层两个 `password`，新版 SnakeYAML
+/// 严格校验直接 DuplicateKeyException 拒绝启动——必须在启动前把这类
+/// 问题点名出来，而不是让用户对着满屏框架栈猜。
+pub fn find_duplicate_keys(text: &str) -> Vec<String> {
+    let mut sec = Section::Root;
+    // (段, 键) -> (行号, 原值)，重复时追加问题
+    let mut seen: std::collections::HashMap<(Section, String), (usize, String)> =
+        std::collections::HashMap::new();
+    let mut problems = Vec::new();
+    for (idx, line) in text.lines().enumerate() {
+        let line_no = idx + 1;
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("---") {
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        let (body, _c) = split_comment(trimmed);
+        let Some((raw_key, val)) = body.split_once(':') else {
+            continue;
+        };
+        let key = raw_key.trim().to_string();
+        if val.trim().is_empty() {
+            advance_section(&mut sec, trimmed, indent);
+            continue;
+        }
+        let entry = (sec, key.clone());
+        match seen.get(&entry) {
+            Some((first_no, _first_val)) => {
+                problems.push(format!(
+                    "第 {line_no} 行的 `{key}` 与第 {first_no} 行重复（同层级两个同名键，Spring Boot 新版 SnakeYAML 会拒绝启动）"
+                ));
+            }
+            None => {
+                seen.insert(entry, (line_no, unquote(val)));
+            }
+        }
+    }
+    problems
 }
 
 /// 从 yaml 文本解析运维字段。
@@ -265,6 +314,13 @@ pub fn write(install_dir: &Path, cfg: &ExternalConfig) -> Result<PathBuf, String
     let text =
         std::fs::read_to_string(&path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
     let new_text = apply(&text, cfg);
+    let dups = find_duplicate_keys(&new_text);
+    if !dups.is_empty() {
+        return Err(format!(
+            "外部配置存在重复键，已阻止写入（否则后端启动即退）：{}",
+            dups.join("；")
+        ));
+    }
     let tmp = path.with_extension("yaml.tmp");
     std::fs::write(&tmp, &new_text).map_err(|e| format!("写入临时文件失败：{e}"))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("替换配置文件失败：{e}"))?;
@@ -290,6 +346,21 @@ mod tests {
         assert_eq!(c.vernemq_host_url, "tcp://127.0.0.1:18830");
         assert_eq!(c.vernemq_username, "cloud");
         assert_eq!(c.vernemq_password, "key@00");
+    }
+
+    /// find_duplicate_keys：点名同层重复键（交付方手改 jar 配置引入的实际故障）。
+    #[test]
+    fn duplicate_keys_are_reported_with_line_numbers() {
+        // 第 4/5 行同层两个 password（模拟手改配置时把注释行的 # 弄丢）
+        let bad = "spring:\n  redis:\n    host: 127.0.0.1\n    password: \"a\"\n    password: b\n";
+        let dups = find_duplicate_keys(bad);
+        assert_eq!(dups.len(), 1, "{dups:?}");
+        assert!(dups[0].contains("password"), "{dups:?}");
+        assert!(dups[0].contains("第 5 行"), "{dups:?}");
+        // 干净文件零告警；注释行不算键
+        assert!(find_duplicate_keys(SAMPLE).is_empty(), "{:?}", find_duplicate_keys(SAMPLE));
+        // master/slave 同名 password 是不同段，不算重复
+        assert!(find_duplicate_keys(TEMPLATE).is_empty(), "{:?}", find_duplicate_keys(TEMPLATE));
     }
 
     /// create：从生产模板 + 用户确认值生成外部配置；空目录可建、值全部落盘。

@@ -693,6 +693,33 @@ async fn run_jar_install(
             state.log(format!(
                 "验证通过：dfy-server.jar 已就位（{jar_len} 字节）"
             ));
+            // ===== jar 内置配置体检：重复键会让 Spring 启动即退（DuplicateKeyException）=====
+            // 交付方手改 jar 内 application-local.yaml 曾引入同层两个 password——在这里
+            // 点名报出来，不等 90 秒就绪超时后再看满屏框架栈。
+            {
+                let id = install_dir.clone();
+                let check = tokio::task::spawn_blocking(move || check_jar_yaml(&id)).await;
+                match check {
+                    Ok(Ok(dups)) if dups.is_empty() => {
+                        state.log("jar 内置配置体检通过（无重复键）");
+                    }
+                    Ok(Ok(dups)) => {
+                        finish(
+                            state,
+                            env_cache,
+                            false,
+                            format!(
+                                "jar 内置配置存在重复键，Spring 启动必失败（请让交付方重新打包或更换安装包）：{}",
+                                dups.join("；")
+                            ),
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(Err(e)) => state.log(format!("jar 内置配置体检跳过：{e}")),
+                    Err(e) => state.log(format!("jar 内置配置体检任务异常：{e}")),
+                }
+            }
             // ===== 启动前预检：外部配置里的 MySQL/Redis/MQTT 先探连通性 =====
             // 依赖连不上时后端必然启动失败（用户只看到「未在超时内就绪」的猜谜）。
             // 预检不通过直接点名依赖与地址并跳过自动启动——安装本身仍算成功
@@ -885,6 +912,40 @@ pub fn runas_wait(exe: &str, args: &str) -> Result<(), String> {
         let _ = (exe, args);
         Err("该操作仅支持 Windows 目标机".into())
     }
+}
+
+/// jar 内置配置体检：抽取 BOOT-INF/classes 下的 yaml 并检测重复键。
+/// jar 即 zip，Windows/macOS 自带的 bsdtar 都支持抽取指定成员；
+/// 抽取失败（非标准 jar / 缺文件）只跳过不阻塞——体检是防线不是关卡。
+fn check_jar_yaml(install_dir: &str) -> Result<Vec<String>, String> {
+    let jar = std::path::Path::new(install_dir).join("dfy-server.jar");
+    if !jar.is_file() {
+        return Err(format!("jar 不存在：{}", jar.display()));
+    }
+    let tmp = std::env::temp_dir().join(format!("dfy-ops-jarcheck-{}", std::process::id()));
+    std::fs::remove_dir_all(&tmp).ok();
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("创建体检临时目录失败：{e}"))?;
+    let mut problems = Vec::new();
+    for member in [
+        "BOOT-INF/classes/application-local.yaml",
+        "BOOT-INF/classes/application.yaml",
+    ] {
+        let out = std::process::Command::new("tar")
+            .args(["-xf", jar.to_str().unwrap_or_default(), member, "-C", tmp.to_str().unwrap_or_default()])
+            .output()
+            .map_err(|e| format!("执行 tar 失败：{e}"))?;
+        if !out.status.success() {
+            continue; // 成员不存在（老版本结构）→ 跳过该文件
+        }
+        let path = tmp.join(member);
+        if let Ok(text) = std::fs::read_to_string(&path) {
+            for p in crate::ops::external_config::find_duplicate_keys(&text) {
+                problems.push(format!("[{member}] {p}"));
+            }
+        }
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+    Ok(problems)
 }
 
 /// 解压 zip 到目标目录：优先系统自带 bsdtar（快），失败回退 Expand-Archive。
