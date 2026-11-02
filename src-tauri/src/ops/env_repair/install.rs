@@ -166,7 +166,11 @@ async fn run_install(state: Arc<RepairState>, expected_major: u32, env_cache: En
     let old = std::path::Path::new(JDK_MANAGED_HOME);
     if old.is_dir() {
         state.log(format!("检测到旧 JDK 目录 {JDK_MANAGED_HOME}，先清除（平台目录只保留一套 JDK）"));
-        std::fs::remove_dir_all(old).map_err(|e| format!("清除旧 JDK 目录失败：{e}"))?;
+        if let Err(e) = std::fs::remove_dir_all(old) {
+            // 清不掉多半是旧 JDK 正在被占用：带着残留解压只会新旧混杂，如实终止
+            finish(state, env_cache, false, format!("清除旧 JDK 目录失败（可能正被占用）：{e}")).await;
+            return;
+        }
         state.log("旧 JDK 目录已清除");
     }
 
@@ -1151,7 +1155,11 @@ async fn run_zip_install(
         let old = std::path::Path::new(&install_dir);
         if old.is_dir() {
             state.log(format!("检测到旧 JDK 目录 {install_dir}，先清除（平台目录只保留一套 JDK）"));
-            std::fs::remove_dir_all(old).map_err(|e| format!("清除旧 JDK 目录失败：{e}"))?;
+            if let Err(e) = std::fs::remove_dir_all(old) {
+                // 清不掉多半是旧 JDK 正在被占用：带着残留解压只会新旧混杂，如实终止
+                finish(state, env_cache, false, format!("清除旧 JDK 目录失败（可能正被占用）：{e}")).await;
+                return;
+            }
             state.log("旧 JDK 目录已清除");
         }
     }
