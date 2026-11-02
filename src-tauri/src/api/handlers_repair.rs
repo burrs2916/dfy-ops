@@ -860,6 +860,31 @@ pub async fn service_action(
                 // 启动前预检：依赖连不上时后端必然启动失败——直接点名依赖与地址，
                 // 不让用户从「未就绪」里猜（无外部配置时 check_backend 返回空 = 跳过）
                 let dir = registry_install_dir(&st, "dfy-backend");
+                // 先就地修复历史模板 MySQL URL 缺陷（缺 allowPublicKeyRetrieval，
+                // MySQL 8 非 SSL 连接建连必败）；幂等，新模板配置无改动
+                match crate::ops::env_repair::preflight::repair_legacy_mysql_urls(&dir) {
+                    Ok(list) => {
+                        for u in list {
+                            crate::debug_log::entry(
+                                crate::ops::process::PROC_SCOPE,
+                                "WARN",
+                                "service_action",
+                                "conf_repaired",
+                                &format!("target=dfy-backend 启动前修复历史模板 URL：{u} → 补 allowPublicKeyRetrieval=true"),
+                            );
+                            st.repair.log("已自动修复外部配置：历史模板 MySQL URL 补齐 allowPublicKeyRetrieval=true（MySQL 8 非 SSL 连接必需）");
+                        }
+                    }
+                    Err(e) => {
+                        crate::debug_log::entry(
+                            crate::ops::process::PROC_SCOPE,
+                            "ERROR",
+                            "service_action",
+                            "conf_repair_failed",
+                            &format!("target=dfy-backend 历史模板 URL 修复失败：{e}"),
+                        );
+                    }
+                }
                 let pre = crate::ops::env_repair::preflight::check_backend(&dir);
                 let bad: Vec<String> = pre
                     .iter()

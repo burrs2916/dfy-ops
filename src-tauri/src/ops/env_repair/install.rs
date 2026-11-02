@@ -729,6 +729,25 @@ async fn run_jar_install(
             // 预检不通过直接点名依赖与地址并跳过自动启动——安装本身仍算成功
             // （启动是启动、安装是安装，自动启动失败不影响安装结果）。
             state.patch(|j| j.stage = "preflight".into());
+            // 先就地修复历史模板的 MySQL URL 缺陷（v0.2.44 前生成的配置缺
+            // allowPublicKeyRetrieval，MySQL 8 非 SSL 连接必报 Public Key Retrieval
+            // is not allowed → 启动即退）；幂等，新模板配置无改动
+            let rep_dir = install_dir.clone();
+            match tokio::task::spawn_blocking(move || {
+                crate::ops::env_repair::preflight::repair_legacy_mysql_urls(&rep_dir)
+            })
+            .await
+            {
+                Ok(Ok(list)) => {
+                    for u in list {
+                        state.log(format!(
+                            "启动前自动修复外部配置：{u} → 补 allowPublicKeyRetrieval=true（MySQL 8 非 SSL 连接必需）"
+                        ));
+                    }
+                }
+                Ok(Err(e)) => state.log(format!("历史模板 URL 修复未完成：{e}")),
+                Err(e) => state.log(format!("历史模板 URL 修复任务异常：{e}")),
+            }
             let pre_dir = install_dir.clone();
             let pre = tokio::task::spawn_blocking(move || {
                 crate::ops::env_repair::preflight::check_backend(&pre_dir)

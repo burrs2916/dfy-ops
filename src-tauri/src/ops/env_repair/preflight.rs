@@ -101,6 +101,60 @@ pub fn check_backend(install_dir: &str) -> Vec<DepCheck> {
     out
 }
 
+/// 启动前修复历史模板的 MySQL URL 缺陷（幂等，与 nginx pid 位置修复同理）。
+///
+/// 背景（2026-11-02 实测）：v0.2.44 及更早平台生成的外部配置，master URL 是
+/// `useSSL=false` 且缺 `allowPublicKeyRetrieval`——MySQL 8 默认
+/// caching_sha2_password 账号在非 SSL 连接下不允许客户端取公钥，Druid 建连
+/// 必报 `Public Key Retrieval is not allowed`，后端启动即退。升级到 v0.2.45+
+/// 后旧配置文件不会自动重写，因此在每次启动前就地补上该参数。
+/// 只补参数，不动账号/库名/地址；已含参数、无 useSSL=false 或注释行都不改。
+/// 返回被修复的 URL 列表（空 = 无需修复；无配置文件也返回空）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn repair_legacy_mysql_urls(install_dir: &str) -> Result<Vec<String>, String> {
+    let path = crate::ops::external_config::config_path(Path::new(install_dir));
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Ok(Vec::new());
+    };
+    let mut changed: Vec<String> = Vec::new();
+    let mut out_lines: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        // 只动未注释的 datasource url 行（注释行 trim 后以 # 开头，天然排除）
+        let hit = trimmed.starts_with("url:")
+            && line.contains("jdbc:mysql://")
+            && line.contains("useSSL=false")
+            && !line.contains("allowPublicKeyRetrieval");
+        if !hit {
+            out_lines.push(line.to_string());
+            continue;
+        }
+        // 剥行尾注释再追加参数（URL 值本身不含 '#'，注释必须保持在参数之后）
+        let (body, comment) = match line.find('#') {
+            Some(i) => (line[..i].trim_end(), Some(line[i..].to_string())),
+            None => (line.trim_end(), None),
+        };
+        changed.push(trimmed.to_string());
+        let mut new_line = format!("{body}&allowPublicKeyRetrieval=true");
+        if let Some(c) = comment {
+            new_line.push(' ');
+            new_line.push_str(&c);
+        }
+        out_lines.push(new_line);
+    }
+    if changed.is_empty() {
+        return Ok(changed);
+    }
+    // 保持原文件行尾风格（Windows 生成件多为 CRLF）
+    let eol = if text.contains("\r\n") { "\r\n" } else { "\n" };
+    let mut out = out_lines.join(eol);
+    if text.ends_with('\n') {
+        out.push_str(eol);
+    }
+    std::fs::write(&path, &out).map_err(|e| format!("写回外部配置失败：{e}"))?;
+    Ok(changed)
+}
+
 /// jar 文件名标注的 JDK 版本与实际启动 JDK 不一致时给出警告文案。
 /// 例：dfy-server-2.3.0-jdk8-SNAPSHOT.jar 用 JDK17 启动——若后端使用了
 /// JDK9+ 移除的 API（如 JAXB），会启动即退。启发式：文件名含 jdk8/jdk-8。
@@ -160,6 +214,55 @@ mod tests {
         let r = tcp_ok("127.0.0.1", 59999);
         assert!(r.is_err());
         assert!(!r.err().unwrap().is_empty());
+    }
+
+    #[test]
+    fn repair_legacy_mysql_urls_appends_param_idempotently() {
+        let dir = std::env::temp_dir().join(format!(
+            "dfyops-preflight-repair-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let cfg_dir = dir.join("config");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        let path = cfg_dir.join("application-local.yaml");
+        std::fs::write(
+            &path,
+            "spring:\n  datasource:\n    dynamic:\n      datasource:\n        master:\n          # url: jdbc:mysql://old/useSSL=false 注释行不动\n          url: jdbc:mysql://127.0.0.1:3306/dfy_base_db?useSSL=false&characterEncoding=utf8&serverTimezone=Asia/Shanghai\n          username: root\n        slave:\n          url: jdbc:mysql://127.0.0.1:3306/dfy_base_db?characterEncoding=utf8 # 无 useSSL 不动\n          username: root\n        already_ok:\n          url: jdbc:mysql://h/db?useSSL=false&allowPublicKeyRetrieval=true\n",
+        )
+        .unwrap();
+        let changed = repair_legacy_mysql_urls(dir.to_str().unwrap()).unwrap();
+        assert_eq!(changed.len(), 1, "只该修缺参数的那条 master URL");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true\n"));
+        assert!(text.contains("# url: jdbc:mysql://old/useSSL=false 注释行不动"));
+        assert!(text.contains("?characterEncoding=utf8 # 无 useSSL 不动"));
+        // 幂等：第二次无改动、不重写
+        assert!(repair_legacy_mysql_urls(dir.to_str().unwrap()).unwrap().is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn repair_keeps_trailing_comment_after_param() {
+        let dir = std::env::temp_dir().join(format!(
+            "dfyops-preflight-repair-cmt-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        let path = dir.join("config").join("application-local.yaml");
+        std::fs::write(
+            &path,
+            "        master:\n          url: jdbc:mysql://127.0.0.1:3306/dfy_base_db?useSSL=false # 主库\r\n",
+        )
+        .unwrap();
+        assert_eq!(repair_legacy_mysql_urls(dir.to_str().unwrap()).unwrap().len(), 1);
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("useSSL=false&allowPublicKeyRetrieval=true # 主库\r\n"),
+            "参数必须追加在注释前且保持 CRLF：{text}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
