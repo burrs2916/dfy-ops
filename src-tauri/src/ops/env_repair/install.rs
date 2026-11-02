@@ -917,6 +917,8 @@ pub fn runas_wait(exe: &str, args: &str) -> Result<(), String> {
 /// jar 内置配置体检：抽取 BOOT-INF/classes 下的 yaml 并检测重复键。
 /// jar 即 zip，Windows/macOS 自带的 bsdtar 都支持抽取指定成员；
 /// 抽取失败（非标准 jar / 缺文件）只跳过不阻塞——体检是防线不是关卡。
+// 调用方（jar 安装管线）仅 Windows 编译，macOS dev 侧放行 dead_code
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn check_jar_yaml(install_dir: &str) -> Result<Vec<String>, String> {
     let jar = std::path::Path::new(install_dir).join("dfy-server.jar");
     if !jar.is_file() {
