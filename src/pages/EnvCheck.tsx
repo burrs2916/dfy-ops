@@ -334,7 +334,7 @@ export default function EnvCheck() {
     .flatMap((r) => r.items.map((it) => ({ r, it })))
     .filter(({ r, it }) => it.status !== "pass" && acked.has(ackId(r.id, it.id))).length;
 
-  // 聚合所有待处理缺失项的 Windows 修复命令，供用户在运维中心一次性复制执行。
+  // 聚合所有待处理缺失项的 Windows 修复命令，供用户在修复中心一次性复制执行。
   const allFixes = pending
     .filter((it) => it.fixHint)
     .map((it) => {
@@ -349,7 +349,7 @@ export default function EnvCheck() {
       <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
         <Box>
           <Typography variant="h5" sx={{ fontWeight: 700 }}>
-            运维中心 · 运行环境
+            修复中心
           </Typography>
           <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>
             仅检测运行时依赖（不含构建工具）· 部署产物已预置，此处验证各服务"能否跑起来"

@@ -39,7 +39,7 @@ pub struct CheckItem {
     /// 是否为致命项（缺失即无法运行）
     #[serde(rename = "isFatal")]
     pub is_fatal: bool,
-    /// 缺失时的修复建议（按当前平台生成，供用户在运维中心自助修复）
+    /// 缺失时的修复建议（按当前平台生成，供用户在修复中心自助修复）
     #[serde(rename = "fixHint")]
     pub fix_hint: String,
 }
@@ -197,19 +197,19 @@ fn fix_hint_for(id: &str) -> String {
             "托管部署：winget install -e --id nginx.nginx；dev 运行：从 https://nodejs.org 安装 Node.js",
             "托管部署：brew install nginx；dev 运行：brew install node",
         ),
-        "greptime" | "service-greptime" | "dep-greptime" => "GreptimeDB 为远程部署模式（随 Edge Conductor 一同启动）：请确认边缘计算已启动，并到「运维中心 → 远程部署」检查端点设置后重新检测".into(),
+        "greptime" | "service-greptime" | "dep-greptime" => "GreptimeDB 为远程部署模式（随 Edge Conductor 一同启动）：请确认边缘计算已启动，并到「远程部署」检查端点设置后重新检测".into(),
         "webview2" => "在目标 Windows 主机安装 Microsoft Edge WebView2 Runtime：https://developer.microsoft.com/microsoft-edge/webview2/".into(),
-        "service-vernemq" | "dep-vernemq" => "VerneMQ 为远程部署模式（本机不安装）：请到「运维中心 → 远程部署」配置虚拟机/远程主机地址后重新检测".into(),
-        "service-minio" | "dep-minio" => "MinIO 为远程部署模式（本机不安装）：请到「运维中心 → 远程部署」配置虚拟机/远程主机地址后重新检测".into(),
+        "service-vernemq" | "dep-vernemq" => "VerneMQ 为远程部署模式（本机不安装）：请到「远程部署」配置虚拟机/远程主机地址后重新检测".into(),
+        "service-minio" | "dep-minio" => "MinIO 为远程部署模式（本机不安装）：请到「远程部署」配置虚拟机/远程主机地址后重新检测".into(),
         "service-mysql" | "dep-mysql" => by_platform(
             "winget install -e --id Oracle.MySQL   # 或访问 https://dev.mysql.com/downloads/ 安装 MySQL Server",
             "brew install mysql   # 或用 OrbStack/Docker 容器提供",
         ),
         "service-redis" | "dep-redis" => {
-            "Redis 为远程部署模式（本机不安装）：请到「运维中心 → 远程部署」配置页检查主机/端口/密码设置后重新检测".into()
+            "Redis 为远程部署模式（本机不安装）：请到「远程部署」配置页检查主机/端口/密码设置后重新检测".into()
         }
         "dep-dfy-backend" => "在服务总览启动 DFY 后端（受管），或确认其已在外部运行".into(),
-        _ => "请在运维中心根据上方“实际”信息排查并安装对应依赖".into(),
+        _ => "请在修复中心根据上方“实际”信息排查并安装对应依赖".into(),
     }
 }
 
@@ -454,7 +454,7 @@ pub fn check_service_env_with(
                 let actual = if ok {
                     format!("远程端点 {ep} 可达（TCP 连通）")
                 } else {
-                    format!("远程端点 {ep} 不可达——请先在「运维中心 → 远程部署」配置页检查地址与密码设置")
+                    format!("远程端点 {ep} 不可达——请先在「远程部署」配置页检查地址与密码设置")
                 };
                 items.push(item(
                     &format!("service-{}", def.id),
@@ -491,7 +491,7 @@ pub fn check_service_env_with(
                 if def.id == "mysql" {
                     if let Some(src) = detect_mysql_install() {
                         it.fix_hint = format!(
-                            "本机已安装 MySQL（{src}），但服务未运行——请在 Windows 服务管理器启动 MySQL 服务，或到「安装与维护」页签操作后重新检查"
+                            "本机已安装 MySQL（{src}），但服务未运行——请在 Windows 服务管理器启动 MySQL 服务，或到「修复中心 → 安装维护」操作后重新检查"
                         );
                     }
                 }
@@ -599,7 +599,7 @@ pub fn check_service_env_with(
                     } else {
                         (
                             CheckStatus::Fail,
-                            format!("远程端点 {ep} 不可达——请先在「运维中心 → 远程部署」配置页检查地址与密码设置"),
+                            format!("远程端点 {ep} 不可达——请先在「远程部署」配置页检查地址与密码设置"),
                         )
                     };
                     item(
@@ -631,9 +631,9 @@ pub fn check_service_env_with(
                         //（实测反馈：「前端报错就是缺失」）。
                         let hint = if def.run_cmd.is_empty() {
                             // 静态站点（VueSpa）：没有自己的启动动作，页面可达性完全靠依赖
-                            format!("未运行——{dep_id} 起来后页面才可达；请到「安装维护 → 已安装」启动它")
+                            format!("未运行——{dep_id} 起来后页面才可达；请到「修复中心 → 安装维护」启动它")
                         } else {
-                            "未运行——请到「安装维护 → 已安装」页签启动，或在本服务详情页重新检查".to_string()
+                            "未运行——请到「修复中心 → 安装维护」页签启动，或在本服务详情页重新检查".to_string()
                         };
                         (CheckStatus::Fail, hint)
                     };

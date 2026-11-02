@@ -9,7 +9,7 @@ pub struct AppSettings {
     /// 服务总览状态自动轮询间隔（秒）；0 = 关闭（默认）——启动时检测一次，
     /// 此后按需手动/单服务刷新。全量探测在 Windows 上开销大，常驻轮询得不偿失。
     pub status_refresh_secs: u64,
-    /// 运维中心环境复探间隔（秒）；0 = 关闭（默认），仅进入页面时检测。
+    /// 修复中心环境复探间隔（秒）；0 = 关闭（默认），仅进入页面时检测。
     pub env_refresh_secs: u64,
     /// 本地资源目录：存放环境修复所需的离线安装包（MySQL/Redis/VerneMQ/MinIO/
     /// JDK 等的 MSI/EXE/ZIP）。交付机常无外网，修复时优先扫描此目录离线安装；

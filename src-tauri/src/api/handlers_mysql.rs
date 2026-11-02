@@ -58,7 +58,7 @@ fn find_tool(candidates: Vec<String>, label: &str) -> Result<String, String> {
         .ok_or_else(|| {
             format!(
                 "未找到 {label}（已尝试平台安装目录及其嵌套子目录、常见 MSI 安装位、PATH）。\
-                 请确认 MySQL 已由平台安装，或切到「安装与维护」页签安装"
+                 请确认 MySQL 已由平台安装，或到「修复中心 → 安装维护」安装"
             )
         })
 }

@@ -1,14 +1,26 @@
 import { useEffect } from "react";
-import { Routes, Route } from "react-router-dom";
+import { Navigate, Route, Routes, useSearchParams } from "react-router-dom";
 import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
 import ServiceDetail from "./pages/ServiceDetail";
 import EnvCheck from "./pages/EnvCheck";
-import OpsCenter from "./pages/OpsCenter";
+import MysqlPage from "./pages/MysqlPage";
+import RedisPage from "./pages/RedisPage";
+import ConfigPage from "./pages/ConfigPage";
+import DeployPage from "./pages/DeployPage";
 import Settings from "./pages/Settings";
 import AiAssistant from "./pages/AiAssistant";
 import Topology from "./pages/Topology";
 import { useAppSettingsStore, useOpsStore } from "./store";
+
+/** 旧「运维中心 /ops?tab=x」链接兼容：v0.2.46 起各子页签已是独立路由 */
+function OpsRedirect() {
+  const [sp] = useSearchParams();
+  const tab = sp.get("tab");
+  const to =
+    tab === "deploy" ? "/deploy" : tab === "redis" ? "/redis" : tab === "config" ? "/config" : "/mysql";
+  return <Navigate to={to} replace />;
+}
 
 export default function App() {
   const loadAppSettings = useAppSettingsStore((s) => s.load);
@@ -24,7 +36,11 @@ export default function App() {
       <Route path="/" element={<Layout />}>
         <Route index element={<Dashboard />} />
         <Route path="env" element={<EnvCheck />} />
-        <Route path="ops" element={<OpsCenter />} />
+        <Route path="mysql" element={<MysqlPage />} />
+        <Route path="redis" element={<RedisPage />} />
+        <Route path="config" element={<ConfigPage />} />
+        <Route path="deploy" element={<DeployPage />} />
+        <Route path="ops" element={<OpsRedirect />} />
         <Route path="topology" element={<Topology />} />
         <Route path="ai" element={<AiAssistant />} />
         <Route path="settings" element={<Settings />} />

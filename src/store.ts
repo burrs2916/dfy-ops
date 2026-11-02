@@ -11,7 +11,7 @@ interface OpsState {
   loading: boolean;
   error: string | null;
   lastUpdate: Date | null;
-  /** 修复中心问题项「去连接配置」→ 运维中心 Redis 管理：落地后自动弹出连接配置（一次性） */
+  /** 修复中心问题项「去连接配置」→ Redis 管理页：落地后自动弹出连接配置（一次性） */
   redisConfigPending: boolean;
   /** 应用启动时检测一次；已检测过则直接复用缓存（页面切换零开销） */
   bootstrap: () => Promise<void>;
@@ -21,7 +21,7 @@ interface OpsState {
   refreshEnvAll: () => Promise<boolean>;
   /** 单服务刷新：状态 + 该服务环境，局部替换，不触发全量探测 */
   refreshServices: (ids: string[]) => Promise<void>;
-  /** 标记「去连接配置」引导；运维中心消费后由页面回调清除 */
+  /** 标记「去连接配置」引导；Redis 管理页消费后由页面回调清除 */
   setRedisConfigPending: (v: boolean) => void;
 }
 

@@ -339,7 +339,7 @@ fn builtin() -> Vec<ServiceDef> {
             third_party: true,
             remote_only: true,
             requires: vec![],
-            description: "远程部署模式的缓存服务：本机不安装，检测目标为「运维中心 → 远程部署」配置页托管的远程端点（默认 192.168.56.101:6379）；连接不可达时请在远程部署配置中检查主机/端口/密码。".into(),
+            description: "远程部署模式的缓存服务：本机不安装，检测目标为「远程部署」配置页托管的远程端点（默认 192.168.56.101:6379）；连接不可达时请在远程部署配置中检查主机/端口/密码。".into(),
         },
         ServiceDef {
             id: "nginx".into(),

@@ -1123,7 +1123,7 @@ pub async fn platform_open(State(state): State<Arc<AppState>>) -> Json<serde_jso
                 "url": url,
                 "nginxRunning": nginx_running,
                 "warning": if nginx_running { None } else {
-                    Some("Nginx 未运行，页面可能无法访问——请先到「安装维护 → 已安装」启动 Nginx".to_string())
+                    Some("Nginx 未运行，页面可能无法访问——请先到「修复中心 → 安装维护」启动 Nginx".to_string())
                 },
             }))
         }

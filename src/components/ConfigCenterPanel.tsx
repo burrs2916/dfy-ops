@@ -95,7 +95,7 @@ function hostFromUrl(url: string | undefined): string {
 export type OpsSubTab = "mysql" | "redis" | "deploy";
 
 interface Props {
-  /** 跳转到运维中心其他 tab（MySQL / Redis / 远程部署） */
+  /** 跳转到对应独立管理页（MySQL / Redis / 远程部署） */
   onGotoOpsTab: (tab: OpsSubTab) => void;
 }
 

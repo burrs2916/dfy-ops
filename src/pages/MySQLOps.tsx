@@ -59,6 +59,7 @@ import ChevronRightIcon from "@mui/icons-material/ChevronRight";
 import DescriptionIcon from "@mui/icons-material/Description";
 import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import { open } from "@tauri-apps/plugin-dialog";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import type {
   MysqlBackupFile,
@@ -75,7 +76,8 @@ import UserGrantButton from "./mysql/UserGrantButton";
 import UserPasswordButton from "./mysql/UserPasswordButton";
 import VariableRow from "./mysql/VariableRow";
 
-export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; mysqlInstalled: boolean }) {
+export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; mysqlInstalled: boolean | null }) {
+  const navigate = useNavigate();
   const [ov, setOv] = useState<MysqlOverview | null>(null);
   const [ovLoading, setOvLoading] = useState(true);
   const [notice, setNotice] = useState<{ text: string; severity: "success" | "error" } | null>(null);
@@ -203,8 +205,8 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
     }
   }, [flash]);
 
-  // 页面可见（子页签切到「MySQL 管理」）即刷新连接信息——面板是 CSS 隐藏挂载，
-  // mount 一次后不重走 useEffect，切页刷新才能反映安装页里刚做的启停
+  // 页面激活即刷新连接信息——面板是 CSS 隐藏挂载，
+  // mount 一次后不重走 useEffect，切页刷新才能反映修复中心里刚做的启停
   useEffect(() => {
     if (active) void refreshOverview();
   }, [active, refreshOverview]);
@@ -696,10 +698,18 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
 
   return (
     <Stack spacing={2}>
-      {/* MySQL 未安装：显示引导，隐藏全部操作（启停/密码/导入都无从谈起） */}
-      {!mysqlInstalled && (
-        <Alert severity="info">
-          MySQL 尚未安装——请先切到「安装与维护」页签安装 MySQL，安装完成后回到本页即可使用。
+      {/* MySQL 未安装：显示引导，隐藏全部操作（启停/密码/导入都无从谈起）。
+          null = 探测中，不误报「未安装」 */}
+      {mysqlInstalled === false && (
+        <Alert
+          severity="info"
+          action={
+            <Button size="small" color="inherit" onClick={() => navigate("/env?tab=repair&service=mysql")}>
+              去安装
+            </Button>
+          }
+        >
+          MySQL 尚未安装——可前往「修复中心 → 安装维护」安装，完成后回到本页即可使用。
         </Alert>
       )}
 

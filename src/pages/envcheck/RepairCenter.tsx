@@ -121,8 +121,8 @@ export default function RepairCenter({
   const [probing, setProbing] = useState(true);
   // 探测请求本身失败（后端未启动等）：与「未安装」区分开，避免误导一键安装
   const [probeFailed, setProbeFailed] = useState(false);
-  // 子导航：「安装与维护」= 装软件主流程；「环境问题与 AI 方案」= 检测问题跟进。
-  // MySQL 管理 / Redis 管理已独立为顶级「运维中心」（/ops），本页专注环境安装与修复。
+  // 子导航：「安装维护」= 装软件主流程；「环境问题与 AI 方案」= 检测问题跟进。
+  // MySQL 管理 / Redis 管理已独立为顶级入口（/mysql、/redis），本页专注环境安装与修复。
   const [subTab, setSubTab] = useState<"install" | "issues">("install");
 
   // 进入修复中心 / 目录配置变化 / 任务结束时：扫资源目录 + 探测安装痕迹
@@ -401,10 +401,10 @@ export default function RepairCenter({
     };
   }, []);
 
-  /** 远程服务问题项「去远程部署」→ 跳转运维中心的远程部署配置页（地址/密码都在那里改） */
+  /** 远程服务问题项「去远程部署」→ 跳转远程部署页（地址/密码都在那里改） */
   const navigate = useNavigate();
   const gotoRemoteDeploy = useCallback(() => {
-    navigate("/ops?tab=deploy");
+    navigate("/deploy");
   }, [navigate]);
 
   /** 软件卡片：状态机（执行中 > 检测中/探测不可用 > 已安装 > 残留 > 有包 > 无包）。
@@ -769,7 +769,7 @@ export default function RepairCenter({
                 >
                   {ep ? `${ep.host}:${ep.port}` : ep === null ? "未配置" : "…"}
                 </Typography>
-                ；不可达时请在「运维中心 → 远程部署」检查地址与密码
+                ；不可达时请在「远程部署」检查地址与密码
               </Typography>
             ) : (
               <Typography variant="body2" color="text.secondary">
@@ -802,7 +802,7 @@ export default function RepairCenter({
   return (
     <Stack spacing={2}>
       <Tabs value={subTab} onChange={(_, v: "install" | "issues") => setSubTab(v)}>
-        <Tab value="install" label="安装与维护" />
+        <Tab value="install" label="安装维护" />
         <Tab
           value="issues"
           label={
@@ -813,7 +813,7 @@ export default function RepairCenter({
         />
       </Tabs>
 
-      {/* ===== 安装与维护：页头 + 三个并列子 Tab（待安装/已安装/远程部署） =====
+      {/* ===== 安装维护：页头 + 三个并列子 Tab（待安装/已安装/远程部署） =====
           CSS 隐藏挂载（display 切换）：切到「环境问题」页不卸载本面板，
           探测结果与卡片状态原样保留，切回即现 */}
       <Box sx={{ display: subTab === "install" ? undefined : "none" }}>
@@ -823,7 +823,7 @@ export default function RepairCenter({
             </Typography>
             <Typography variant="body2" color="text.secondary">
               识别资源目录中的离线安装包，一键安装 / 卸载 MySQL、JDK 等环境依赖；
-              安装后的配置文件统一在「运维中心 → 配置中心」查看与编辑
+              安装后的配置文件统一在「配置中心」查看与编辑
             </Typography>
           </Box>
 

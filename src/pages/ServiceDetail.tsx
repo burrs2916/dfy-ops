@@ -357,7 +357,7 @@ export default function ServiceDetail() {
               <Stack spacing={1}>
                 {svc.remoteOnly ? (
                   <Alert severity="info" icon={<DnsOutlined fontSize="inherit" />}>
-                    纯远程部署服务：本机无安装目录与运行命令，检测目标为「运维中心 → 远程部署」配置的远程端点。
+                    纯远程部署服务：本机无安装目录与运行命令，检测目标为「远程部署」配置的远程端点。
                   </Alert>
                 ) : (
                   <>

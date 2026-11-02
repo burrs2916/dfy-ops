@@ -19,7 +19,7 @@ pub struct Finding {
     pub severity: Severity,
     pub message: String,
     /// 缺失依赖时的修复建议（面向 Windows 的 winget/choco/下载地址等），
-    /// 供用户在运维中心自助修复。仅当该发现由“环境缺失/警告”产生时携带。
+    /// 供用户在修复中心自助修复。仅当该发现由“环境缺失/警告”产生时携带。
     #[serde(rename = "fixHint")]
     pub fix_hint: Option<String>,
 }
@@ -91,7 +91,7 @@ pub fn diagnose(
                     service: env.id.clone(),
                     severity: Severity::Critical,
                     message: format!(
-                        "环境缺失（致命）：{} —— 实际：{}；需先在运维中心修复后方可运行",
+                        "环境缺失（致命）：{} —— 实际：{}；需先在修复中心修复后方可运行",
                         item.name, item.actual
                     ),
                     fix_hint: fix,

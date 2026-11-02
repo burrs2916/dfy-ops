@@ -160,8 +160,8 @@ export default function ReadinessCard({
         icon: <Dns fontSize="small" />,
         text: `${s.name}：部署在虚拟机/远程主机，尚未配置远程地址，无法监测`,
         action: "去配置部署",
-        // 直达运维中心的远程部署页：集中配置 + 网段发现
-        onAct: () => navigate("/ops?tab=deploy"),
+        // 直达远程部署页：集中配置 + 网段发现
+        onAct: () => navigate("/deploy"),
       });
       continue;
     }

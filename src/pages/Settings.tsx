@@ -340,7 +340,7 @@ export default function Settings() {
               <Paper variant="outlined" sx={{ overflow: "hidden" }}>
                 <SettingRow
                   label="清除「已知悉」记录"
-                  description="运维中心里逐项确认的跟踪记录（保存在本机浏览器存储中）"
+                  description="修复中心里逐项确认的跟踪记录（保存在本机浏览器存储中）"
                 >
                   <Button size="small" variant="outlined" color="warning" onClick={clearAck}>
                     清除

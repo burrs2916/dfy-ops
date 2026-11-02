@@ -1,40 +1,55 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { AppBar, Box, CssBaseline, Toolbar, Typography, Button } from "@mui/material";
+import { Box, ButtonBase, CssBaseline, Divider, Stack, Typography } from "@mui/material";
 import {
-  Settings as SettingsIcon,
   AccountTree,
-  SmartToy,
-  DashboardRounded,
+  BoltOutlined,
   BuildCircleRounded,
-  TuneRounded,
+  DashboardRounded,
+  DnsOutlined,
+  Settings as SettingsIcon,
+  SettingsOutlined,
+  SmartToy,
+  StorageOutlined,
 } from "@mui/icons-material";
-import { NavLink, Outlet } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import TitleBar from "./TitleBar";
-import { BRAND_GRADIENT } from "../theme";
+import pkg from "../../package.json";
 
-/** 顶部导航按钮统一样式：胶囊激活态 + 平滑过渡 */
-const navBtn = {
-  textTransform: "none" as const,
-  fontWeight: 600 as const,
-  borderRadius: 2,
-  px: 1.75,
-  py: 0.6,
-  transition: "background-color .15s ease",
-  "&:hover": { bgcolor: "rgba(255,255,255,0.12)" },
-  "&.active": {
-    bgcolor: "rgba(255,255,255,0.18)",
-    boxShadow: "inset 0 0 0 1px rgba(255,255,255,0.25)",
+/**
+ * 侧边栏分组导航（v0.2.46 信息架构重构）：
+ * 顶部 6 页签放不下「MySQL/Redis 独立入口 + 配置中心 + 远程部署」，
+ * 改左侧固定栏按运维心智分四组——服务运维 / 部署修复 / 数据管理 / 系统工具。
+ * 服务详情（/service/:id）不高亮任何条目，返回入口在页内。
+ */
+const NAV_GROUPS: { title: string; items: { to: string; label: string; icon: React.ReactNode; end?: boolean }[] }[] = [
+  {
+    title: "服务运维",
+    items: [
+      { to: "/", label: "服务总览", icon: <DashboardRounded fontSize="small" />, end: true },
+      { to: "/topology", label: "依赖拓扑", icon: <AccountTree fontSize="small" /> },
+    ],
   },
-};
-
-const NAV_ITEMS = [
-  { to: "/", label: "服务总览", icon: <DashboardRounded /> },
-  { to: "/env", label: "修复中心", icon: <BuildCircleRounded /> },
-  { to: "/ops", label: "运维中心", icon: <TuneRounded /> },
-  { to: "/topology", label: "依赖拓扑", icon: <AccountTree /> },
-  { to: "/ai", label: "AI助手", icon: <SmartToy /> },
-  { to: "/settings", label: "设置", icon: <SettingsIcon /> },
+  {
+    title: "部署修复",
+    items: [{ to: "/env", label: "修复中心", icon: <BuildCircleRounded fontSize="small" /> }],
+  },
+  {
+    title: "数据管理",
+    items: [
+      { to: "/mysql", label: "MySQL 管理", icon: <StorageOutlined fontSize="small" /> },
+      { to: "/redis", label: "Redis 管理", icon: <BoltOutlined fontSize="small" /> },
+    ],
+  },
+  {
+    title: "系统工具",
+    items: [
+      { to: "/config", label: "配置中心", icon: <SettingsOutlined fontSize="small" /> },
+      { to: "/deploy", label: "远程部署", icon: <DnsOutlined fontSize="small" /> },
+      { to: "/ai", label: "AI 助手", icon: <SmartToy fontSize="small" /> },
+      { to: "/settings", label: "设置", icon: <SettingsIcon fontSize="small" /> },
+    ],
+  },
 ];
 
 export default function Layout() {
@@ -46,59 +61,120 @@ export default function Layout() {
       .then(setCustomTitlebar)
       .catch(() => {});
   }, []);
+  const location = useLocation();
+  // 服务详情归入「服务总览」的语境：选中态跟随来源入口，避免详情页左侧空白无归属
+  const isServiceDetail = location.pathname.startsWith("/service/");
 
   return (
     <Box sx={{ display: "flex", flexDirection: "column", height: "100vh" }}>
       <CssBaseline />
       {customTitlebar && <TitleBar />}
-      <AppBar
-        position="static"
-        elevation={0}
-        sx={{
-          background: BRAND_GRADIENT,
-          borderRadius: 0,
-        }}
-      >
-        <Toolbar sx={{ minHeight: { xs: 56 } }}>
-          <Box
-            component="img"
-            src="/logo.png"
-            alt="DFY运维平台"
-            sx={{
-              fontSize: "1.25rem",
-              height: "2.1em",
-              width: "2.1em",
-              borderRadius: "50%",
-              backgroundColor: "#fff",
-              p: "2px",
-              mr: 1.5,
-              objectFit: "contain",
-              boxShadow: 1,
-            }}
-          />
-          <Typography variant="h6" sx={{ fontWeight: 700, mr: 3, letterSpacing: 0.3 }}>
-            DFY运维平台
-          </Typography>
-          <Box sx={{ display: "flex", gap: 0.5 }}>
-            {NAV_ITEMS.map((item) => (
-              <Button key={item.to} component={NavLink} to={item.to} color="inherit" startIcon={item.icon} sx={navBtn}>
-                {item.label}
-              </Button>
+      <Box sx={{ display: "flex", flex: 1, minHeight: 0 }}>
+        {/* ===== 侧边导航栏 ===== */}
+        <Box
+          component="nav"
+          sx={{
+            width: 224,
+            flexShrink: 0,
+            display: "flex",
+            flexDirection: "column",
+            bgcolor: "background.paper",
+            borderRight: 1,
+            borderColor: "divider",
+          }}
+        >
+          {/* 品牌区 */}
+          <Stack direction="row" alignItems="center" spacing={1.25} sx={{ px: 2, py: 2 }}>
+            <Box
+              component="img"
+              src="/logo.png"
+              alt="DFY运维平台"
+              sx={{
+                height: 34,
+                width: 34,
+                borderRadius: "50%",
+                backgroundColor: "#fff",
+                p: "2px",
+                objectFit: "contain",
+                boxShadow: 1,
+                border: 1,
+                borderColor: "divider",
+              }}
+            />
+            <Box>
+              <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.2, letterSpacing: 0.3 }}>
+                DFY 运维平台
+              </Typography>
+              <Typography variant="caption" color="text.secondary">
+                v{pkg.version}
+              </Typography>
+            </Box>
+          </Stack>
+          <Divider />
+          <Box sx={{ flex: 1, overflowY: "auto", py: 1 }}>
+            {NAV_GROUPS.map((group) => (
+              <Box key={group.title} sx={{ mb: 0.5 }}>
+                <Typography
+                  variant="overline"
+                  sx={{ px: 2, pt: 1.25, pb: 0.5, display: "block", color: "text.disabled", fontWeight: 600 }}
+                >
+                  {group.title}
+                </Typography>
+                {group.items.map((item) => (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    end={item.end}
+                    style={{ textDecoration: "none" }}
+                  >
+                    {({ isActive }) => {
+                      const active = isActive || (item.to === "/" && isServiceDetail);
+                      return (
+                        <ButtonBase
+                          sx={{
+                            width: 1,
+                            justifyContent: "flex-start",
+                            gap: 1.25,
+                            px: 2,
+                            py: 1,
+                            borderRadius: 0,
+                            textTransform: "none",
+                            fontSize: "0.875rem",
+                            fontWeight: active ? 600 : 500,
+                            color: active ? "primary.main" : "text.primary",
+                            bgcolor: active ? "rgba(22,58,94,0.08)" : "transparent",
+                            borderLeft: "3px solid",
+                            borderColor: active ? "primary.main" : "transparent",
+                            transition: "background-color .12s ease, color .12s ease",
+                            "&:hover": { bgcolor: "action.hover" },
+                          }}
+                        >
+                          {item.icon}
+                          {item.label}
+                        </ButtonBase>
+                      );
+                    }}
+                  </NavLink>
+                ))}
+              </Box>
             ))}
           </Box>
-        </Toolbar>
-      </AppBar>
-      <Box
-        component="main"
-        sx={{
-          flex: 1,
-          overflow: "auto",
-          p: 4,
-          // 与 gateway-console 一致的浅灰渐变背景
-          background: "linear-gradient(135deg, #f5f7fa 0%, #e9ecef 100%)",
-        }}
-      >
-        <Outlet />
+        </Box>
+
+        {/* ===== 主内容区 ===== */}
+        <Box
+          component="main"
+          sx={{
+            flex: 1,
+            minHeight: 0,
+            overflow: "auto",
+            p: 4,
+            // 与 gateway-console 一致的浅灰渐变背景
+            background: "linear-gradient(135deg, #f5f7fa 0%, #e9ecef 100%)",
+          }}
+        >
+          <Outlet />
+        </Box>
       </Box>
     </Box>
   );

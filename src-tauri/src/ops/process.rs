@@ -30,7 +30,7 @@ pub fn resolve_java_placeholder(cmd: &str) -> String {
             "WARN",
             "spawn",
             "java_placeholder_fallback",
-            "平台托管 JDK（C:\\services\\jdk）不存在，{java} 回退 PATH java——请先在「安装维护」安装 Java",
+            "平台托管 JDK（C:\\services\\jdk）不存在，{java} 回退 PATH java——请先在「修复中心 → 安装维护」安装 Java",
         );
     }
     cmd.replace("{java}", "java")

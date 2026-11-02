@@ -312,7 +312,7 @@ export interface GenericUninstallStart {
   error?: string;
 }
 
-// ===== MySQL 管理（运维中心） =====
+// ===== MySQL 管理（独立页 /mysql） =====
 
 /** GET /api/mysql/overview：连接信息 + 版本 + 库列表（服务未运行时降级） */
 export interface MysqlOverview {

@@ -246,7 +246,7 @@ export const api = {
     request<{ ok: boolean; message?: string; error?: string }>("/api/env/repair/java-env", {
       method: "POST",
     }),
-  // ===== MySQL 管理（运维中心）：托管凭据 + SQL 控制台 + 库表 + 用户权限 =====
+  // ===== MySQL 管理（/mysql）：托管凭据 + SQL 控制台 + 库表 + 用户权限 =====
   mysqlOverview: () => request<MysqlOverview>("/api/mysql/overview"),
   mysqlExec: (sql: string, database?: string) =>
     request<SqlResult>("/api/mysql/exec", {

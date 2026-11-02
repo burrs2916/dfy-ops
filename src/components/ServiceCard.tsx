@@ -142,13 +142,13 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
                 sx={{ flexShrink: 0 }}
               >
                 {s.runState === "needs-config" ? (
-                  <Tooltip title="服务部署在虚拟机/远程主机：去运维中心「远程部署」配置地址">
+                  <Tooltip title="服务部署在虚拟机/远程主机：去「远程部署」配置地址">
                     <Button
                       size="small"
                       variant="contained"
                       color="warning"
                       startIcon={<Dns fontSize="small" />}
-                      onClick={() => navigate("/ops?tab=deploy")}
+                      onClick={() => navigate("/deploy")}
                       sx={{ mr: 0.5, whiteSpace: "nowrap" }}
                     >
                       配置部署
