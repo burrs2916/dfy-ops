@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import {
   Alert,
   Box,
@@ -207,14 +208,38 @@ export default function ExternalConfigPanel({ serviceId }: { serviceId: string }
             </FieldGroup>
 
             <FieldGroup title="运行日志（平台「日志」页签读取的就是这个文件）">
-              <TextField
-                size="small"
-                label="日志文件（logging.file.name，相对运行目录）"
-                value={cfg.logFilePath}
-                onChange={set("logFilePath")}
-                sx={{ maxWidth: 360 }}
-                placeholder="logs/dfy-server.log"
-              />
+              <Stack direction="row" spacing={1} alignItems="center">
+                <TextField
+                  size="small"
+                  label="日志文件（logging.file.name）"
+                  value={cfg.logFilePath}
+                  onChange={set("logFilePath")}
+                  sx={{ flex: 1 }}
+                  placeholder="C:/services/dfy-boot-base/logs/dfy-server.log"
+                />
+                <Button
+                  size="small"
+                  sx={{ textTransform: "none", flexShrink: 0 }}
+                  onClick={async () => {
+                    try {
+                      const r = await open({ directory: true, multiple: false, title: "选择日志输出目录" });
+                      const picked = typeof r === "string" ? r : null;
+                      if (picked)
+                        setCfg((c) =>
+                          c ? { ...c, logFilePath: `${picked.replace(/\\/g, "/")}/dfy-server.log` } : c,
+                        );
+                    } catch {
+                      /* 用户取消或对话框异常：保持现状 */
+                    }
+                  }}
+                >
+                  浏览…
+                </Button>
+              </Stack>
+              <Typography variant="caption" color="text.secondary">
+                默认定死平台目录；「浏览」可选其他输出目录（文件名固定 dfy-server.log），
+                保存后重启服务生效。10MB 按天滚动，保留 30 天。
+              </Typography>
             </FieldGroup>
 
             <FieldGroup title="VerneMQ（IoT MQTT 连接）">

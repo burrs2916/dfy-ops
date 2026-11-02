@@ -11,6 +11,7 @@ import {
   Divider,
 } from "@mui/material";
 import { useState } from "react";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import SettingsInputComponentIcon from "@mui/icons-material/SettingsInputComponent";
 
 /** dfy-backend 外部配置（与后端 ExternalConfig serde 字段一一对应，camelCase）。 */
@@ -44,7 +45,7 @@ export const BACKEND_PROD_DEFAULTS: ExternalConfigPayload = {
   vernemqHostUrl: "tcp://192.168.56.101:18830",
   vernemqUsername: "cloud",
   vernemqPassword: "key@00",
-  logFilePath: "logs/dfy-server.log",
+  logFilePath: "C:/services/dfy-boot-base/logs/dfy-server.log",
 };
 
 interface Props {
@@ -155,14 +156,37 @@ export default function BackendInstallDialog({ open, onConfirm, onClose }: Props
               运行日志
             </Typography>
           </Divider>
-          <TextField
-            size="small"
-            label="日志文件（logging.file.name，相对运行目录）"
-            value={cfg.logFilePath}
-            onChange={set("logFilePath")}
-            placeholder="logs/dfy-server.log"
-            helperText="平台「日志」页签实时读取该文件（10MB 按天滚动，保留 30 天）"
-          />
+          <Box sx={{ display: "flex", gap: 1, alignItems: "center" }}>
+            <TextField
+              size="small"
+              label="日志文件（logging.file.name）"
+              value={cfg.logFilePath}
+              onChange={set("logFilePath")}
+              sx={{ flex: 1 }}
+            />
+            <Button
+              sx={{ textTransform: "none", flexShrink: 0 }}
+              onClick={async () => {
+                try {
+                  const r = await openDialog({ directory: true, multiple: false, title: "选择日志输出目录" });
+                  const picked = typeof r === "string" ? r : null;
+                  if (picked)
+                    setCfg((c) => ({
+                      ...c,
+                      logFilePath: `${picked.replace(/\\/g, "/")}/dfy-server.log`,
+                    }));
+                } catch {
+                  /* 用户取消或对话框异常：保持现状 */
+                }
+              }}
+            >
+              浏览…
+            </Button>
+          </Box>
+          <Typography variant="caption" color="text.secondary">
+            默认定死平台目录；「浏览」可选其他输出目录（文件名固定 dfy-server.log）。
+            10MB 按天滚动，保留 30 天。平台「日志」页签实时读取该文件。
+          </Typography>
           <Divider>
             <Typography variant="caption" color="text.secondary">
               VerneMQ（MQTT 消息）
