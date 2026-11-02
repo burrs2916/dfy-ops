@@ -217,6 +217,7 @@ pub fn start_uninstall(
 /// dfy-backend / dfy-ui 通用卸载：无服务注册、无 MSI 条目，产物是「平台进程 + 目录」。
 /// - dfy-backend：先停平台拉起的 java 进程树（不误伤其他 Java 程序），再删目录
 /// - dfy-ui：纯目录删除（nginx root 指向它，卸载后页面 404——日志提示）
+///
 /// 成败以复核为准：目录不存在 = 成功。
 #[cfg(target_os = "windows")]
 async fn run_flat_dir_uninstall(
