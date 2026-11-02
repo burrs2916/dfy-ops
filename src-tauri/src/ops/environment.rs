@@ -170,8 +170,8 @@ pub(crate) fn java_version_tuple(output: &str) -> Option<(u32, u32, u32)> {
 }
 
 /// Java 运行时的修复命令：版本号来自服务声明（javaMajor），Windows 走 winget，
-/// 其他平台用 Temurin（Adoptium）。fix_hint 必须与声明期望一致——dfy-boot-base
-/// 按 JDK 8 编译，提示装 17 是错误引导（2026-09-07 修正）。
+/// 其他平台用 Temurin（Adoptium）。2026-11-03 定案：平台标准 JDK 17（向下兼容
+/// 跑 JDK8 字节码），提示统一引导 JDK 17——不再按 JDK 8 引导。
 fn java_fix_hint(major: u32) -> String {
     if cfg!(target_os = "windows") {
         format!("winget install -e --id Microsoft.OpenJDK.{major}   # 或访问 https://adoptium.net 安装 JDK {major}")
@@ -192,7 +192,7 @@ fn fix_hint_for(id: &str) -> String {
         }
     };
     match id {
-        "java" => java_fix_hint(8),
+        "java" => java_fix_hint(17),
         "runtime-path" => by_platform(
             "托管部署：winget install -e --id nginx.nginx；dev 运行：从 https://nodejs.org 安装 Node.js",
             "托管部署：brew install nginx；dev 运行：brew install node",
@@ -415,7 +415,7 @@ pub fn check_service_env_with(
             // Java 运行时：只按环境变量口径检测（安装版 JDK 是唯一支持的形态）——
             // PATH java 探测 → 注册表实时盘点（JAVA_HOME/PATH）。不再认交付包内置
             // JRE，检测与启动占位符同口径。
-            let expected_major = def.java_major.unwrap_or(8);
+            let expected_major = def.java_major.unwrap_or(17);
             push_path_java_check(&mut items, expected_major, cache);
         }
         ServiceKind::VueSpa | ServiceKind::AngularSpa => {
@@ -780,14 +780,14 @@ mod tests {
         }
     }
 
-    /// dfy-backend 声明了 JAR 产物检查与 JDK 8 期望（pom.xml java.version=1.8）。
+    /// dfy-backend 声明了 JAR 产物检查与 JDK 17 期望（2026-11-03 平台标准定案）。
     /// jar 项按 requires 路径探测：内置 install_dir 是 Windows 部署路径，测试机上
     /// 必然找不到 → 该项 Warn（带修复提示），但其余项（Java/依赖）必须全 Pass。
     /// （Java 检测走环境变量口径，dev/CI 机的 java 均 >= 8。）
     #[test]
     fn dfy_backend_checks_jar_artifact_and_java8() {
         let def = def_of("dfy-backend");
-        assert_eq!(def.java_major, Some(8), "dfy-backend 按 JDK 8 编译，期望值必须声明为 8");
+        assert_eq!(def.java_major, Some(17), "平台标准 JDK 17，期望值必须声明为 17");
         assert!(def.requires.iter().any(|r| r.check_id() == "jar"), "必须声明 JAR 产物检查");
         assert!(
             def.run_cmd.contains("{{java}}") || def.run_cmd.contains("{java}"),
@@ -850,34 +850,29 @@ mod tests {
         }
     }
 
-    /// {java} 占位符解析（2026-11-03 起 PATH 优先）：用户手动安装、PATH 生效的
-    /// java 最先命中（CMD java/javac 有输出的那套）；否则 JAVA_HOME；都没有
-    /// 回退裸 `java`。无占位符原样返回。
+    /// {java} 占位符解析（2026-11-03 定案托管唯一）：有平台托管 JDK → 其
+    /// bin\java.exe 绝对路径；没有 → 回退裸 `java`。不再读 PATH/JAVA_HOME
+    /// （系统预装 JDK 兜底已废除）。无占位符原样返回。
     #[test]
     fn java_placeholder_env_only() {
         let resolved = crate::ops::process::resolve_java_placeholder("{java} -jar x.jar");
-        let exe = if cfg!(target_os = "windows") { "java.exe" } else { "java" };
-        let path_java = std::env::var("PATH").ok().and_then(|paths| {
-            std::env::split_paths(&paths)
-                .map(|dir| dir.join(exe))
-                .find(|p| p.is_file())
-                .map(|p| p.to_string_lossy().to_string())
-        });
-        let home_java = std::env::var("JAVA_HOME")
-            .ok()
-            .map(std::path::PathBuf::from)
-            .and_then(|home| {
-                let bin = home.join("bin").join(exe);
-                bin.exists().then(|| bin.to_string_lossy().to_string())
-            });
-        let expected = path_java
-            .or(home_java)
-            .unwrap_or_else(|| "java".to_string());
-        assert_eq!(
-            resolved,
-            format!("{expected} -jar x.jar"),
-            "应按 PATH → JAVA_HOME → 裸 java 的顺序解析: {resolved}"
-        );
+        // 托管唯一口径（2026-11-03）：有平台托管 JDK → 解析到其 bin\java.exe
+        // 绝对路径；没有（dev/CI 机）→ 回退裸 `java`。不再读 PATH/JAVA_HOME。
+        match crate::ops::env_repair::managed_java_home() {
+            Some(home) => {
+                let exe = if cfg!(target_os = "windows") { "java.exe" } else { "java" };
+                assert!(
+                    resolved.starts_with(&home) && resolved.contains(exe),
+                    "有托管 JDK 应解析到其 bin 下的 java: {resolved}"
+                );
+            }
+            None => {
+                assert_eq!(
+                    resolved, "java -jar x.jar",
+                    "无托管 JDK 应回退裸 PATH java"
+                );
+            }
+        }
         assert_eq!(
             crate::ops::process::resolve_java_placeholder("nginx -c x.conf"),
             "nginx -c x.conf",
@@ -885,13 +880,14 @@ mod tests {
         );
     }
 
-    /// Java 版本低于声明期望（javaMajor）= 字节码无法加载 = Fail，修复提示指向 JDK 8。
-    /// 此前提示错误地引导安装 JRE 17（与 dfy-boot-base 的 JDK 8 目标冲突）。
+    /// Java 版本低于声明期望（javaMajor）= Fail，修复提示统一引导 JDK 17
+    /// （2026-11-03 平台标准定案：向下兼容跑 JDK8 字节码，不再按 8 引导）。
     #[test]
     fn java_fix_hint_matches_declared_major() {
-        let hint = java_fix_hint(8);
-        assert!(hint.contains('8'), "修复提示应包含声明版本 8: {hint}");
-        assert!(!hint.contains("17"), "修复提示不得再引导安装 17: {hint}");
+        let hint = java_fix_hint(17);
+        assert!(hint.contains('1'), "修复提示应包含声明版本 17: {hint}");
+        assert!(hint.contains("17"), "修复提示应引导安装 17: {hint}");
+        assert!(!hint.contains("JDK 8 "), "修复提示不得再引导 JDK 8: {hint}");
     }
 
     /// 依赖检查走 dependsOn + 实时状态视图：依赖未运行 → Fail（启动无意义）；

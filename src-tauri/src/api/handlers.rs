@@ -304,7 +304,7 @@ pub async fn start_env_repair(
     let def = find_def(&state, &input.service_id)
         .ok_or(StatusCode::NOT_FOUND)?
         .clone();
-    let expected = def.java_major.unwrap_or(8);
+    let expected = def.java_major.unwrap_or(17);
 
     // 第一事实：PATH 上的 java（run_cmd 实际执行者）
     let path_major = blocking(crate::ops::environment::probe_java_version).await;

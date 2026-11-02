@@ -159,6 +159,17 @@ async fn run_install(state: Arc<RepairState>, expected_major: u32, env_cache: En
 
     // ===== 2. 解压 + 配置（免安装管线，与资源目录 zip 同链路） =====
     state.patch(|j| j.stage = "extract".into());
+    // ===== 2. 清掉旧 JDK 再解压 =====
+    // 平台标准「C:\services\jdk 只有一套 JDK」（当前 JDK 17）：旧版本目录残留会让
+    // managed_java_home 命中旧版本，出现「装了新版本却启动旧的」的诡异现场
+    state.patch(|j| j.stage = "clean".into());
+    let old = std::path::Path::new(JDK_MANAGED_HOME);
+    if old.is_dir() {
+        state.log(format!("检测到旧 JDK 目录 {JDK_MANAGED_HOME}，先清除（平台目录只保留一套 JDK）"));
+        std::fs::remove_dir_all(old).map_err(|e| format!("清除旧 JDK 目录失败：{e}"))?;
+        state.log("旧 JDK 目录已清除");
+    }
+
     state.log(format!("正在解压到 {JDK_MANAGED_HOME}…"));
     let located = tokio::task::spawn_blocking(move || {
         extract_zip(zip.to_str().unwrap_or_default(), JDK_MANAGED_HOME)
@@ -1071,6 +1082,16 @@ async fn run_zip_install(
 
     // ===== 解压 + 定位主目录 =====
     state.patch(|j| j.stage = "extract".into());
+    // java 免安装版：解压前清掉旧 JDK——平台目录只保留一套 JDK（标准 JDK 17），
+    // 旧版本残留会让 managed_java_home 命中旧版本（「装了 8 却启动 17」类诡异现场）
+    if target == "java" {
+        let old = std::path::Path::new(&install_dir);
+        if old.is_dir() {
+            state.log(format!("检测到旧 JDK 目录 {install_dir}，先清除（平台目录只保留一套 JDK）"));
+            std::fs::remove_dir_all(old).map_err(|e| format!("清除旧 JDK 目录失败：{e}"))?;
+            state.log("旧 JDK 目录已清除");
+        }
+    }
     state.log("正在解压安装包（大包需 1-2 分钟）…");
     let marker = match target {
         "mysql" => r"bin\mysqld.exe",

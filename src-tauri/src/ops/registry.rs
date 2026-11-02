@@ -58,9 +58,9 @@ pub struct ServiceDef {
     pub name: String,
     #[serde(rename = "kind")]
     pub kind: ServiceKind,
-    /// Java 运行时期望主版本（Vertx kind 的环境检查用）。None 时按 8 兜底。
-    /// 声明驱动：dfy-boot-base 按 JDK 8 编译（pom.xml java.version=1.8），期望值
-    /// 跟着项目走而不是硬编码在检查逻辑里。
+    /// Java 运行时期望主版本（Vertx kind 的环境检查用）。None 时按 17 兜底。
+    /// 2026-11-03 定案：平台标准 JDK 17（向下兼容跑 JDK8 字节码），期望值跟
+    /// 平台标准走——系统预装的 JDK 8 兜底不再是可选项。
     #[serde(rename = "javaMajor", default)]
     pub java_major: Option<u32>,
     #[serde(rename = "installDir")]
@@ -119,7 +119,7 @@ fn builtin() -> Vec<ServiceDef> {
             id: "dfy-backend".into(),
             name: "DFY 后端 (Spring Boot)".into(),
             kind: ServiceKind::Vertx,
-            java_major: Some(8),
+            java_major: Some(17),
             install_dir: "C:/services/dfy-boot-base".into(),
             build_cmd: Some("mvn -q -DskipTests package".into()),
             // install 管线拷贝 jar 到 install_dir 根，run_cmd 直接引用
@@ -139,7 +139,7 @@ fn builtin() -> Vec<ServiceDef> {
                 path: Some("dfy-server.jar".into()),
                 port: None,
             }],
-            description: "鼎飞益智后端服务（Spring Boot，JDK 8），默认端口 48085；依赖 MySQL/Redis（独立注册的第三方服务）。".into(),
+            description: "鼎飞益智后端服务（Spring Boot），默认端口 48085；依赖 MySQL/Redis（独立注册的第三方服务）。".into(),
         },
         ServiceDef {
             id: "dfy-ui".into(),

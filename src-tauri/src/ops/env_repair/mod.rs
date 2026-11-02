@@ -100,9 +100,10 @@ pub type EnvCache = Arc<Mutex<Option<(std::time::Instant, Vec<crate::ops::enviro
 /// 与 mysql/redis 的 C:\services 同风格）。检测优先级最高：有 bin\java.exe 即达标。
 pub const JDK_MANAGED_HOME: &str = "C:\\services\\jdk";
 
-/// 免安装版 JDK 的默认最低大版本（一键修复对 java 的预期，与注册表最低声明一致）。
+/// 免安装版 JDK 的默认大版本（一键修复对 java 的预期，与注册表声明一致）。
+/// 2026-11-03 定案：平台标准 JDK 17（向下兼容跑 JDK8 字节码），不再按 8 引导。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub const JDK_DEFAULT_MAJOR: u32 = 8;
+pub const JDK_DEFAULT_MAJOR: u32 = 17;
 
 
 /// 收尾：更新任务终态 + 完成事件落 ops-events.jsonl + 清空环境检查缓存。
