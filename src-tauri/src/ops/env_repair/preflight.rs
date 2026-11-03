@@ -175,9 +175,13 @@ pub fn backend_log_tail(install_dir: &str, max_lines: usize) -> (String, String)
                 .to_string_lossy()
                 .into_owned()
         });
-    let Ok(text) = std::fs::read_to_string(&path) else {
+    let Ok(bytes) = std::fs::read(&path) else {
         return (path, String::new());
     };
+    // from_utf8_lossy：旧包在 Windows 上以 GBK 写日志（file.encoding 缺省 GBK），
+    // 严格 UTF-8 校验会把整个文件读失败 → 日志尾部拿不到。新包启动命令已带
+    // -Dfile.encoding=UTF-8，新日志为 UTF-8；旧 GBK 文件最多个别字符显示为占位符
+    let text = String::from_utf8_lossy(&bytes);
     let lines: Vec<String> = text.lines().map(strip_ansi).collect();
     let start = lines.len().saturating_sub(max_lines);
     (path, lines[start..].join("\n"))

@@ -868,18 +868,19 @@ async fn run_jar_install(
                     );
                 } else {
                     // Spring Boot 真实输出写在启动日志文件里（配置 logging.file.name
-                    // 指定），stdout 尾部常为空——优先带回启动日志末尾，再兜底 spawn 日志
+                    // 指定），stdout 尾部常为空——优先带回启动日志末尾（逐条时间线），
+                    // 再兜底 spawn 日志
                     let tail_dir = install_dir.clone();
                     let (log_path, boot_tail) = tokio::task::spawn_blocking(move || {
-                        crate::ops::env_repair::preflight::backend_log_tail(&tail_dir, 8)
+                        crate::ops::env_repair::preflight::backend_log_tail(&tail_dir, 10)
                     })
                     .await
                     .unwrap_or_default();
-                    let detail = if !boot_tail.trim().is_empty() {
-                        format!(
-                            "启动日志（{log_path}）末尾：{}",
-                            boot_tail.replace('\n', " | ")
-                        )
+                    if !boot_tail.trim().is_empty() {
+                        state.log(format!("启动日志（{log_path}）末尾："));
+                        for l in boot_tail.lines() {
+                            state.log(l.to_string());
+                        }
                     } else {
                         let spawn_tail = std::fs::read_to_string(format!(
                             "{}\\logs\\platform-spawn.log",
@@ -888,18 +889,21 @@ async fn run_jar_install(
                         .map(|t| {
                             let ls: Vec<&str> = t.lines().collect();
                             let start = ls.len().saturating_sub(5);
-                            ls[start..].join(" | ")
+                            ls[start..].to_vec()
                         })
                         .unwrap_or_default();
                         if spawn_tail.is_empty() {
-                            "暂无启动日志输出（dfy-server.log 尚未生成）".to_string()
+                            state.log("暂无启动日志输出（dfy-server.log 尚未生成）");
                         } else {
-                            format!("进程输出：{spawn_tail}")
+                            state.log("进程输出末尾：");
+                            for l in spawn_tail {
+                                state.log(l);
+                            }
                         }
-                    };
-                    state.log(format!(
-                        "DFY 后端启动命令已下发，2 秒内未监听 48085（Spring Boot 正常需 10~30 秒；若一直未就绪说明启动报错）。{detail}"
-                    ));
+                    }
+                    state.log(
+                        "DFY 后端启动命令已下发，2 秒内未监听 48085（Spring Boot 正常需 10~30 秒；若一直未就绪说明启动报错，见上方日志）",
+                    );
                     crate::ops_events::record(
                         "installer",
                         "dfy-backend",

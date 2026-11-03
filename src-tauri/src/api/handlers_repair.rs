@@ -943,7 +943,7 @@ pub async fn service_action(
         let up = blocking(|| port_holder(48085)).await.is_some();
         let (log_path, boot_tail) = if req.action == "start" {
             let dir = registry_install_dir(&state, "dfy-backend");
-            blocking(move || crate::ops::env_repair::preflight::backend_log_tail(&dir, 8)).await
+            blocking(move || crate::ops::env_repair::preflight::backend_log_tail(&dir, 10)).await
         } else {
             (String::new(), String::new())
         };
@@ -955,18 +955,20 @@ pub async fn service_action(
                     format!("DFY 后端已启动（48085 已监听）；启动日志：{log_path}")
                 }
             } else if !boot_tail.trim().is_empty() {
-                format!(
-                    "DFY 后端启动未就绪——启动日志（{log_path}）末尾：{}",
-                    boot_tail.replace('\n', " | ")
-                )
+                // 启动日志逐条写入任务日志（时间线视图），响应只留结论
+                state.repair.log(format!("DFY 后端启动未就绪——启动日志（{log_path}）末尾："));
+                for l in boot_tail.lines() {
+                    state.repair.log(l.to_string());
+                }
+                format!("DFY 后端启动未就绪——启动日志末尾已写入任务日志（{log_path}）")
             } else {
                 let dir = registry_install_dir(&state, "dfy-backend");
                 let spawn_tail = blocking(move || {
                     std::fs::read_to_string(format!("{dir}\\logs\\platform-spawn.log"))
                         .map(|t| {
-                            let ls: Vec<&str> = t.lines().collect();
+                            let ls: Vec<String> = t.lines().map(String::from).collect();
                             let start = ls.len().saturating_sub(5);
-                            ls[start..].join(" | ")
+                            ls[start..].to_vec()
                         })
                         .unwrap_or_default()
                 })
@@ -974,7 +976,11 @@ pub async fn service_action(
                 if spawn_tail.is_empty() {
                     "DFY 后端启动命令已下发（Spring Boot 首次启动约 10~30 秒，请稍后刷新状态确认）".to_string()
                 } else {
-                    format!("DFY 后端启动未就绪，进程输出：{spawn_tail}")
+                    state.repair.log("DFY 后端启动未就绪，进程输出末尾：");
+                    for l in spawn_tail {
+                        state.repair.log(l);
+                    }
+                    "DFY 后端启动未就绪——进程输出末尾已写入任务日志".to_string()
                 }
             }
         } else if up {
