@@ -7,6 +7,7 @@ import {
   BuildCircleRounded,
   DashboardRounded,
   DnsOutlined,
+  MonitorHeart,
   Settings as SettingsIcon,
   SettingsOutlined,
   SmartToy,
@@ -27,6 +28,7 @@ const NAV_GROUPS: { title: string; items: { to: string; label: string; icon: Rea
     title: "服务运维",
     items: [
       { to: "/", label: "服务总览", icon: <DashboardRounded fontSize="small" />, end: true },
+      { to: "/monitor", label: "监控中心", icon: <MonitorHeart fontSize="small" /> },
       { to: "/topology", label: "依赖拓扑", icon: <AccountTree fontSize="small" /> },
     ],
   },

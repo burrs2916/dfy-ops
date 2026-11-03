@@ -163,6 +163,8 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/services/:id/logs",
             axum::routing::get(handlers::service_logs),
         )
+        // 监控中心：日志文件清单（服务 × 文件元信息）
+        .route("/api/log-files", axum::routing::get(handlers::log_files))
         .route("/api/diagnosis", axum::routing::get(handlers::diagnosis))
         .route("/api/env", axum::routing::get(handlers::env_check_all))
         .route(

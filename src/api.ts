@@ -86,6 +86,16 @@ export const api = {
       { method: "POST" },
     ),
   listServices: () => request<ServiceStatus[]>("/api/services"),
+  // 监控中心：全部服务的日志文件清单（运行状态 + 文件大小/最后修改）
+  logFiles: () =>
+    request<{
+      services: {
+        id: string;
+        name: string;
+        running: boolean;
+        files: { path: string; name: string; size: number; modified: number }[];
+      }[];
+    }>("/api/log-files"),
   getService: (id: string) =>
     request<ServiceStatus>(`/api/services/${id}`),
   start: (id: string) =>
@@ -106,8 +116,10 @@ export const api = {
     }),
   buildLog: (id: string) =>
     request<LogsResponse>(`/api/services/${id}/build-log`),
-  logs: (id: string) =>
-    request<LogsResponse>(`/api/services/${id}/logs`),
+  logs: (id: string, path?: string) =>
+    request<LogsResponse>(
+      `/api/services/${id}/logs${path ? `?path=${encodeURIComponent(path)}` : ""}`,
+    ),
   diagnosis: () => request<DiagnosisResponse>("/api/diagnosis"),
   envCheck: (id: string) =>
     request<ServiceEnvReport>(`/api/services/${id}/env`),

@@ -582,11 +582,111 @@ pub async fn build_log(
 pub async fn service_logs(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<LogQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
     let log_paths = def.log_paths.clone();
-    let text = blocking(move || logs::tail_many(&log_paths, 200)).await;
+    let want = q.path.clone();
+    let id_ref = id.clone();
+    let text = blocking(move || match want {
+        // 监控中心选中具体文件：只读该文件。白名单校验——路径必须是
+        // registry.log_paths 声明的文件，或声明目录下的 *.log，防止越权读盘
+        Some(p) => {
+            let allowed = log_paths.iter().any(|lp| {
+                let lpb = std::path::Path::new(lp);
+                let pp = std::path::Path::new(&p);
+                if lpb.is_dir() {
+                    pp.starts_with(lpb) && pp.extension().map(|x| x == "log").unwrap_or(false)
+                } else {
+                    lpb == pp
+                }
+            });
+            if !allowed {
+                return format!("[拒绝访问] 该文件不在服务 {id_ref} 的日志声明范围内");
+            }
+            logs::tail_many(std::slice::from_ref(&p), 200)
+        }
+        None => logs::tail_many(&log_paths, 200),
+    })
+    .await;
     Ok(Json(serde_json::json!({"id": id, "logs": text})))
+}
+
+#[derive(Deserialize)]
+pub struct LogQuery {
+    /// 可选：只读这一个日志文件（监控中心选中某文件时传）
+    path: Option<String>,
+}
+
+/// 监控中心：全部服务的日志文件清单（统一管理的列表数据源）。
+/// 遍历 registry.log_paths：文件直接收录，目录枚举其下 *.log；
+/// 附运行状态、大小、最后修改时间——前端按修改时间倒序展示，
+/// 「有没有在动」一眼可辨（日志停更通常意味着进程卡死或已退出）。
+pub async fn log_files(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let s = state.clone();
+    let rows = blocking(move || {
+        let snap = ProcSnapshot::capture();
+        let deps = dep_states(&s, &snap);
+        let running: HashMap<String, bool> = deps
+            .iter()
+            .map(|(id, d)| (id.clone(), d.running))
+            .collect();
+        s.registry
+            .iter()
+            .map(|d| {
+                let mut files: Vec<serde_json::Value> = Vec::new();
+                for p in &d.log_paths {
+                    let pb = std::path::Path::new(p);
+                    if pb.is_dir() {
+                        if let Ok(rd) = std::fs::read_dir(pb) {
+                            for e in rd.flatten() {
+                                let ep = e.path();
+                                if ep.extension().map(|x| x == "log").unwrap_or(false) {
+                                    files.push(log_file_meta(&ep));
+                                }
+                            }
+                        }
+                    } else if pb.is_file() {
+                        files.push(log_file_meta(pb));
+                    }
+                }
+                files.sort_by(|a, b| {
+                    b["modified"]
+                        .as_u64()
+                        .unwrap_or(0)
+                        .cmp(&a["modified"].as_u64().unwrap_or(0))
+                });
+                serde_json::json!({
+                    "id": d.id,
+                    "name": d.name,
+                    "running": running.get(&d.id).copied().unwrap_or(false),
+                    "files": files,
+                })
+            })
+            .collect::<Vec<_>>()
+    })
+    .await;
+    Json(serde_json::json!({ "services": rows }))
+}
+
+fn log_file_meta(p: &std::path::Path) -> serde_json::Value {
+    let (size, modified) = match std::fs::metadata(p) {
+        Ok(m) => (
+            m.len(),
+            m.modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        ),
+        Err(_) => (0, 0),
+    };
+    serde_json::json!({
+        "path": p.to_string_lossy(),
+        "name": p.file_name().map(|x| x.to_string_lossy().to_string()).unwrap_or_default(),
+        "size": size,
+        "modified": modified,
+    })
 }
 
 pub async fn diagnosis(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {

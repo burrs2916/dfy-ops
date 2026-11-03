@@ -4,6 +4,7 @@ import Layout from "./components/Layout";
 import Dashboard from "./pages/Dashboard";
 import ServiceDetail from "./pages/ServiceDetail";
 import EnvCheck from "./pages/EnvCheck";
+import MonitorCenter from "./pages/MonitorCenter";
 import MysqlPage from "./pages/MysqlPage";
 import RedisPage from "./pages/RedisPage";
 import ConfigPage from "./pages/ConfigPage";
@@ -36,6 +37,7 @@ export default function App() {
       <Route path="/" element={<Layout />}>
         <Route index element={<Dashboard />} />
         <Route path="env" element={<EnvCheck />} />
+        <Route path="monitor" element={<MonitorCenter />} />
         <Route path="mysql" element={<MysqlPage />} />
         <Route path="redis" element={<RedisPage />} />
         <Route path="config" element={<ConfigPage />} />
