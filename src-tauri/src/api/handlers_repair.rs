@@ -872,7 +872,6 @@ pub async fn service_action(
                                 "conf_repaired",
                                 &format!("target=dfy-backend 启动前修复 {} 个历史模板 MySQL URL（补 allowPublicKeyRetrieval=true）", list.len()),
                             );
-                            st.repair.log("启动前已自动补齐外部配置的 MySQL 连接参数（allowPublicKeyRetrieval）");
                         }
                     }
                     Err(e) => {

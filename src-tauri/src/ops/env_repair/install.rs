@@ -733,6 +733,7 @@ async fn run_jar_install(
             // allowPublicKeyRetrieval，MySQL 8 非 SSL 连接必报 Public Key Retrieval
             // is not allowed → 启动即退）；幂等，新模板配置无改动
             let rep_dir = install_dir.clone();
+            // 配置自修复是纯内部技术细节：不打扰用户，只落 debug.log
             match tokio::task::spawn_blocking(move || {
                 crate::ops::env_repair::preflight::repair_legacy_mysql_urls(&rep_dir)
             })
@@ -740,11 +741,33 @@ async fn run_jar_install(
             {
                 Ok(Ok(list)) => {
                     if !list.is_empty() {
-                        state.log("启动前已自动补齐外部配置的 MySQL 连接参数（allowPublicKeyRetrieval）");
+                        debug_log::entry(
+                            debug_log::APP_SCOPE,
+                            "INFO",
+                            "install_autostart",
+                            "dfy-backend",
+                            &format!("启动前自动修复外部配置：{} 个 MySQL URL 补齐 allowPublicKeyRetrieval", list.len()),
+                        );
                     }
                 }
-                Ok(Err(e)) => state.log(format!("历史模板 URL 修复未完成：{e}")),
-                Err(e) => state.log(format!("历史模板 URL 修复任务异常：{e}")),
+                Ok(Err(e)) => {
+                    debug_log::entry(
+                        debug_log::APP_SCOPE,
+                        "ERROR",
+                        "install_autostart",
+                        "dfy-backend",
+                        &format!("外部配置自动修复失败：{e}"),
+                    );
+                }
+                Err(e) => {
+                    debug_log::entry(
+                        debug_log::APP_SCOPE,
+                        "ERROR",
+                        "install_autostart",
+                        "dfy-backend",
+                        &format!("外部配置修复任务异常：{e}"),
+                    );
+                }
             }
             let pre_dir = install_dir.clone();
             let pre = tokio::task::spawn_blocking(move || {
