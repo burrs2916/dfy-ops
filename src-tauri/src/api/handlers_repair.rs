@@ -864,15 +864,15 @@ pub async fn service_action(
                 // MySQL 8 非 SSL 连接建连必败）；幂等，新模板配置无改动
                 match crate::ops::env_repair::preflight::repair_legacy_mysql_urls(&dir) {
                     Ok(list) => {
-                        for u in list {
+                        if !list.is_empty() {
                             crate::debug_log::entry(
                                 crate::ops::process::PROC_SCOPE,
                                 "WARN",
                                 "service_action",
                                 "conf_repaired",
-                                &format!("target=dfy-backend 启动前修复历史模板 URL：{u} → 补 allowPublicKeyRetrieval=true"),
+                                &format!("target=dfy-backend 启动前修复 {} 个历史模板 MySQL URL（补 allowPublicKeyRetrieval=true）", list.len()),
                             );
-                            st.repair.log("已自动修复外部配置：历史模板 MySQL URL 补齐 allowPublicKeyRetrieval=true（MySQL 8 非 SSL 连接必需）");
+                            st.repair.log("启动前已自动补齐外部配置的 MySQL 连接参数（allowPublicKeyRetrieval）");
                         }
                     }
                     Err(e) => {
@@ -939,34 +939,44 @@ pub async fn service_action(
             }
         }
         // 复核：Spring Boot 启动需要 10~30s，立即探测只区分「端口已监听 / 正在启动」。
-        // 未监听时把 spawn 日志尾部带回——Spring Boot 报错（类找不到/配置错误/端口被占）
-        // 当场可见，不用用户翻文件（与 nginx 启动复核同口径）。
+        // 真实输出写在外部配置指定的启动日志（dfy-server.log）里，stdout 尾部常
+        // 为空——优先带回启动日志末尾（兜底 spawn 日志），成败当场可见（2026-11-03 用户反馈）。
         let up = blocking(|| port_holder(48085)).await.is_some();
-        let spawn_tail = if req.action == "start" && !up {
+        let (log_path, boot_tail) = if req.action == "start" {
             let dir = registry_install_dir(&state, "dfy-backend");
-            blocking(move || {
-                std::fs::read_to_string(format!("{dir}\\logs\\platform-spawn.log"))
-                    .map(|t| {
-                        let ls: Vec<&str> = t.lines().collect();
-                        let start = ls.len().saturating_sub(5);
-                        ls[start..].join(" | ")
-                    })
-                    .unwrap_or_default()
-            })
-            .await
+            blocking(move || crate::ops::env_repair::preflight::backend_log_tail(&dir, 8)).await
         } else {
-            String::new()
+            (String::new(), String::new())
         };
         let msg = if req.action == "start" {
             if up {
-                "DFY 后端已启动（48085 已监听）".to_string()
-            } else {
-                let hint = if spawn_tail.is_empty() {
-                    "Spring Boot 首次启动约 10~30 秒，请稍后刷新状态确认".to_string()
+                if log_path.is_empty() {
+                    "DFY 后端已启动（48085 已监听）".to_string()
                 } else {
-                    format!("启动未就绪，进程输出：{spawn_tail}")
-                };
-                format!("DFY 后端启动命令已下发（{hint}）")
+                    format!("DFY 后端已启动（48085 已监听）；启动日志：{log_path}")
+                }
+            } else if !boot_tail.trim().is_empty() {
+                format!(
+                    "DFY 后端启动未就绪——启动日志（{log_path}）末尾：{}",
+                    boot_tail.replace('\n', " | ")
+                )
+            } else {
+                let dir = registry_install_dir(&state, "dfy-backend");
+                let spawn_tail = blocking(move || {
+                    std::fs::read_to_string(format!("{dir}\\logs\\platform-spawn.log"))
+                        .map(|t| {
+                            let ls: Vec<&str> = t.lines().collect();
+                            let start = ls.len().saturating_sub(5);
+                            ls[start..].join(" | ")
+                        })
+                        .unwrap_or_default()
+                })
+                .await;
+                if spawn_tail.is_empty() {
+                    "DFY 后端启动命令已下发（Spring Boot 首次启动约 10~30 秒，请稍后刷新状态确认）".to_string()
+                } else {
+                    format!("DFY 后端启动未就绪，进程输出：{spawn_tail}")
+                }
             }
         } else if up {
             "停止命令已执行，但 48085 仍被监听——可能有非平台拉起的 Java 进程，请到任务管理器确认".to_string()

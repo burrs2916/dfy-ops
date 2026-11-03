@@ -155,30 +155,55 @@ pub fn repair_legacy_mysql_urls(install_dir: &str) -> Result<Vec<String>, String
     Ok(changed)
 }
 
-/// jar 文件名标注的 JDK 版本与实际启动 JDK 不一致时给出警告文案。
-/// 例：dfy-server-2.3.0-jdk8-SNAPSHOT.jar 用 JDK17 启动——若后端使用了
-/// JDK9+ 移除的 API（如 JAXB），会启动即退。启发式：文件名含 jdk8/jdk-8。
-/// java 走 PATH（解析不出路径）时无从判断版本，不误报。
+/// 后端启动日志尾部（Spring Boot 真实输出）。
+/// 路径取外部配置 logging.file.name（缺省回落 安装目录/logs/dfy-server.log），
+/// 剥掉 ANSI 色码后返回末 max_lines 行。数据源拒绝、缺配置、端口占用等真实
+/// 报错现场都写在这个文件里——platform-spawn.log 的 stdout 尾部常常是空的，
+/// 运维在界面看不到启动实况（2026-11-03 用户反馈），启动复核时如实带回。
+/// 返回（日志路径，尾部内容）；文件不存在时尾部为空串。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-pub fn jdk_mismatch_warning(jar_path: &str, java_path: &str) -> Option<String> {
-    let jar = jar_path.replace('\\', "/").to_lowercase();
-    let jar_name = jar.rsplit('/').next().unwrap_or(&jar);
-    if !(jar_name.contains("jdk8") || jar_name.contains("jdk-8")) {
-        return None;
+pub fn backend_log_tail(install_dir: &str, max_lines: usize) -> (String, String) {
+    let path = crate::ops::external_config::read(Path::new(install_dir))
+        .ok()
+        .flatten()
+        .map(|c| c.log_file_path)
+        .filter(|p| !p.trim().is_empty())
+        .unwrap_or_else(|| {
+            Path::new(install_dir)
+                .join("logs")
+                .join("dfy-server.log")
+                .to_string_lossy()
+                .into_owned()
+        });
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return (path, String::new());
+    };
+    let lines: Vec<String> = text.lines().map(strip_ansi).collect();
+    let start = lines.len().saturating_sub(max_lines);
+    (path, lines[start..].join("\n"))
+}
+
+/// 剥 ANSI 转义序列（Spring Boot 日志带色码，直接显示是乱码）
+fn strip_ansi(s: &str) -> String {
+    if !s.contains('\u{1b}') {
+        return s.to_string();
     }
-    let jp = java_path.replace('\\', "/").to_lowercase();
-    let java_name = jp.rsplit('/').next().unwrap_or(&jp);
-    if java_name == "java" {
-        return None;
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.next() == Some('[') {
+            for n in chars.by_ref() {
+                if n.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
     }
-    let jdk17 = jp.contains("jdk-17") || jp.contains("jdk17") || jp.contains("jdk_17");
-    jdk17.then(|| {
-        format!(
-            "注意：jar 文件名标注 jdk8（{jar_name}），但实际用 JDK17 启动（{java_path}）。\
-             若后端使用了 JDK9+ 移除的 API 会启动即退——请确认交付要求的 JDK 版本，\
-             必要时在资源目录放置对应版本 JDK 后重装"
-        )
-    })
+    out
 }
 
 #[cfg(test)]
@@ -266,28 +291,42 @@ mod tests {
     }
 
     #[test]
-    fn jdk_mismatch_warning_only_for_marked_jdk8_jars() {
-        let jdk17 = "C:/services/jdk/jdk-17.0.20.1+1/bin/java.exe";
-        assert!(jdk_mismatch_warning(
-            "D:/res/dfy-server-2.3.0-jdk8-SNAPSHOT.jar",
-            jdk17
+    fn strip_ansi_removes_color_codes() {
+        assert_eq!(
+            strip_ansi("\u{1b}[1;31mERROR\u{1b}[0;39m | boot failed"),
+            "ERROR | boot failed"
+        );
+        assert_eq!(strip_ansi("plain text"), "plain text");
+    }
+
+    #[test]
+    fn backend_log_tail_returns_last_lines_without_ansi() {
+        let dir = std::env::temp_dir().join(format!(
+            "dfyops-tail-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::create_dir_all(dir.join("logs")).unwrap();
+        std::fs::write(
+            dir.join("logs").join("dfy-server.log"),
+            "line1\n\u{1b}[1;31mERROR x\u{1b}[0m\nline3\nline4\n",
         )
-        .is_some());
-        // 无 jdk8 标注 / 非 JDK17 / PATH java：不误报
-        assert!(jdk_mismatch_warning(
-            "D:/res/dfy-server-2.3.0-SNAPSHOT.jar",
-            jdk17
-        )
-        .is_none());
-        assert!(jdk_mismatch_warning(
-            "D:/res/dfy-server-2.3.0-jdk8-SNAPSHOT.jar",
-            "C:/services/jdk/jdk-8u411/bin/java.exe"
-        )
-        .is_none());
-        assert!(jdk_mismatch_warning(
-            "D:/res/dfy-server-2.3.0-jdk8-SNAPSHOT.jar",
-            "java"
-        )
-        .is_none());
+        .unwrap();
+        let (path, tail) = backend_log_tail(dir.to_str().unwrap(), 2);
+        assert!(path.ends_with("dfy-server.log"));
+        assert_eq!(tail, "line3\nline4");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn backend_log_tail_missing_file_returns_empty_tail() {
+        let dir = std::env::temp_dir().join(format!(
+            "dfyops-tail-none-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let (path, tail) = backend_log_tail(dir.to_str().unwrap(), 5);
+        assert!(path.ends_with("dfy-server.log"));
+        assert_eq!(tail, "");
     }
 }

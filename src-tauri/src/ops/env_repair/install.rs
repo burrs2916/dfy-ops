@@ -739,10 +739,8 @@ async fn run_jar_install(
             .await
             {
                 Ok(Ok(list)) => {
-                    for u in list {
-                        state.log(format!(
-                            "启动前自动修复外部配置：{u} → 补 allowPublicKeyRetrieval=true（MySQL 8 非 SSL 连接必需）"
-                        ));
+                    if !list.is_empty() {
+                        state.log("启动前已自动补齐外部配置的 MySQL 连接参数（allowPublicKeyRetrieval）");
                     }
                 }
                 Ok(Err(e)) => state.log(format!("历史模板 URL 修复未完成：{e}")),
@@ -763,14 +761,6 @@ async fn run_jar_install(
                 } else {
                     state.log(format!("预检失败：{}（{}）——{}", c.name, c.addr, c.detail));
                 }
-            }
-            // jar 标注 JDK 版本与实际启动 JDK 不一致时提示（jdk8 jar + JDK17：
-            // 用了 JDK9+ 移除的 API 会启动即退——2026-11-02 实测秒退的高危可疑点）
-            if let Some(w) = crate::ops::env_repair::preflight::jdk_mismatch_warning(
-                &jar_path,
-                &crate::ops::process::resolve_java_placeholder("{java}"),
-            ) {
-                state.log(w);
             }
             if pre.iter().any(|c| !c.ok) {
                 state.log("预检未通过：依赖连不上时后端必然启动失败，已跳过自动启动。请先启动对应依赖或修改外部配置（config/application-local.yaml），再到「已安装」页手动点「启动」".to_string());
@@ -809,9 +799,21 @@ async fn run_jar_install(
                 .find(|r| r.id == "dfy-backend" && !r.ok)
                 .and_then(|r| r.error.clone());
             if let Some(e) = backend_err {
-                state.log(format!(
-                    "DFY 后端自动启动失败：{e}。常见原因：JDK 版本与 jar 不匹配（如 jdk8 的 jar 被 JDK17 拉起，看上方警告）或依赖服务异常——按上方预检结果与进程输出尾部处理后，再到已安装页手动点「启动」"
-                ));
+                state.log(format!("DFY 后端自动启动失败：{e}——处理后到「已安装」页手动点「启动」"));
+                // 真实报错现场在外部配置指定的启动日志里（stdout 尾部常为空），
+                // 把末尾原样带回任务日志，运维不用翻文件
+                let tail_dir = install_dir.clone();
+                let (log_path, tail) = tokio::task::spawn_blocking(move || {
+                    crate::ops::env_repair::preflight::backend_log_tail(&tail_dir, 15)
+                })
+                .await
+                .unwrap_or_default();
+                if !tail.trim().is_empty() {
+                    state.log(format!("启动日志（{log_path}）末尾："));
+                    for l in tail.lines() {
+                        state.log(l.to_string());
+                    }
+                }
                 crate::ops_events::record(
                     "installer",
                     "dfy-backend",
@@ -842,32 +844,52 @@ async fn run_jar_install(
                         "自动启动成功（48085 已监听）",
                     );
                 } else {
-                    let spawn_tail = std::fs::read_to_string(format!(
-                        "{}\\logs\\platform-spawn.log",
-                        install_dir.trim_end_matches('\\')
-                    ))
-                    .map(|t| {
-                        let ls: Vec<&str> = t.lines().collect();
-                        let start = ls.len().saturating_sub(5);
-                        ls[start..].join(" | ")
+                    // Spring Boot 真实输出写在启动日志文件里（配置 logging.file.name
+                    // 指定），stdout 尾部常为空——优先带回启动日志末尾，再兜底 spawn 日志
+                    let tail_dir = install_dir.clone();
+                    let (log_path, boot_tail) = tokio::task::spawn_blocking(move || {
+                        crate::ops::env_repair::preflight::backend_log_tail(&tail_dir, 8)
                     })
+                    .await
                     .unwrap_or_default();
+                    let detail = if !boot_tail.trim().is_empty() {
+                        format!(
+                            "启动日志（{log_path}）末尾：{}",
+                            boot_tail.replace('\n', " | ")
+                        )
+                    } else {
+                        let spawn_tail = std::fs::read_to_string(format!(
+                            "{}\\logs\\platform-spawn.log",
+                            install_dir.trim_end_matches('\\')
+                        ))
+                        .map(|t| {
+                            let ls: Vec<&str> = t.lines().collect();
+                            let start = ls.len().saturating_sub(5);
+                            ls[start..].join(" | ")
+                        })
+                        .unwrap_or_default();
+                        if spawn_tail.is_empty() {
+                            "暂无启动日志输出（dfy-server.log 尚未生成）".to_string()
+                        } else {
+                            format!("进程输出：{spawn_tail}")
+                        }
+                    };
                     state.log(format!(
-                        "DFY 后端启动命令已下发，2 秒内未监听 48085（Spring Boot 正常需 10~30 秒；若一直未就绪说明启动报错）。进程输出：{spawn_tail}"
+                        "DFY 后端启动命令已下发，2 秒内未监听 48085（Spring Boot 正常需 10~30 秒；若一直未就绪说明启动报错）。{detail}"
                     ));
                     crate::ops_events::record(
                         "installer",
                         "dfy-backend",
                         "autostart",
                         true,
-                        &format!("自动启动已下发（2s 内 48085 未监听，Spring Boot 启动中或报错）。spawn 日志：{spawn_tail}"),
+                        &format!("自动启动已下发（2s 内 48085 未监听，Spring Boot 启动中或报错）。{detail}"),
                     );
                     debug_log::entry(
                         debug_log::APP_SCOPE,
                         "WARN",
                         "install_autostart",
                         "dfy-backend",
-                        &format!("启动已下发但 2s 内未监听 48085；spawn 日志：{spawn_tail}"),
+                        &format!("启动已下发但 2s 内未监听 48085；{detail}"),
                     );
                 }
             }
