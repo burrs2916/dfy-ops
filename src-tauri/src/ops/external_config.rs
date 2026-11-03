@@ -206,6 +206,9 @@ spring:
 logging:
   file:
     name: C:/services/dfy-boot-base/logs/dfy-server.log # 运行日志文件（Spring Boot 注入 logback ${LOG_FILE}，10MB 按天滚动保留 30 天）
+  charset:
+    console: UTF-8 # 日志输出编码显式定死 UTF-8：Windows 缺省 GBK，不指定则文件/控制台中文全乱码
+    file: UTF-8
   level:
     # 配置自己写的 MyBatis Mapper 打印日志
     cn.iocoder.dfy.module.bpm.dal.mysql: debug

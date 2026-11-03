@@ -123,7 +123,7 @@ fn builtin() -> Vec<ServiceDef> {
             install_dir: "C:/services/dfy-boot-base".into(),
             build_cmd: Some("mvn -q -DskipTests package".into()),
             // install 管线拷贝 jar 到 install_dir 根，run_cmd 直接引用
-            run_cmd: "{java} -Dfile.encoding=UTF-8 -jar dfy-server.jar".into(),
+            run_cmd: "{java} -Dfile.encoding=UTF-8 -Dstdout.encoding=UTF-8 -Dstderr.encoding=UTF-8 -jar dfy-server.jar".into(),
             ports: vec![48085],
             process_names: vec!["java".into(), "dfy-server".into()],
             product_names: vec![],

@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "dfy-ops"
-version = "0.2.52"
+version = "0.2.54"
 dependencies = [
  "axum",
  "chrono",

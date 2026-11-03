@@ -169,6 +169,19 @@ impl ProcManager {
             );
             return Ok(());
         }
+        // dfy-backend 启动前轮转应用日志（2026-11-03 用户定案）：旧日志不得
+        // 继续向下追加——重命名留一份 .prev 备份（覆盖上一份），本次启动从
+        // 空文件写。交付机上 dfy-server.log 永远是「本次启动」的日志，排查
+        // 不用在几 MB 的历史里翻最新报错；.prev 留作上一次运行的现场。
+        // rename 失败（如被占用）不影响启动，logback 会继续追加原文件。
+        if id == "dfy-backend" {
+            let logs_dir = std::path::Path::new(install_dir).join("logs");
+            let cur = logs_dir.join("dfy-server.log");
+            let prev = logs_dir.join("dfy-server.prev.log");
+            if cur.is_file() {
+                let _ = std::fs::rename(&cur, &prev);
+            }
+        }
         let resolved = resolve_java_placeholder(run_cmd);
         let log_path = std::path::Path::new(install_dir)
             .join("logs")
