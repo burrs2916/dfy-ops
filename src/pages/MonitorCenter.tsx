@@ -21,6 +21,7 @@ import PlayArrow from "@mui/icons-material/PlayArrow";
 import Refresh from "@mui/icons-material/Refresh";
 import Description from "@mui/icons-material/Description";
 import FolderOpen from "@mui/icons-material/FolderOpen";
+import Tooltip from "@mui/material/Tooltip";
 import { api } from "../api";
 import { PageHeader } from "../components/PageHeader";
 
@@ -251,22 +252,24 @@ export default function MonitorCenter() {
                         }}
                       >
                         <Description sx={{ fontSize: 15, color: "text.secondary" }} />
-                        <Box sx={{ minWidth: 0, flex: 1 }}>
-                          <Typography variant="body2" noWrap>
-                            {f.name}
-                          </Typography>
-                          <Typography variant="caption" color="text.secondary">
-                            {fmtSize(f.size)} · {fmtTime(f.modified)}
-                            {isActive(f.modified) && (
-                              <Box
-                                component="span"
-                                sx={{ color: "success.main", fontWeight: 700, ml: 0.5 }}
-                              >
-                                ● 活跃
-                              </Box>
-                            )}
-                          </Typography>
-                        </Box>
+                        <Tooltip title={f.path} placement="right" arrow>
+                          <Box sx={{ minWidth: 0, flex: 1 }}>
+                            <Typography variant="body2" noWrap>
+                              {f.name}
+                            </Typography>
+                            <Typography variant="caption" color="text.secondary" noWrap display="block">
+                              {fmtSize(f.size)} · {fmtTime(f.modified)}
+                              {isActive(f.modified) && (
+                                <Box
+                                  component="span"
+                                  sx={{ color: "success.main", fontWeight: 700, ml: 0.5 }}
+                                >
+                                  ● 活跃
+                                </Box>
+                              )}
+                            </Typography>
+                          </Box>
+                        </Tooltip>
                       </Stack>
                     );
                   })
@@ -310,9 +313,11 @@ export default function MonitorCenter() {
               <Button size="small" startIcon={<Refresh />} onClick={() => void tail()} disabled={tailBusy || !sel}>
                 刷新
               </Button>
-              <Button size="small" onClick={downloadLog} disabled={!sel}>
-                下载
-              </Button>
+              <Tooltip title="保存当前显示的尾部日志（最多 200 行）">
+                <Button size="small" onClick={downloadLog} disabled={!sel}>
+                  保存尾部
+                </Button>
+              </Tooltip>
               <Button size="small" startIcon={<FolderOpen />} onClick={() => void openLogDir()} disabled={!sel}>
                 打开目录
               </Button>

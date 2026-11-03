@@ -128,8 +128,13 @@ fn builtin() -> Vec<ServiceDef> {
             process_names: vec!["java".into(), "dfy-server".into()],
             product_names: vec![],
             health_url: None,
-            // 运行日志：外部配置 logging.file.name（相对运行目录）→ install_dir/logs/dfy-server.log
-            log_paths: vec!["C:/services/dfy-boot-base/logs/dfy-server.log".into()],
+            // 运行日志：外部配置 logging.file.name（相对运行目录）→ install_dir/logs/dfy-server.log；
+            // platform-spawn.log 是 JVM stdout（每次启动覆盖写）——Spring Boot 尚未
+            // 写出日志文件时的第一现场（参数错误/类加载失败），监控中心一并纳入
+            log_paths: vec![
+                "C:/services/dfy-boot-base/logs/dfy-server.log".into(),
+                "C:/services/dfy-boot-base/logs/platform-spawn.log".into(),
+            ],
             depends_on: vec!["mysql".into(), "redis".into()],
             is_daemon: true,
             third_party: false,

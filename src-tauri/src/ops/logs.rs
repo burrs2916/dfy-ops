@@ -1,5 +1,16 @@
 use std::io::{Read, Seek, SeekFrom};
 
+/// 日志字节解码：优先按 UTF-8；无效时回退 GBK。
+/// 写入端已在 v0.2.54 统一 UTF-8（logging.charset + file.encoding），
+/// 但存量 GBK 文件（历史日志、其他未托管服务）仍会被 tail 读到——
+/// 纯 lossy 会把 GBK 中文全部变成替换符，监控中心看起来就是大片乱码。
+pub fn decode_log_bytes(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => encoding_rs::GBK.decode(bytes).0.into_owned(),
+    }
+}
+
 /// 读取日志文件末尾 `lines` 行。
 ///
 /// 实现：从文件末尾按 8KB 块向前回读，凑够 N 行即停——
@@ -49,7 +60,7 @@ pub fn tail(path: &str, lines: usize) -> String {
     }
     let buf: Vec<u8> = chunks.into_iter().flatten().collect();
 
-    let text = String::from_utf8_lossy(&buf);
+    let text = decode_log_bytes(&buf);
     let mut all: Vec<&str> = text.lines().collect();
     // 未回读到文件头时，第一行可能从多字节字符中间截断，丢弃以防乱码
     if !reached_start && !all.is_empty() {

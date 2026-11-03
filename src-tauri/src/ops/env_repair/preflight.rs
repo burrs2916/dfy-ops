@@ -178,10 +178,10 @@ pub fn backend_log_tail(install_dir: &str, max_lines: usize) -> (String, String)
     let Ok(bytes) = std::fs::read(&path) else {
         return (path, String::new());
     };
-    // from_utf8_lossy：旧包在 Windows 上以 GBK 写日志（file.encoding 缺省 GBK），
-    // 严格 UTF-8 校验会把整个文件读失败 → 日志尾部拿不到。新包启动命令已带
-    // -Dfile.encoding=UTF-8，新日志为 UTF-8；旧 GBK 文件最多个别字符显示为占位符
-    let text = String::from_utf8_lossy(&bytes);
+    // UTF-8 优先、GBK 回退（decode_log_bytes）：旧包在 Windows 上以 GBK 写日志，
+    // 严格 UTF-8 校验/纯 lossy 都会变替换符乱码。新包已 UTF-8 写入，存量 GBK
+    // 由回退解码正常显示
+    let text = crate::ops::logs::decode_log_bytes(&bytes);
     let lines: Vec<String> = text.lines().map(strip_ansi).collect();
     let start = lines.len().saturating_sub(max_lines);
     (path, lines[start..].join("\n"))
