@@ -961,7 +961,7 @@ async fn run_jar_install(
                             install_dir.trim_end_matches('\\')
                         ))
                         .map(|t| {
-                            let ls: Vec<&str> = t.lines().collect();
+                            let ls: Vec<String> = t.lines().map(String::from).collect();
                             let start = ls.len().saturating_sub(5);
                             ls[start..].to_vec()
                         })
@@ -983,14 +983,14 @@ async fn run_jar_install(
                         "dfy-backend",
                         "autostart",
                         true,
-                        &format!("自动启动已下发（2s 内 48085 未监听，Spring Boot 启动中或报错）。{detail}"),
+                        "自动启动已下发（2s 内 48085 未监听，Spring Boot 启动中或报错；启动日志末尾已贴任务日志）",
                     );
                     debug_log::entry(
                         debug_log::APP_SCOPE,
                         "WARN",
                         "install_autostart",
                         "dfy-backend",
-                        &format!("启动已下发但 2s 内未监听 48085；{detail}"),
+                        "启动已下发但 2s 内未监听 48085；启动日志末尾已贴任务日志",
                     );
                 }
             }
