@@ -554,6 +554,47 @@ pub fn start_zip_install(
 /// 无解压、无拍平、无 Windows 服务注册——jar 本身就是自包含部署形态。
 /// `ext_cfg`：安装前配置确认弹窗回传的外部配置（Some 时拷完 jar 生成
 /// config/application-local.yaml，Spring Boot 启动即用它覆盖 jar 内配置）。
+/// 计算 SHA256（流式读取，jar 有几百 MB 不适合整体读进内存）
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn sha256_hex(path: &std::path::Path) -> Result<String, String> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut h = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = f.read(&mut buf).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        h.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", h.finalize()))
+}
+
+/// jar 包指纹：SHA256 前 16 位 + 大小 + 修改时间。安装日志里亮出来——
+/// 交付机上「装的是不是新包」一眼可辨，不再靠猜（本次排查曾因
+/// 新旧包混淆白白耗掉半天：日志里跑的还是旧包的报错）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn jar_fingerprint(path: &std::path::Path) -> String {
+    match (sha256_hex(path), std::fs::metadata(path)) {
+        (Ok(sha), Ok(m)) => {
+            let mtime = chrono::DateTime::<chrono::Local>::from(
+                m.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH),
+            )
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string();
+            format!(
+                "SHA256={}（{:.1} MB，打包时间 {mtime}）",
+                &sha[..16],
+                m.len() as f64 / 1048576.0
+            )
+        }
+        (Ok(sha), Err(e)) => format!("SHA256={}（{}：{e}）", &sha[..16], "无法读取元信息"),
+        (Err(e), _) => format!("指纹计算失败：{e}"),
+    }
+}
+
 #[cfg(target_os = "windows")]
 #[allow(clippy::too_many_arguments)]
 pub fn start_jar_install(
@@ -625,6 +666,16 @@ async fn run_jar_install(
         "开始安装 DFY 后端：{} → {}\\dfy-server.jar",
         jar_path, install_dir
     ));
+    // 源包指纹：日志里亮出 SHA256/大小/打包时间，交付机上是否新包一眼可辨；
+    // sha 留给拷贝后校验对照
+    let jp = jar_path.clone();
+    let (src_sha, src_desc) = tokio::task::spawn_blocking(move || {
+        let p = std::path::Path::new(&jp);
+        (sha256_hex(p).ok(), jar_fingerprint(p))
+    })
+    .await
+    .unwrap_or((None, "指纹计算任务异常".into()));
+    state.log(format!("安装包指纹：{src_desc}"));
 
     state.patch(|j| j.stage = "install".into());
     let copy = {
@@ -685,7 +736,9 @@ async fn run_jar_install(
         tokio::task::spawn_blocking(move || {
             let p = std::path::Path::new(&id).join("dfy-server.jar");
             if p.is_file() {
-                Ok(std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0))
+                let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                let sha = sha256_hex(&p).ok();
+                Ok((len, sha))
             } else {
                 Err(format!("拷贝完成但未找到 dfy-server.jar：{}", p.display()))
             }
@@ -693,10 +746,31 @@ async fn run_jar_install(
         .await
     };
     match v {
-        Ok(Ok(jar_len)) => {
-            state.log(format!(
-                "验证通过：dfy-server.jar 已就位（{jar_len} 字节）"
-            ));
+        Ok(Ok((jar_len, dest_sha))) => {
+            // 拷贝完整性对照：源/目的 SHA256 必须一致（几百 MB 拷贝曾出过
+            // 静默截断的事故，单看字节数不够）
+            if let (Some(src), Some(dest)) = (&src_sha, &dest_sha) {
+                if src != dest {
+                    finish(
+                        state,
+                        env_cache,
+                        false,
+                        format!(
+                            "dfy-server.jar 拷贝校验失败：源 SHA256={} 与安装后 SHA256={} 不一致（磁盘/拷贝异常，请重试安装）",
+                            &src[..16],
+                            &dest[..16]
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+                state.log(format!(
+                    "验证通过：dfy-server.jar 已就位（{jar_len} 字节，SHA256 一致 {}）",
+                    &dest[..16]
+                ));
+            } else {
+                state.log(format!("验证通过：dfy-server.jar 已就位（{jar_len} 字节）"));
+            }
             // ===== jar 内置配置体检：重复键会让 Spring 启动即退（DuplicateKeyException）=====
             // 交付方手改 jar 内 application-local.yaml 曾引入同层两个 password——在这里
             // 点名报出来，不等 90 秒就绪超时后再看满屏框架栈。

@@ -702,7 +702,7 @@ dependencies = [
 
 [[package]]
 name = "dfy-ops"
-version = "0.2.51"
+version = "0.2.52"
 dependencies = [
  "axum",
  "chrono",
@@ -716,6 +716,7 @@ dependencies = [
  "rumqttc",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
