@@ -60,19 +60,27 @@ impl RepairState {
         }
     }
     /// 追加任务日志（修复中心进度区展示；上限 200 条自动截断）。
+    /// 每行统一带 `[yyyy-MM-dd HH:mm:ss.SSS]` 前缀——与后端 Spring Boot 日志
+    /// 同一时间格式（2026-11-04 用户定案：平台所有端日志格式统一，可按时间
+    /// 片段索引定位）。
     /// 同时镜像写 debug.log（scope=Repair）：job.logs 每次安装/卸载都会清空，
     /// 不镜像的话「安装失败现场」在 UI 上几秒内就消失——用户传回 debug.log
     /// 时必须能看到完整安装过程（解压/配置/注册服务/验证每一步）。
     pub fn log(&self, msg: impl Into<String>) {
         let msg = msg.into();
+        let line = format!(
+            "[{}] {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+            msg
+        );
         crate::debug_log::entry(
             crate::debug_log::APP_SCOPE,
             "INFO",
             "repair_job",
             "log",
-            &msg,
+            &line,
         );
-        self.patch(move |j| j.logs.push(msg));
+        self.patch(move |j| j.logs.push(line));
     }
 }
 

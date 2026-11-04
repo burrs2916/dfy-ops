@@ -17,6 +17,7 @@ import {
   Snackbar,
   Stack,
   Switch,
+  TextField,
   ToggleButton,
   ToggleButtonGroup,
   Tooltip,
@@ -63,6 +64,31 @@ const fmtTime = (unix: number) =>
 /** 文件是否「活跃」：最近 60s 内有写入 */
 const isActive = (modified: number) => Date.now() / 1000 - modified < 60;
 
+/** 日志行时间前缀：Spring/nginx 外大多为 `yyyy-MM-dd HH:mm:ss(.SSS)`；
+ *  平台任务日志行是 `[yyyy-MM-dd HH:mm:ss.SSS] msg`。按时间搜索定位的基础。 */
+const LOG_TS_RE = /^\[?(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\]?\s*/;
+
+/** 解析行首时间戳；无日期的输入自动补当天/默认日期比较用。 */
+function parseTs(line: string): Date | null {
+  const m = LOG_TS_RE.exec(line);
+  if (!m) return null;
+  const d = new Date(`${m[1]}T${m[2].replace(",", ".")}`);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+/** 时间输入 → 比较用 Date。支持完整 `yyyy-MM-dd HH:mm:ss` 或只有 `HH:mm:ss`（补当天）。 */
+function parseQuery(q: string, fallbackDay: string): Date | null {
+  const t = q.trim().replace("T", " ");
+  const full = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(t)
+    ? t.replace(" ", "T")
+    : /^\d{2}:\d{2}(:\d{2})?$/.test(t)
+      ? `${fallbackDay}T${t.length === 5 ? `${t}:00` : t}`
+      : null;
+  if (!full) return null;
+  const d = new Date(full);
+  return isNaN(d.getTime()) ? null : d;
+}
+
 export default function MonitorCenter() {
   const [services, setServices] = useState<LogFileService[]>([]);
   const [loading, setLoading] = useState(true);
@@ -81,6 +107,10 @@ export default function MonitorCenter() {
     msg: "",
     severity: "success",
   });
+  // 时间搜索定位：输入时间片段（HH:mm:ss 或完整日期时间），定位首条 >= 该时间的行
+  const [timeQuery, setTimeQuery] = useState("");
+  const [jumpIndex, setJumpIndex] = useState<number | null>(null);
+  const jumpRef = useRef<HTMLDivElement | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
   const tickRef = useRef<number | null>(null);
 
@@ -118,6 +148,7 @@ export default function MonitorCenter() {
       const text = (r as { logs?: string }).logs ?? "";
       setLines(text.length ? text.replace(/\r/g, "").split("\n") : []);
       setLastFetch(Date.now());
+      setJumpIndex(null); // 内容已刷新，旧的定位高亮行号失效
     } catch (e) {
       setLines([`读取失败：${e instanceof Error ? e.message : String(e)}`]);
     } finally {
@@ -145,6 +176,44 @@ export default function MonitorCenter() {
       boxRef.current.scrollTop = boxRef.current.scrollHeight;
     }
   }, [lines, autoScroll]);
+
+  // 定位行高亮后滚到可见
+  useEffect(() => {
+    if (jumpIndex !== null && jumpRef.current) {
+      jumpRef.current.scrollIntoView({ block: "center" });
+    }
+  }, [jumpIndex]);
+
+  /** 按时间定位：首条时间 >= 输入的日志行。无日期输入按日志里出现最多的日期补。 */
+  const jumpToTime = () => {
+    if (!lines.length) return;
+    const dayCounts = new Map<string, number>();
+    for (const l of lines) {
+      const m = LOG_TS_RE.exec(l);
+      if (m) dayCounts.set(m[1], (dayCounts.get(m[1]) ?? 0) + 1);
+    }
+    const fallbackDay =
+      [...dayCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ??
+      new Date().toISOString().slice(0, 10);
+    const target = parseQuery(timeQuery, fallbackDay);
+    if (!target) {
+      setSnack({
+        open: true,
+        msg: "时间格式：HH:mm:ss 或 yyyy-MM-dd HH:mm:ss",
+        severity: "error",
+      });
+      return;
+    }
+    const idx = lines.findIndex((l) => {
+      const t = parseTs(l);
+      return t && t >= target;
+    });
+    if (idx < 0) {
+      setSnack({ open: true, msg: "该时间之后没有日志（检查日期/时间是否正确）", severity: "error" });
+      return;
+    }
+    setJumpIndex(idx);
+  };
 
   const selMeta = useMemo(() => {
     for (const s of services) {
@@ -366,6 +435,21 @@ export default function MonitorCenter() {
                   </MenuItem>
                 ))}
               </Select>
+              <Tooltip title="按时间定位日志行：输入 HH:mm:ss 或 yyyy-MM-dd HH:mm:ss，跳到该时间之后的第一条">
+                <Stack direction="row" spacing={0.5} alignItems="center">
+                  <TextField
+                    size="small"
+                    placeholder="10:23:45"
+                    value={timeQuery}
+                    onChange={(e) => setTimeQuery(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && jumpToTime()}
+                    sx={{ width: 120, "& input": { fontFamily: MONO_STACK, fontSize: 12 } }}
+                  />
+                  <Button size="small" onClick={jumpToTime} disabled={!sel || !lines.length}>
+                    定位
+                  </Button>
+                </Stack>
+              </Tooltip>
               <Button size="small" startIcon={<Refresh />} onClick={() => void tail()} disabled={tailBusy || !sel}>
                 刷新
               </Button>
@@ -409,27 +493,55 @@ export default function MonitorCenter() {
                   {tailBusy ? "读取中…" : "（日志为空——服务可能从未启动过，或启动后尚未写入）"}
                 </Typography>
               ) : (
-                lines.map((l, i) => (
-                  <Typography
-                    key={i}
-                    variant="caption"
-                    component="div"
-                    sx={{
-                      fontFamily: MONO_STACK,
-                      color: l.includes("ERROR") || l.includes("Exception")
-                        ? "error.light"
-                        : l.includes("WARN")
-                          ? "warning.light"
-                          : "grey.300",
-                      whiteSpace: "pre-wrap",
-                      wordBreak: "break-all",
-                      lineHeight: 1.6,
-                      opacity: autoScroll && i < lines.length - 1 ? 0.8 : 1,
-                    }}
-                  >
-                    {l}
-                  </Typography>
-                ))
+                lines.map((l, i) => {
+                  // 结构化渲染：时间戳淡化、级别着色、消息正常——同一时间格式下
+                  // 视觉列对齐，扫一眼就能按时间/级别过滤信息
+                  const m = LOG_TS_RE.exec(l);
+                  const tsLen = m ? m[0].length : 0;
+                  const rest = tsLen ? l.slice(tsLen) : l;
+                  const lv = rest.startsWith("ERROR") || /ERROR|Exception/.test(l)
+                    ? "error"
+                    : rest.startsWith("WARN")
+                      ? "warn"
+                      : "info";
+                  const isJump = i === jumpIndex;
+                  return (
+                    <Typography
+                      key={i}
+                      ref={isJump ? jumpRef : undefined}
+                      variant="caption"
+                      component="div"
+                      onClick={() => setJumpIndex(i)}
+                      sx={{
+                        fontFamily: MONO_STACK,
+                        whiteSpace: "pre", // 长行不换行：横向滚动，时间列始终对齐（换行是乱的根源）
+                        lineHeight: 1.7,
+                        cursor: "pointer",
+                        px: 0.5,
+                        borderRadius: 0.5,
+                        bgcolor: isJump ? "rgba(22,58,94,0.35)" : "transparent",
+                        "&:hover": { bgcolor: "rgba(255,255,255,0.06)" },
+                        color: "grey.300",
+                        ...(lv === "error" ? { color: "error.light", fontWeight: 600 } : {}),
+                        ...(lv === "warn" ? { color: "warning.light" } : {}),
+                        ...(m
+                          ? {
+                              "& .ts": { color: "grey.500", mr: 1 },
+                            }
+                          : {}),
+                      }}
+                    >
+                      {m ? (
+                        <>
+                          <span className="ts">{m[0].replace(/\]?\s*$/, "")}</span>
+                          {rest}
+                        </>
+                      ) : (
+                        l
+                      )}
+                    </Typography>
+                  );
+                })
               )}
             </Box>
             <Stack
