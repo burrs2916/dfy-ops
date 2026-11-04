@@ -494,11 +494,13 @@ pub async fn stop_service(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
-    if find_def(&state, &id).is_none() {
-        return Json(serde_json::json!({"ok": false, "error": "service not found"}));
-    }
+    // 克隆声明端口后再进 blocking：stop_deep 无句柄时按端口强杀外部拉起的实例
+    let def_ports = match find_def(&state, &id) {
+        Some(d) => d.ports.clone(),
+        None => return Json(serde_json::json!({"ok": false, "error": "service not found"})),
+    };
     let id_for_result = id.clone();
-    let r = blocking(move || state.procs.stop(&id_for_result)).await;
+    let r = blocking(move || state.procs.stop_deep(&id_for_result, &def_ports)).await;
     Json(serde_json::json!({
         "ok": r.is_ok(),
         "id": id,
@@ -510,14 +512,17 @@ pub async fn restart_service(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
-    if find_def(&state, &id).is_none() {
-        return Json(serde_json::json!({"ok": false, "error": "service not found"}));
-    }
+    let def_ports = match find_def(&state, &id) {
+        Some(d) => d.ports.clone(),
+        None => return Json(serde_json::json!({"ok": false, "error": "service not found"})),
+    };
     let id_for_result = id.clone();
     // stop + start 合并在同一个 blocking 任务里：stop 在 Windows 上要走 taskkill，
     // start 内含最长 30s 的就绪等待，两者都是同步阻塞，一起挪出 worker 池。
+    // stop 用 stop_deep：平台重启过/服务外部拉起时无句柄，按端口兜底强杀，
+    // 否则旧进程占着端口，紧跟着的 start 必然 bind 失败。
     let results = blocking(move || {
-        let _ = state.procs.stop(&id);
+        let _ = state.procs.stop_deep(&id, &def_ports);
         orchestrator::start_with_deps(&state.procs, &state.registry, &id)
     })
     .await;

@@ -157,15 +157,15 @@ fn act_all(
             if def.third_party {
                 return None;
             }
-            // 停止阶段：跳过当前未运行的服务，避免无意义报错
-            if !start && !procs.is_running(&id) {
-                return None;
-            }
+            // 停止不按 is_running 预过滤：它只认平台句柄，外部拉起的实例会被
+            // 漏掉（「全部停止」停不掉外部进程）。stop_deep 内部按端口判定，
+            // 端口空闲时是安全 no-op，多探测一次 netstat 无副作用
             let r = if start {
                 prepare_start(def);
                 procs.start(&id, &def.install_dir, &def.run_cmd)
             } else {
-                procs.stop(&id)
+                // stop_deep：全部停止时对「外部拉起/句柄丢失」的服务按端口兜底强杀
+                procs.stop_deep(&id, &def.ports)
             };
             Some(ActionResult {
                 id,

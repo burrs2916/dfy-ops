@@ -264,7 +264,9 @@ async fn run_flat_dir_uninstall(
         if backend_up {
             state.log("后端运行中 → 先停止平台拉起的 Java 进程…");
             state.patch(|j| j.stage = "stop".into());
-            if let Err(e) = procs.stop("dfy-backend") {
+            // stop_deep：平台重启过/外部拉起时无句柄，按 48085 兜底强杀，
+            // 否则卸载流程会带着一个杀不掉的运行中后端
+            if let Err(e) = procs.stop_deep("dfy-backend", &[48085]) {
                 state.log(format!(
                     "停止指令执行失败：{e}（目录删除后进程自然失去工作目录，复核仍会确认 48085）"
                 ));

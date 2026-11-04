@@ -915,8 +915,9 @@ pub async fn service_action(
                     .map(|r| Err::<(), String>(r.error.clone().unwrap_or_else(|| "启动失败".into())))
                     .unwrap_or(Ok(()))
             } else {
-                // 停止：句柄树 taskkill（精确杀本平台拉起的 java 进程，不误伤其他 Java 程序）
-                if let Err(e) = st.procs.stop("dfy-backend") {
+                // 停止三段兜底：句柄树 taskkill（平台拉起的 java）→ 无句柄时
+                // 按声明端口强杀外部拉起的实例（stop_deep，48085 归后端专用）
+                if let Err(e) = st.procs.stop_deep("dfy-backend", &[48085]) {
                     return Err(format!("停止指令执行失败：{e}"));
                 }
                 Ok(())

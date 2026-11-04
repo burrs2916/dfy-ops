@@ -303,6 +303,44 @@ impl ProcManager {
         Ok(())
     }
 
+    /// 停止服务（带兜底）：优先杀本平台拉起的进程树；没有句柄（平台重启过 /
+    /// 服务由外部拉起）时，`stop` 是 no-op——这正是「界面显示停止成功、
+    /// 端口仍在监听」的根源（2026-11-04 日志实锤：dfy-backend 连续 4 次
+    /// stop 后复核 48085=true）。外部进程没有句柄可杀，但端口归服务专用：
+    /// 占着声明端口的进程就是这个服务的实例，按端口强杀（复用启动前的
+    /// kill_port_occupants 通道）。
+    pub fn stop_deep(&self, id: &str, ports: &[u16]) -> std::io::Result<()> {
+        if self.children.lock().unwrap().contains_key(id) {
+            return self.stop(id);
+        }
+        crate::debug_log::entry(
+            PROC_SCOPE,
+            "INFO",
+            "stop",
+            "no_handle_fallback",
+            &format!("id={id} 无本平台进程句柄（外部拉起/平台重启丢失），按声明端口强杀占用者 ports={ports:?}"),
+        );
+        let mut killed: Vec<u32> = Vec::new();
+        for p in ports {
+            killed.extend(kill_port_occupants(*p));
+        }
+        crate::debug_log::entry(
+            PROC_SCOPE,
+            "INFO",
+            "stop",
+            "fallback_done",
+            &format!(
+                "id={id} {}",
+                if killed.is_empty() {
+                    "端口无占用，视为已停止".to_string()
+                } else {
+                    format!("已强杀端口占用者 pid={killed:?}")
+                }
+            ),
+        );
+        Ok(())
+    }
+
     /// 触发一次构建（异步、独立进程，不跟踪句柄），工作目录为 install_dir。
     /// 构建输出重定向到 `log_path`，便于前端轮询展示进度；另起线程等待进程结束
     /// 并写入结束标记（含 exit code），使前端能识别「构建完成 / 成功 / 失败」并停止轮询。

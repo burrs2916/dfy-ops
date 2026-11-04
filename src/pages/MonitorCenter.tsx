@@ -61,6 +61,13 @@ type LogFileService = {
 
 const REFRESH_OPTIONS = [3, 5, 10];
 
+// ===== 模块级缓存（组件卸载不清空）=====
+// 此前每次进监控中心都清空重拉：清单要等接口、日志要等 tail，来回切页一次卡一次。
+// 现在切页返回瞬间呈现缓存内容，后台静默刷新覆盖——体感即时打开。
+let listCache: LogFileService[] | null = null;
+let selCache: { id: string; path: string } | null = null;
+const linesCache = new Map<string, string[]>();
+
 const fmtSize = (n: number) =>
   n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
 
@@ -124,10 +131,11 @@ function parseQuery(q: string, fallbackDay: string): Date | null {
 }
 
 export default function MonitorCenter() {
-  const [services, setServices] = useState<LogFileService[]>([]);
-  const [loading, setLoading] = useState(true);
+  // 初始值直接吃模块级缓存：有缓存时跳过骨架屏，回来就是上次的画面
+  const [services, setServices] = useState<LogFileService[]>(listCache ?? []);
+  const [loading, setLoading] = useState(!listCache);
   const [error, setError] = useState<string | null>(null);
-  const [sel, setSel] = useState<{ id: string; path: string } | null>(null);
+  const [sel, setSel] = useState<{ id: string; path: string } | null>(selCache);
   const [lines, setLines] = useState<string[]>([]);
   const [live, setLive] = useState(true);
   const [intervalSecs, setIntervalSecs] = useState(3);
@@ -155,6 +163,7 @@ export default function MonitorCenter() {
   const fetchList = useCallback(async () => {
     try {
       const r = await api.logFiles();
+      listCache = r.services;
       setServices(r.services);
       setError(null);
       setSel((cur) => {
@@ -184,7 +193,9 @@ export default function MonitorCenter() {
     try {
       const r = await api.logs(sel.id, sel.path);
       const text = (r as { logs?: string }).logs ?? "";
-      setLines(text.length ? text.replace(/\r/g, "").split("\n") : []);
+      const next = text.length ? text.replace(/\r/g, "").split("\n") : [];
+      linesCache.set(sel.path, next); // 存模块缓存：切页返回免重拉
+      setLines(next);
       setLastFetch(Date.now());
       setJumpIndex(null); // 内容已刷新，旧的定位高亮行号失效
     } catch (e) {
@@ -195,8 +206,12 @@ export default function MonitorCenter() {
   }, [sel]);
 
   useEffect(() => {
-    setLines([]);
-    if (sel) void tail();
+    selCache = sel; // 记住最后查看的文件，切页返回直接恢复
+    if (!sel) return;
+    // 有缓存先呈现缓存（不闪空白），tail 成功后静默覆盖
+    const cached = linesCache.get(sel.path);
+    setLines(cached ?? []);
+    void tail();
   }, [sel, tail]);
 
   useEffect(() => {
