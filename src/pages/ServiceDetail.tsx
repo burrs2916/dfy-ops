@@ -23,11 +23,16 @@ import {
 } from "@mui/material";
 import { ArrowBack, Build, Close, ContentCopy, DnsOutlined, Download, PlayArrow, Settings } from "@mui/icons-material";
 import { api } from "../api";
-import { ColoredLogLine } from "../components/LogTerminal";
+import { LOG_BG, ColoredLogLine } from "../components/LogTerminal";
 import type { LogsResponse, ServiceEnvReport, ServiceStatus } from "../types";
 import { StatusBadge } from "../components/StatusBadge";
 import ExternalConfigPanel from "../components/ExternalConfigPanel";
 import NginxConfigPanel from "../components/NginxConfigPanel";
+
+/** 日志终端最多渲染的行数：每行是一个 Typography 组件，浏览器按 DOM 节点
+ *  逐个排版，行数上到万级会直接把页面卡死（Maven 全量构建输出很容易过万行）。
+ *  超出部分只截断显示尾部，完整内容仍可「下载」。 */
+const MAX_RENDER_LINES = 2000;
 
 /** 单行配置展示：标签 + 等宽值 + 复制按钮。纯展示，不做任何系统变更。 */
 function ConfigRow({
@@ -498,7 +503,7 @@ export default function ServiceDetail() {
                 sx={{
                   mt: 1,
                   p: 1.5,
-                  bgcolor: "#1e1e1e",
+                  bgcolor: LOG_BG,
                   borderRadius: 1,
                   fontSize: 12,
                   maxHeight: 360,
@@ -521,7 +526,22 @@ export default function ServiceDetail() {
                         （无匹配行）
                       </Typography>
                     );
-                  return filtered.map((l, i) => <ColoredLogLine key={i} line={l} />);
+                  const shown = filtered.length > MAX_RENDER_LINES ? filtered.slice(-MAX_RENDER_LINES) : filtered;
+                  return (
+                    <>
+                      {filtered.length > shown.length && (
+                        <Typography
+                          variant="caption"
+                          sx={{ display: "block", fontFamily: MONO_STACK, color: "grey.500", mb: 0.5 }}
+                        >
+                          （前 {filtered.length - shown.length} 行已省略，完整内容请点「下载」）
+                        </Typography>
+                      )}
+                      {shown.map((l, i) => (
+                        <ColoredLogLine key={i} line={l} />
+                      ))}
+                    </>
+                  );
                 })()}
               </Box>
             </CardContent>
@@ -562,7 +582,7 @@ export default function ServiceDetail() {
             sx={{
               m: 0,
               p: 1.5,
-              bgcolor: "#1e1e1e",
+              bgcolor: LOG_BG,
               borderRadius: 1,
               fontSize: 12,
               maxHeight: 420,
@@ -570,7 +590,28 @@ export default function ServiceDetail() {
             }}
           >
             {buildLogs ? (
-              buildLogs.split("\n").map((l, i) => <ColoredLogLine key={i} line={l} />)
+              (() => {
+                // Maven 全量构建输出可达上万行，逐行成组件（每行一个 Typography）
+                // 会直接卡死。只渲染尾部 MAX_RENDER_LINES 行，完整内容走「下载」。
+                const all = buildLogs.split("\n");
+                const shown = all.length > MAX_RENDER_LINES ? all.slice(-MAX_RENDER_LINES) : all;
+                const omitted = all.length - shown.length;
+                return (
+                  <>
+                    {omitted > 0 && (
+                      <Typography
+                        variant="caption"
+                        sx={{ display: "block", fontFamily: MONO_STACK, color: "grey.500", mb: 0.5 }}
+                      >
+                        （前 {omitted} 行已省略，完整内容请点下方「下载」）
+                      </Typography>
+                    )}
+                    {shown.map((l, i) => (
+                      <ColoredLogLine key={i} line={l} />
+                    ))}
+                  </>
+                );
+              })()
             ) : (
               <Typography variant="caption" sx={{ fontFamily: MONO_STACK, color: "grey.500" }}>
                 （暂无构建输出）

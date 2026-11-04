@@ -18,7 +18,8 @@ import {
 import { Check, ContentCopy, Pause, PlayArrow, Refresh } from "@mui/icons-material";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
-import { ColoredLogLine } from "../components/LogTerminal";
+import { LOG_BG, ColoredLogLine } from "../components/LogTerminal";
+import { MONO_STACK } from "../theme";
 import { useAppSettingsStore, useOpsStore } from "../store";
 import type { EnvRepairJob } from "../types";
 import { REPAIR_STAGE_LABEL, STATUS_HEX, TARGET_LABEL, ackId, loadAck, saveAck } from "./envcheck/shared";
@@ -26,34 +27,45 @@ import Stat from "./envcheck/Stat";
 import ServiceEnvSection from "./envcheck/ServiceEnvSection";
 import RepairCenter from "./envcheck/RepairCenter";
 
-/** 日志终端：深底 mono 逐条展示，关键字着色（ERROR 红 / WARN 黄 / 成功绿）。
- *  autoScroll 时每次新增日志自动滚到最新一条。 */
-function LogTerminal({ logs, autoScroll = false }: { logs: string[]; autoScroll?: boolean }) {
+/** 修复/安装任务日志面板：深底 mono 逐条展示，关键字着色
+ *  （ERROR 红 / WARN 黄 / 成功绿）。autoScroll 时自动滚到最新一条。
+ *  命名带 Job 前缀，避免和 components/LogTerminal 的共享终端混淆。 */
+function JobLogPanel({ logs, autoScroll = false }: { logs: string[]; autoScroll?: boolean }) {
   const boxRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     if (autoScroll && boxRef.current) {
       boxRef.current.scrollTop = boxRef.current.scrollHeight;
     }
-  }, [logs.length, autoScroll]);
+  }, [logs, autoScroll]);
+  // 任务日志由后端累积推送，长任务可上千条；只渲染尾部，避免 DOM 节点堆积卡顿
+  const shown = logs.length > MAX_JOB_LOG_LINES ? logs.slice(-MAX_JOB_LOG_LINES) : logs;
   return (
     <Box
       ref={boxRef}
       sx={{
         maxHeight: 200,
         overflow: "auto",
-        bgcolor: "grey.900",
+        bgcolor: LOG_BG,
         borderRadius: 1,
         px: 1.25,
         py: 0.75,
         mt: 0.75,
       }}
     >
-      {logs.map((log, i) => (
-        <ColoredLogLine key={i} line={log} dimmed={autoScroll && i < logs.length - 1} />
+      {logs.length > shown.length && (
+        <Typography variant="caption" sx={{ display: "block", fontFamily: MONO_STACK, color: "grey.500", mb: 0.5 }}>
+          （前 {logs.length - shown.length} 条已省略）
+        </Typography>
+      )}
+      {shown.map((log, i) => (
+        <ColoredLogLine key={i} line={log} dimmed={autoScroll && i < shown.length - 1} />
       ))}
     </Box>
   );
 }
+
+/** 任务日志面板最多渲染条数 */
+const MAX_JOB_LOG_LINES = 2000;
 
 /** 修复任务日志查看器（任务结束后展示）：完整回看安装/卸载过程 + 一键复制传回排查。
  *  此前任务一结束过程日志就从 UI 消失，只剩一行「安装完成」——失败现场无法回溯。 */
@@ -92,7 +104,7 @@ function RepairLogView({ job }: { job: EnvRepairJob }) {
         </Button>
       </Stack>
       <Collapse in={open}>
-        <LogTerminal logs={job.logs} />
+        <JobLogPanel logs={job.logs} />
       </Collapse>
     </Paper>
   );
@@ -384,7 +396,7 @@ export default function EnvCheck() {
             {REPAIR_STAGE_LABEL[repairJob.stage] ?? repairJob.stage}
           </Typography>
           {/* 过程可追溯（解压 → 配置 → 注册 → 验证各阶段的关键动作），自动滚动到最新 */}
-          {repairJob.logs.length > 0 && <LogTerminal logs={repairJob.logs} autoScroll />}
+          {repairJob.logs.length > 0 && <JobLogPanel logs={repairJob.logs} autoScroll />}
         </Alert>
       )}
 

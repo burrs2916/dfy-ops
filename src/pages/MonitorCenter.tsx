@@ -33,7 +33,7 @@ import FolderOpen from "@mui/icons-material/FolderOpen";
 import BackupOutlined from "@mui/icons-material/BackupOutlined";
 import DeleteOutline from "@mui/icons-material/DeleteOutline";
 import { api } from "../api";
-import { LOG_TS_RE, ColoredLogLine } from "../components/LogTerminal";
+import { LOG_BG, LOG_TS_RE, ColoredLogLine, normalizeDate } from "../components/LogTerminal";
 import { PageHeader } from "../components/PageHeader";
 
 /**
@@ -68,6 +68,19 @@ const REFRESH_OPTIONS = [3, 5, 10];
 let listCache: LogFileService[] | null = null;
 let selCache: { id: string; path: string } | null = null;
 const linesCache = new Map<string, string[]>();
+/** 日志内容缓存上限：每个文件 200 行，服务多时路径可达几十个，
+ *  不设上限会随使用时长无限增长（长行日志尤其吃内存）。超出即淘汰最旧。 */
+const LINES_CACHE_MAX = 8;
+
+function cacheLines(path: string, lines: string[]) {
+  linesCache.delete(path); // 重新插入到末尾：维持 LRU 顺序
+  linesCache.set(path, lines);
+  while (linesCache.size > LINES_CACHE_MAX) {
+    const oldest = linesCache.keys().next().value;
+    if (oldest === undefined) break;
+    linesCache.delete(oldest);
+  }
+}
 
 const fmtSize = (n: number) =>
   n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
@@ -85,15 +98,15 @@ const isActive = (modified: number) => Date.now() / 1000 - modified < 60;
 function parseTs(line: string): Date | null {
   const m = LOG_TS_RE.exec(line);
   if (!m) return null;
-  const d = new Date(`${m[1]}T${m[2].replace(",", ".")}`);
+  const d = new Date(`${normalizeDate(m[1])}T${m[2].replace(",", ".")}`);
   return isNaN(d.getTime()) ? null : d;
 }
 
-/** 时间输入 → 比较用 Date。支持完整 `yyyy-MM-dd HH:mm:ss` 或只有 `HH:mm:ss`（补当天）。 */
+/** 时间输入 → 比较用 Date。支持完整 `yyyy-MM-dd HH:mm:ss`（斜杠日期也认）或只有 `HH:mm:ss`（补当天）。 */
 function parseQuery(q: string, fallbackDay: string): Date | null {
   const t = q.trim().replace("T", " ");
-  const full = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(t)
-    ? t.replace(" ", "T")
+  const full = /^\d{4}[-/]\d{2}[-/]\d{2} \d{2}:\d{2}:\d{2}/.test(t)
+    ? normalizeDate(t).replace(" ", "T")
     : /^\d{2}:\d{2}(:\d{2})?$/.test(t)
       ? `${fallbackDay}T${t.length === 5 ? `${t}:00` : t}`
       : null;
@@ -166,7 +179,7 @@ export default function MonitorCenter() {
       const r = await api.logs(sel.id, sel.path);
       const text = (r as { logs?: string }).logs ?? "";
       const next = text.length ? text.replace(/\r/g, "").split("\n") : [];
-      linesCache.set(sel.path, next); // 存模块缓存：切页返回免重拉
+      cacheLines(sel.path, next); // 存模块缓存：切页返回免重拉
       setLines(next);
       setLastFetch(Date.now());
       setJumpIndex(null); // 内容已刷新，旧的定位高亮行号失效
@@ -215,7 +228,10 @@ export default function MonitorCenter() {
     const dayCounts = new Map<string, number>();
     for (const l of lines) {
       const m = LOG_TS_RE.exec(l);
-      if (m) dayCounts.set(m[1], (dayCounts.get(m[1]) ?? 0) + 1);
+      if (m) {
+        const day = normalizeDate(m[1]); // nginx 斜杠日期统一成横杠，避免同一日期分裂成两个 key
+        dayCounts.set(day, (dayCounts.get(day) ?? 0) + 1);
+      }
     }
     const fallbackDay =
       [...dayCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ??
@@ -553,7 +569,7 @@ export default function MonitorCenter() {
               sx={{
                 flex: 1,
                 overflow: "auto",
-                bgcolor: "grey.900",
+                bgcolor: LOG_BG,
                 minHeight: 360,
                 px: 1.5,
                 py: 1,
