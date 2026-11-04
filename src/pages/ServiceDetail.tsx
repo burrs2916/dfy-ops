@@ -23,6 +23,7 @@ import {
 } from "@mui/material";
 import { ArrowBack, Build, Close, ContentCopy, DnsOutlined, Download, PlayArrow, Settings } from "@mui/icons-material";
 import { api } from "../api";
+import { ColoredLogLine } from "../components/LogTerminal";
 import type { LogsResponse, ServiceEnvReport, ServiceStatus } from "../types";
 import { StatusBadge } from "../components/StatusBadge";
 import ExternalConfigPanel from "../components/ExternalConfigPanel";
@@ -491,31 +492,37 @@ export default function ServiceDetail() {
                   </Button>
                 </Stack>
               </Stack>
+              {/* 服务日志：关键字着色（ERROR 红 / WARN 黄 / 成功绿），与监控中心同源 */}
               <Box
                 ref={logRef}
-                component="pre"
                 sx={{
-                  m: 0,
                   mt: 1,
                   p: 1.5,
                   bgcolor: "#1e1e1e",
-                  color: "#d4d4d4",
                   borderRadius: 1,
                   fontSize: 12,
                   maxHeight: 360,
                   overflow: "auto",
-                  whiteSpace: "pre-wrap",
-                  fontFamily: MONO_STACK,
                 }}
               >
-                {logs
-                  ? logFilter
-                    ? logs
-                        .split("\n")
-                        .filter((l) => l.toLowerCase().includes(logFilter.toLowerCase()))
-                        .join("\n") || "（无匹配行）"
-                    : logs
-                  : "（暂无日志或日志路径未配置）"}
+                {(() => {
+                  if (!logs)
+                    return (
+                      <Typography variant="caption" sx={{ fontFamily: MONO_STACK, color: "grey.500" }}>
+                        （暂无日志或日志路径未配置）
+                      </Typography>
+                    );
+                  const filtered = logFilter
+                    ? logs.split("\n").filter((l) => l.toLowerCase().includes(logFilter.toLowerCase()))
+                    : logs.split("\n");
+                  if (filtered.length === 0)
+                    return (
+                      <Typography variant="caption" sx={{ fontFamily: MONO_STACK, color: "grey.500" }}>
+                        （无匹配行）
+                      </Typography>
+                    );
+                  return filtered.map((l, i) => <ColoredLogLine key={i} line={l} />);
+                })()}
               </Box>
             </CardContent>
           </Card>
@@ -550,22 +557,25 @@ export default function ServiceDetail() {
               <Chip size="small" color="error" label="构建失败" />
             )}
           </Stack>
+          {/* 构建日志：同样关键字着色，与运行日志同源 */}
           <Box
-            component="pre"
             sx={{
               m: 0,
               p: 1.5,
               bgcolor: "#1e1e1e",
-              color: "#d4d4d4",
               borderRadius: 1,
               fontSize: 12,
               maxHeight: 420,
               overflow: "auto",
-              whiteSpace: "pre-wrap",
-              fontFamily: MONO_STACK,
             }}
           >
-            {buildLogs || "（暂无构建输出）"}
+            {buildLogs ? (
+              buildLogs.split("\n").map((l, i) => <ColoredLogLine key={i} line={l} />)
+            ) : (
+              <Typography variant="caption" sx={{ fontFamily: MONO_STACK, color: "grey.500" }}>
+                （暂无构建输出）
+              </Typography>
+            )}
           </Box>
         </DialogContent>
         <DialogActions>

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { MONO_STACK } from "../theme";
 import {
   Alert,
   Badge,
@@ -19,6 +18,7 @@ import {
 import { Check, ContentCopy, Pause, PlayArrow, Refresh } from "@mui/icons-material";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
+import { ColoredLogLine } from "../components/LogTerminal";
 import { useAppSettingsStore, useOpsStore } from "../store";
 import type { EnvRepairJob } from "../types";
 import { REPAIR_STAGE_LABEL, STATUS_HEX, TARGET_LABEL, ackId, loadAck, saveAck } from "./envcheck/shared";
@@ -26,7 +26,8 @@ import Stat from "./envcheck/Stat";
 import ServiceEnvSection from "./envcheck/ServiceEnvSection";
 import RepairCenter from "./envcheck/RepairCenter";
 
-/** 日志终端：深底 mono 逐条展示。autoScroll 时每次新增日志自动滚到最新一条。 */
+/** 日志终端：深底 mono 逐条展示，关键字着色（ERROR 红 / WARN 黄 / 成功绿）。
+ *  autoScroll 时每次新增日志自动滚到最新一条。 */
 function LogTerminal({ logs, autoScroll = false }: { logs: string[]; autoScroll?: boolean }) {
   const boxRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
@@ -48,21 +49,7 @@ function LogTerminal({ logs, autoScroll = false }: { logs: string[]; autoScroll?
       }}
     >
       {logs.map((log, i) => (
-        <Typography
-          key={i}
-          variant="caption"
-          component="div"
-          sx={{
-            fontFamily: MONO_STACK,
-            color: "grey.300",
-            whiteSpace: "pre-wrap",
-            wordBreak: "break-all",
-            lineHeight: 1.6,
-            opacity: autoScroll && i < logs.length - 1 ? 0.75 : 1,
-          }}
-        >
-          {log}
-        </Typography>
+        <ColoredLogLine key={i} line={log} dimmed={autoScroll && i < logs.length - 1} />
       ))}
     </Box>
   );

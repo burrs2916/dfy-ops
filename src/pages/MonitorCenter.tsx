@@ -33,6 +33,7 @@ import FolderOpen from "@mui/icons-material/FolderOpen";
 import BackupOutlined from "@mui/icons-material/BackupOutlined";
 import DeleteOutline from "@mui/icons-material/DeleteOutline";
 import { api } from "../api";
+import { LOG_TS_RE, ColoredLogLine } from "../components/LogTerminal";
 import { PageHeader } from "../components/PageHeader";
 
 /**
@@ -79,42 +80,13 @@ const fmtTime = (unix: number) =>
 /** 文件是否「活跃」：最近 60s 内有写入 */
 const isActive = (modified: number) => Date.now() / 1000 - modified < 60;
 
-/** 日志行时间前缀：Spring/nginx 外大多为 `yyyy-MM-dd HH:mm:ss(.SSS)`；
- *  平台任务日志行是 `[yyyy-MM-dd HH:mm:ss.SSS] msg`。按时间搜索定位的基础。 */
-const LOG_TS_RE = /^\[?(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)\]?\s*/;
-
-/** 解析行首时间戳；无日期的输入自动补当天/默认日期比较用。 */
+/** 解析行首时间戳；无日期的输入自动补当天/默认日期比较用。
+ *  LOG_TS_RE 与关键字着色统一在 components/LogTerminal（全站共享）。 */
 function parseTs(line: string): Date | null {
   const m = LOG_TS_RE.exec(line);
   if (!m) return null;
   const d = new Date(`${m[1]}T${m[2].replace(",", ".")}`);
   return isNaN(d.getTime()) ? null : d;
-}
-
-/** 行内关键字 token 正则（按严重度分三组，先匹配者优先）。
- *  运维扫一眼就知道哪条是错、哪条是警示、哪条是成功——不用逐行读。 */
-const TOKEN_RE =
-  /(ERROR|FATAL|Exception|Caused by|FAILED|Failed|失败|错误|异常|拒绝|超时|无法|不能|Access denied|refused|Cannot find|No such|退出|宕)|(WARN(?:ING)?|警告|重试|retry|Retry|跳过|忽略|retrying)|(成功|完成|Started|started in|已启动|启动成功|OK|正常)/g;
-
-type Tok = { t: string; k?: "e" | "w" | "s" };
-
-/** 把一行拆成着色片段：时间前缀单独淡化，正文按关键字标色。 */
-function tokenizeLine(line: string): { ts: string | null; parts: Tok[] } {
-  const m = LOG_TS_RE.exec(line);
-  if (!m) return { ts: null, parts: [{ t: line }] };
-  const rest = line.slice(m[0].length);
-  const parts: Tok[] = [];
-  let last = 0;
-  TOKEN_RE.lastIndex = 0;
-  let mm: RegExpExecArray | null;
-  while ((mm = TOKEN_RE.exec(rest))) {
-    if (mm.index > last) parts.push({ t: rest.slice(last, mm.index) });
-    parts.push({ t: mm[0], k: mm[1] ? "e" : mm[2] ? "w" : "s" });
-    last = mm.index + mm[0].length;
-    if (mm[0].length === 0) TOKEN_RE.lastIndex++; // 防空匹配死循环
-  }
-  if (last < rest.length) parts.push({ t: rest.slice(last) });
-  return { ts: m[0].replace(/\]?\s*$/, ""), parts };
 }
 
 /** 时间输入 → 比较用 Date。支持完整 `yyyy-MM-dd HH:mm:ss` 或只有 `HH:mm:ss`（补当天）。 */
@@ -597,51 +569,16 @@ export default function MonitorCenter() {
                   {tailBusy ? "读取中…" : "（日志为空——服务可能从未启动过，或启动后尚未写入）"}
                 </Typography>
               ) : (
-                lines.map((l, i) => {
-                  const { ts, parts } = tokenizeLine(l);
-                  const hasErr = parts.some((p) => p.k === "e");
-                  const isJump = i === jumpIndex;
-                  return (
-                    <Typography
-                      key={i}
-                      ref={isJump ? jumpRef : undefined}
-                      variant="caption"
-                      component="div"
-                      onClick={() => setJumpIndex(i)}
-                      sx={{
-                        fontFamily: MONO_STACK,
-                        whiteSpace: "pre", // 长行不换行：横向滚动，时间列始终对齐（换行是乱的根源）
-                        lineHeight: 1.7,
-                        cursor: "pointer",
-                        px: 0.5,
-                        borderRadius: 0.5,
-                        // 错误行整行淡红底（关键字高亮之外的第二层信号）
-                        bgcolor: isJump
-                          ? "rgba(22,58,94,0.35)"
-                          : hasErr
-                            ? "rgba(211,47,47,0.10)"
-                            : "transparent",
-                        "&:hover": { bgcolor: isJump || hasErr ? undefined : "rgba(255,255,255,0.06)" },
-                        color: "grey.300",
-                        "& .ts": { color: "grey.500", mr: 1 },
-                        "& .e": { color: "#ff8a80", fontWeight: 700 },
-                        "& .w": { color: "#ffd54f" },
-                        "& .s": { color: "#81c784" },
-                      }}
-                    >
-                      {ts && <span className="ts">{ts}</span>}
-                      {parts.map((p, j) =>
-                        p.k ? (
-                          <span key={j} className={p.k}>
-                            {p.t}
-                          </span>
-                        ) : (
-                          <span key={j}>{p.t}</span>
-                        ),
-                      )}
-                    </Typography>
-                  );
-                })
+                lines.map((l, i) => (
+                  <ColoredLogLine
+                    key={i}
+                    line={l}
+                    noWrap // 长行不换行：横向滚动，时间列始终对齐（换行是乱的根源）
+                    highlight={i === jumpIndex}
+                    onClick={() => setJumpIndex(i)}
+                    innerRef={i === jumpIndex ? jumpRef : undefined}
+                  />
+                ))
               )}
             </Box>
             <Stack
