@@ -76,6 +76,32 @@ function parseTs(line: string): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+/** 行内关键字 token 正则（按严重度分三组，先匹配者优先）。
+ *  运维扫一眼就知道哪条是错、哪条是警示、哪条是成功——不用逐行读。 */
+const TOKEN_RE =
+  /(ERROR|FATAL|Exception|Caused by|FAILED|Failed|失败|错误|异常|拒绝|超时|无法|不能|Access denied|refused|Cannot find|No such|退出|宕)|(WARN(?:ING)?|警告|重试|retry|Retry|跳过|忽略|retrying)|(成功|完成|Started|started in|已启动|启动成功|OK|正常)/g;
+
+type Tok = { t: string; k?: "e" | "w" | "s" };
+
+/** 把一行拆成着色片段：时间前缀单独淡化，正文按关键字标色。 */
+function tokenizeLine(line: string): { ts: string | null; parts: Tok[] } {
+  const m = LOG_TS_RE.exec(line);
+  if (!m) return { ts: null, parts: [{ t: line }] };
+  const rest = line.slice(m[0].length);
+  const parts: Tok[] = [];
+  let last = 0;
+  TOKEN_RE.lastIndex = 0;
+  let mm: RegExpExecArray | null;
+  while ((mm = TOKEN_RE.exec(rest))) {
+    if (mm.index > last) parts.push({ t: rest.slice(last, mm.index) });
+    parts.push({ t: mm[0], k: mm[1] ? "e" : mm[2] ? "w" : "s" });
+    last = mm.index + mm[0].length;
+    if (mm[0].length === 0) TOKEN_RE.lastIndex++; // 防空匹配死循环
+  }
+  if (last < rest.length) parts.push({ t: rest.slice(last) });
+  return { ts: m[0].replace(/\]?\s*$/, ""), parts };
+}
+
 /** 时间输入 → 比较用 Date。支持完整 `yyyy-MM-dd HH:mm:ss` 或只有 `HH:mm:ss`（补当天）。 */
 function parseQuery(q: string, fallbackDay: string): Date | null {
   const t = q.trim().replace("T", " ");
@@ -494,16 +520,8 @@ export default function MonitorCenter() {
                 </Typography>
               ) : (
                 lines.map((l, i) => {
-                  // 结构化渲染：时间戳淡化、级别着色、消息正常——同一时间格式下
-                  // 视觉列对齐，扫一眼就能按时间/级别过滤信息
-                  const m = LOG_TS_RE.exec(l);
-                  const tsLen = m ? m[0].length : 0;
-                  const rest = tsLen ? l.slice(tsLen) : l;
-                  const lv = rest.startsWith("ERROR") || /ERROR|Exception/.test(l)
-                    ? "error"
-                    : rest.startsWith("WARN")
-                      ? "warn"
-                      : "info";
+                  const { ts, parts } = tokenizeLine(l);
+                  const hasErr = parts.some((p) => p.k === "e");
                   const isJump = i === jumpIndex;
                   return (
                     <Typography
@@ -519,25 +537,29 @@ export default function MonitorCenter() {
                         cursor: "pointer",
                         px: 0.5,
                         borderRadius: 0.5,
-                        bgcolor: isJump ? "rgba(22,58,94,0.35)" : "transparent",
-                        "&:hover": { bgcolor: "rgba(255,255,255,0.06)" },
+                        // 错误行整行淡红底（关键字高亮之外的第二层信号）
+                        bgcolor: isJump
+                          ? "rgba(22,58,94,0.35)"
+                          : hasErr
+                            ? "rgba(211,47,47,0.10)"
+                            : "transparent",
+                        "&:hover": { bgcolor: isJump || hasErr ? undefined : "rgba(255,255,255,0.06)" },
                         color: "grey.300",
-                        ...(lv === "error" ? { color: "error.light", fontWeight: 600 } : {}),
-                        ...(lv === "warn" ? { color: "warning.light" } : {}),
-                        ...(m
-                          ? {
-                              "& .ts": { color: "grey.500", mr: 1 },
-                            }
-                          : {}),
+                        "& .ts": { color: "grey.500", mr: 1 },
+                        "& .e": { color: "#ff8a80", fontWeight: 700 },
+                        "& .w": { color: "#ffd54f" },
+                        "& .s": { color: "#81c784" },
                       }}
                     >
-                      {m ? (
-                        <>
-                          <span className="ts">{m[0].replace(/\]?\s*$/, "")}</span>
-                          {rest}
-                        </>
-                      ) : (
-                        l
+                      {ts && <span className="ts">{ts}</span>}
+                      {parts.map((p, j) =>
+                        p.k ? (
+                          <span key={j} className={p.k}>
+                            {p.t}
+                          </span>
+                        ) : (
+                          <span key={j}>{p.t}</span>
+                        ),
                       )}
                     </Typography>
                   );
