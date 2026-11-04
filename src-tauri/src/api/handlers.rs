@@ -900,10 +900,12 @@ fn remove_file_with_fallback(path: &str, service_id: &str, ports: &[u16]) -> Res
     match std::fs::remove_file(sp) {
         Ok(()) => return Ok(()),
         Err(e) => {
-            // Windows 1314 / Unix EBUSY → 文件被锁，进兜底
-            let is_locked = e.kind() == std::io::ErrorKind::ResourceBusy
-                || e.to_string().to_lowercase().contains("being used")
-                || e.to_string().to_lowercase().contains("denied");
+            // 锁定判定：1.83 才有 std::io::ErrorKind::ResourceBusy，我们 MSRV 1.77
+            // 靠错误字符串匹配更靠谱（Windows "being used / denied"，Unix EBUSY 文本也会走到这里）
+            let msg = e.to_string().to_lowercase();
+            let is_locked = msg.contains("being used")
+                || msg.contains("denied")
+                || msg.contains("busy");
             if !is_locked {
                 return Err(format!("删除失败：{e}"));
             }

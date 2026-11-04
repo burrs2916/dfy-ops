@@ -67,8 +67,9 @@ pub fn strip_ansi(s: &str) -> String {
 }
 
 fn utf8_char_len(b: u8) -> usize {
-    if b < 0x80 { 1 }
-    else if b < 0xc0 { 1 } // continuation byte shouldn't start a char, copy as-is
+    // 单字节字符或 continuation byte（后者不应单独出现）都按 1 字节复制，
+    // 不做边界判定让它变成替换符——用户需要看到乱码里的原始字节来诊断。
+    if b < 0xc0 { 1 }
     else if b < 0xe0 { 2 }
     else if b < 0xf0 { 3 }
     else { 4 }
