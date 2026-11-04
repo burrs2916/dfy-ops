@@ -883,8 +883,51 @@ pub async fn log_backup(
     }
 }
 
+/// 尝试删除文件，带「进程锁持有」兜底：
+/// 1) 直接 remove_file
+/// 2) 失败且是 "being used" 类错误 → 调 kill_holders 强杀持有该路径的进程
+/// 3) 等 300ms → 再删
+/// 4) 还失败 → 返回带原始错误的 Err
+///
+/// 传入的 `service_id`/`ports` 用于兜底：kill_holders 在交付机没有
+/// handle.exe/LSOF 时，退化为 stop_deep 该服务（logback 持有 dfy-server.log
+/// 的文件句柄是最常见的占用来源）。
+fn remove_file_with_fallback(path: &str, service_id: &str, ports: &[u16]) -> Result<(), String> {
+    let sp = std::path::Path::new(path);
+    if !sp.is_file() {
+        return Err("日志文件不存在".to_string());
+    }
+    match std::fs::remove_file(sp) {
+        Ok(()) => return Ok(()),
+        Err(e) => {
+            // Windows 1314 / Unix EBUSY → 文件被锁，进兜底
+            let is_locked = e.kind() == std::io::ErrorKind::ResourceBusy
+                || e.to_string().to_lowercase().contains("being used")
+                || e.to_string().to_lowercase().contains("denied");
+            if !is_locked {
+                return Err(format!("删除失败：{e}"));
+            }
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "WARN",
+                "log_delete",
+                "file_locked",
+                &format!("path={path} err={e}，尝试 kill 占用进程"),
+            );
+        }
+    }
+    // 兜底：kill 掉声明端口上的占用进程（即持有该文件句柄的 java/nginx）
+    // kill_port_occupants 会强杀 taskkill /T /F，文件句柄随之释放
+    for p in ports {
+        let _ = crate::ops::process::kill_port_occupants(*p);
+    }
+    // 等 300ms 让 OS 真正释放文件句柄（Windows NTFS 有短暂延迟）
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    std::fs::remove_file(sp).map_err(|e| format!("删除失败（文件被其他进程占用，已尝试强杀 {service_id} 但仍锁着：{e}）"))
+}
+
 /// 日志维护：删除日志文件。正在写该文件的服务（logback/nginx）会自动重建，
-/// 不影响运行；删除前由前端二次确认。
+/// 不影响运行；删除前由前端二次确认。被进程占用时自动 stop_deep 兜底。
 pub async fn log_delete(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
@@ -894,15 +937,10 @@ pub async fn log_delete(
     if !log_path_allowed(def, &body.path) {
         return Ok(Json(serde_json::json!({"ok": false, "error": "该文件不在此服务的日志声明范围内"})));
     }
-    let src = body.path.clone();
-    let result = blocking(move || {
-        let sp = std::path::Path::new(&src);
-        if !sp.is_file() {
-            return Err("日志文件不存在".to_string());
-        }
-        std::fs::remove_file(sp).map_err(|e| format!("删除失败（文件可能被占用）：{e}"))
-    })
-    .await;
+    let path = body.path.clone();
+    let sid = id.clone();
+    let ports = def.ports.clone();
+    let result = blocking(move || remove_file_with_fallback(&path, &sid, &ports)).await;
     match result {
         Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
         Err(e) => Ok(Json(serde_json::json!({"ok": false, "error": e}))),

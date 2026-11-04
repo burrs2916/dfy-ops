@@ -1,14 +1,89 @@
 use std::io::{Read, Seek, SeekFrom};
 
+/// 剥掉 ANSI/C/VT 100 转义序列。
+/// Spring Boot logback 在非 TTY 环境（文件输出）也可能因为 Windows Java
+/// 的 isatty() bug 误判为 TTY，往 dfy-server.log 写入 `\x1b[32m` 这种彩色
+/// 控制序列——前端直接渲染就是乱码。我们在后端 tail 读文件时就剥掉，
+/// 监控中心/服务详情等所有日志入口都干净，不用每个前端页面各处理一次。
+///
+/// 覆盖：CSI 序列（\x1b[...m/...K 等）、OSC 序列（\x1b]...\x07）、
+/// 单字符转义（\x07、\x1b\\）。不碰 UTF-8 多字节字符（ANSI 只用单字节）。
+pub fn strip_ansi(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // CSI: \x1b[ 后跟任意个 [0-9;?] 再跟字母
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            let mut j = i + 2;
+            while j < bytes.len() {
+                let b = bytes[j];
+                if (0x30..=0x3f).contains(&b) {
+                    j += 1;
+                } else if b.is_ascii_alphabetic() {
+                    j += 1;
+                    break;
+                } else {
+                    break;
+                }
+            }
+            i = j;
+        // OSC: \x1b] 后跟任意字符直到 \x07 或 \x1b\\
+        } else if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b']' {
+            let mut j = i + 2;
+            while j < bytes.len() {
+                if bytes[j] == 0x07 {
+                    j += 1;
+                    break;
+                } else if bytes[j] == 0x1b && j + 1 < bytes.len() && bytes[j + 1] == b'\\' {
+                    j += 2;
+                    break;
+                }
+                j += 1;
+            }
+            i = j;
+        // APC/DCS/PM 等：\x1bPX 到 ST
+        } else if bytes[i] == 0x1b && i + 1 < bytes.len() && (bytes[i + 1] == b'P' || bytes[i + 1] == b'(' || bytes[i + 1] == b')') {
+            let mut j = i + 2;
+            while j + 1 < bytes.len() {
+                if bytes[j] == 0x1b && bytes[j + 1] == b'\\' {
+                    j += 2;
+                    break;
+                }
+                j += 1;
+            }
+            i = j;
+        } else if bytes[i] == 0x07 {
+            // BEL 单字符
+            i += 1;
+        } else {
+            // 安全复制：按 UTF-8 边界前进
+            let n = utf8_char_len(bytes[i]);
+            out.push_str(&s[i..i + n]);
+            i += n;
+        }
+    }
+    out
+}
+
+fn utf8_char_len(b: u8) -> usize {
+    if b < 0x80 { 1 }
+    else if b < 0xc0 { 1 } // continuation byte shouldn't start a char, copy as-is
+    else if b < 0xe0 { 2 }
+    else if b < 0xf0 { 3 }
+    else { 4 }
+}
+
 /// 日志字节解码：优先按 UTF-8；无效时回退 GBK。
 /// 写入端已在 v0.2.54 统一 UTF-8（logging.charset + file.encoding），
 /// 但存量 GBK 文件（历史日志、其他未托管服务）仍会被 tail 读到——
 /// 纯 lossy 会把 GBK 中文全部变成替换符，监控中心看起来就是大片乱码。
 pub fn decode_log_bytes(bytes: &[u8]) -> String {
-    match std::str::from_utf8(bytes) {
+    let decoded = match std::str::from_utf8(bytes) {
         Ok(s) => s.to_string(),
         Err(_) => encoding_rs::GBK.decode(bytes).0.into_owned(),
-    }
+    };
+    strip_ansi(&decoded)
 }
 
 /// 读取日志文件末尾 `lines` 行。
