@@ -54,6 +54,8 @@ type LogFileService = {
   id: string;
   name: string;
   running: boolean;
+  archiveCount: number;
+  archiveBytes: number;
   files: LogFileMeta[];
 };
 
@@ -134,6 +136,10 @@ export default function MonitorCenter() {
   const [autoScroll, setAutoScroll] = useState(true);
   // 日志维护
   const [confirmDel, setConfirmDel] = useState(false);
+  // 归档管理：批量清理滚动归档/备份衍生（keepDays=0 全清；主日志永不删）
+  const [cleanup, setCleanup] = useState<{ id: string; name: string; count: number; bytes: number } | null>(null);
+  const [cleanupKeep, setCleanupKeep] = useState(0);
+  const [cleaning, setCleaning] = useState(false);
   const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" }>({
     open: false,
     msg: "",
@@ -309,6 +315,30 @@ export default function MonitorCenter() {
     }
   };
 
+  // 归档管理：按保留天数批量清理该服务的滚动归档/备份衍生（keepDays=0 全清）
+  const doCleanup = async () => {
+    if (!cleanup) return;
+    setCleaning(true);
+    try {
+      const r = await api.cleanupArchives(cleanup.id, cleanupKeep);
+      if (r.ok) {
+        setSnack({
+          open: true,
+          msg: `已清理 ${r.removed} 个归档，释放 ${fmtSize(r.bytes)}`,
+          severity: "success",
+        });
+        setCleanup(null);
+        void fetchList();
+      } else {
+        setSnack({ open: true, msg: "清理失败：" + (r.errors?.join("；") ?? "未知错误"), severity: "error" });
+      }
+    } catch (e) {
+      setSnack({ open: true, msg: "清理失败：" + (e instanceof Error ? e.message : String(e)), severity: "error" });
+    } finally {
+      setCleaning(false);
+    }
+  };
+
   return (
     <Box sx={{ p: 2.5, maxWidth: 1400, mx: "auto" }}>
       <PageHeader
@@ -377,6 +407,17 @@ export default function MonitorCenter() {
                     sx={{ height: 20, fontSize: 11, ml: "auto" }}
                   />
                   <Chip size="small" label={`${s.files.length} 个日志`} sx={{ height: 20, fontSize: 11 }} />
+                  {s.archiveCount > 0 && (
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label={`归档 ${s.archiveCount} · ${fmtSize(s.archiveBytes)}`}
+                      sx={{ height: 20, fontSize: 11 }}
+                      onClick={() =>
+                        setCleanup({ id: s.id, name: s.name, count: s.archiveCount, bytes: s.archiveBytes })
+                      }
+                    />
+                  )}
                 </Stack>
                 {s.files.length === 0 ? (
                   <Typography variant="caption" color="text.disabled" sx={{ px: 2.5, py: 0.5, display: "block" }}>
@@ -635,6 +676,37 @@ export default function MonitorCenter() {
           <Button onClick={() => setConfirmDel(false)}>取消</Button>
           <Button onClick={() => void doDelete()} color="error" variant="contained">
             删除
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* 归档清理确认：主日志永不删，只清滚动归档/备份衍生 */}
+      <Dialog open={!!cleanup} onClose={() => setCleanup(null)}>
+        <DialogTitle>清理归档日志？</DialogTitle>
+        <DialogContent>
+          <DialogContentText component="div">
+            <Typography variant="body2" sx={{ mb: 1 }}>
+              {cleanup?.name}：{cleanup?.count} 个归档文件，共 {fmtSize(cleanup?.bytes ?? 0)}
+            </Typography>
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+              只清理滚动归档（.gz）与备份衍生（.prev / .bak），正在写入的主日志文件不会删除，服务运行不受影响。
+            </Typography>
+            <Select
+              size="small"
+              fullWidth
+              value={cleanupKeep}
+              onChange={(e) => setCleanupKeep(Number(e.target.value))}
+            >
+              <MenuItem value={0}>全部清理</MenuItem>
+              <MenuItem value={7}>只清理 7 天前的</MenuItem>
+              <MenuItem value={30}>只清理 30 天前的</MenuItem>
+            </Select>
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCleanup(null)}>取消</Button>
+          <Button onClick={() => void doCleanup()} color="error" variant="contained" disabled={cleaning}>
+            {cleaning ? "清理中…" : "清理"}
           </Button>
         </DialogActions>
       </Dialog>

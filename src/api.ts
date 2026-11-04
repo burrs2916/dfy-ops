@@ -86,13 +86,15 @@ export const api = {
       { method: "POST" },
     ),
   listServices: () => request<ServiceStatus[]>("/api/services"),
-  // 监控中心：全部服务的日志文件清单（运行状态 + 文件大小/最后修改）
+  // 监控中心：全部服务的日志文件清单（运行状态 + 文件大小/最后修改 + 归档占用统计）
   logFiles: () =>
     request<{
       services: {
         id: string;
         name: string;
         running: boolean;
+        archiveCount: number;
+        archiveBytes: number;
         files: { path: string; name: string; size: number; modified: number }[];
       }[];
     }>("/api/log-files"),
@@ -130,6 +132,12 @@ export const api = {
     request<{ ok: boolean; error?: string }>(
       `/api/services/${id}/logs/delete`,
       { method: "POST", body: JSON.stringify({ path }), headers: { "Content-Type": "application/json" } },
+    ),
+  // 归档管理：批量清理归档/衍生日志。keepDays=0 清全部；主日志永不删。
+  cleanupArchives: (id: string, keepDays: number) =>
+    request<{ ok: boolean; removed: number; bytes: number; errors: string[] }>(
+      `/api/services/${id}/logs/cleanup-archives`,
+      { method: "POST", body: JSON.stringify({ keepDays }), headers: { "Content-Type": "application/json" } },
     ),
   diagnosis: () => request<DiagnosisResponse>("/api/diagnosis"),
   envCheck: (id: string) =>

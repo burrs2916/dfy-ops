@@ -682,10 +682,19 @@ pub async fn log_files(State(state): State<Arc<AppState>>) -> Json<serde_json::V
                         .unwrap_or(0)
                         .cmp(&a["modified"].as_u64().unwrap_or(0))
                 });
+                // 归档占用汇总：运维看「积了多少、该不该清」，一键清理看这里
+                let (archive_count, archive_bytes) = files
+                    .iter()
+                    .filter(|f| f["derived"].as_bool().unwrap_or(false))
+                    .fold((0u64, 0u64), |(n, b), f| {
+                        (n + 1, b + f["size"].as_u64().unwrap_or(0))
+                    });
                 serde_json::json!({
                     "id": d.id,
                     "name": d.name,
                     "running": running.get(&d.id).copied().unwrap_or(false),
+                    "archiveCount": archive_count,
+                    "archiveBytes": archive_bytes,
                     "files": files,
                 })
             })
@@ -743,6 +752,89 @@ fn log_path_allowed(def: &crate::ops::registry::ServiceDef, p: &str) -> bool {
 }
 
 #[derive(Deserialize)]
+pub struct LogCleanupBody {
+    /// 保留最近 N 天的归档；None/0 = 全部清理。主日志文件永不删除。
+    keep_days: Option<u32>,
+}
+
+/// 归档管理：批量清理某服务的归档/衍生日志（滚动 gz、.prev、.bak-*）。
+/// 只动白名单内的衍生文件，正在写入的主日志永不删；运行中的服务不受影响。
+pub async fn log_cleanup_archives(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<LogCleanupBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    // 克隆声明路径后再进 blocking 闭包：find_def 返回的引用借自 state，
+    // 闭包要求 'static，直接捕获 def 编译不过
+    let log_paths: Vec<String> = find_def(&state, &id)
+        .ok_or(StatusCode::NOT_FOUND)?
+        .log_paths
+        .clone();
+    let keep_days = body.keep_days.unwrap_or(0);
+    let cutoff = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0))
+    .saturating_sub(keep_days as u64 * 86400);
+    let result = blocking(move || {
+        let mut removed = 0u64;
+        let mut bytes = 0u64;
+        let mut errors: Vec<String> = Vec::new();
+        for lp in &log_paths {
+            let lpb = std::path::Path::new(lp);
+            if lpb.is_dir() {
+                continue; // 目录声明（edge-conductor）不做批量清理，避免误删范围过大
+            }
+            let (dir, name) = match (lpb.parent(), lpb.file_name()) {
+                (Some(d), Some(n)) => (d.to_path_buf(), n.to_string_lossy().to_string()),
+                _ => continue,
+            };
+            let prefix = format!("{name}.");
+            let rd = match std::fs::read_dir(&dir) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            for e in rd.flatten() {
+                let ep = e.path();
+                if !ep.is_file() {
+                    continue;
+                }
+                let en = e.file_name().to_string_lossy().to_string();
+                if !en.starts_with(&prefix) || en.ends_with(".pid") {
+                    continue;
+                }
+                let size = std::fs::metadata(&ep).map(|m| m.len()).unwrap_or(0);
+                let mtime = std::fs::metadata(&ep)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                if keep_days > 0 && mtime >= cutoff {
+                    continue; // 保留期内，跳过
+                }
+                match std::fs::remove_file(&ep) {
+                    Ok(()) => {
+                        removed += 1;
+                        bytes += size;
+                    }
+                    Err(e) => errors.push(format!("{en}: {e}")),
+                }
+            }
+        }
+        (removed, bytes, errors)
+    })
+    .await;
+    let (removed, bytes, errors) = result;
+    Ok(Json(serde_json::json!({
+        "ok": errors.is_empty(),
+        "removed": removed,
+        "bytes": bytes,
+        "errors": errors,
+    })))
+}
+
+#[derive(Deserialize)]
 pub struct LogMaintainBody {
     path: String,
 }
@@ -755,7 +847,7 @@ pub async fn log_backup(
     axum::Json(body): axum::Json<LogMaintainBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
-    if !log_path_allowed(&def, &body.path) {
+    if !log_path_allowed(def, &body.path) {
         return Ok(Json(serde_json::json!({"ok": false, "error": "该文件不在此服务的日志声明范围内"})));
     }
     let src = body.path.clone();
@@ -794,7 +886,7 @@ pub async fn log_delete(
     axum::Json(body): axum::Json<LogMaintainBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
-    if !log_path_allowed(&def, &body.path) {
+    if !log_path_allowed(def, &body.path) {
         return Ok(Json(serde_json::json!({"ok": false, "error": "该文件不在此服务的日志声明范围内"})));
     }
     let src = body.path.clone();

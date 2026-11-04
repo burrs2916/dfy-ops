@@ -174,6 +174,11 @@ pub fn router(state: Arc<AppState>) -> Router {
             "/api/services/:id/logs/delete",
             axum::routing::post(handlers::log_delete),
         )
+        // 归档管理：批量清理归档/衍生日志（可保留最近 N 天，主日志永不删）
+        .route(
+            "/api/services/:id/logs/cleanup-archives",
+            axum::routing::post(handlers::log_cleanup_archives),
+        )
         .route("/api/diagnosis", axum::routing::get(handlers::diagnosis))
         .route("/api/env", axum::routing::get(handlers::env_check_all))
         .route(
