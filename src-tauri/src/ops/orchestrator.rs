@@ -130,6 +130,19 @@ pub fn stop_order(defs: &[ServiceDef]) -> Result<Vec<String>, String> {
     Ok(start_order(defs)?.into_iter().rev().collect())
 }
 
+/// 启动前置：清掉占用服务端口的残留孤儿进程（上一轮停止未杀干净/用户手动
+/// 关窗口/平台重启丢 pid）。端口空闲时无操作；重复点「启动」时相当于先清旧
+/// 再起新（隐式重启语义，避免新旧进程抢端口双双失败）。
+fn prepare_start(def: &ServiceDef) {
+    // remote_only：端口在远程机器上，本机 netstat 查不到、也不能清
+    if def.remote_only {
+        return;
+    }
+    if let Some(port) = def.ports.first() {
+        crate::ops::process::kill_port_occupants(*port);
+    }
+}
+
 fn act_all(
     procs: &ProcManager,
     defs: &[ServiceDef],
@@ -149,6 +162,7 @@ fn act_all(
                 return None;
             }
             let r = if start {
+                prepare_start(def);
                 procs.start(&id, &def.install_dir, &def.run_cmd)
             } else {
                 procs.stop(&id)
@@ -183,6 +197,7 @@ pub fn start_all(procs: &ProcManager, defs: &[ServiceDef]) -> Vec<ActionResult> 
             .filter_map(|id| {
                 let def = defs.iter().find(|d| d.id == id)?;
                 if !procs.is_running(&id) {
+                    prepare_start(def);
                     if let Err(e) = procs.start(&id, &def.install_dir, &def.run_cmd) {
                         return Some(ActionResult {
                             id,
@@ -251,6 +266,7 @@ pub fn start_with_deps(procs: &ProcManager, defs: &[ServiceDef], id: &str) -> Ve
                     return None;
                 }
                 if !procs.is_running(&sid) {
+                    prepare_start(def);
                     if let Err(e) = procs.start(&sid, &def.install_dir, &def.run_cmd) {
                         return Some(ActionResult {
                             id: sid,

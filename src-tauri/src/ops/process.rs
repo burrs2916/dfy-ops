@@ -327,6 +327,71 @@ impl ProcManager {
     }
 }
 
+/// 启动前端口残留清理：上一轮停止未杀干净的孤儿进程（用户手动关闭控制台
+/// 窗口 / taskkill 失败 / 平台自身重启丢了 pid 记录）会一直占着服务端口，
+/// 新进程 bind 失败秒退——「明明停了、启动还是失败」的主因。启动前发现
+/// 端口仍被监听就强杀占用者（运维语义：该端口归此服务专用）。
+/// 返回被杀的 PID 列表（空 = 端口本来就空闲，无需处理）。
+pub fn kill_port_occupants(port: u16) -> Vec<u32> {
+    let mut killed = Vec::new();
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        if let Ok(out) = Command::new("netstat")
+            .args(["-ano", "-p", "tcp"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+        {
+            let snap = parse_netstat_snapshot(&String::from_utf8_lossy(&out.stdout));
+            let pids: Vec<u32> = snap
+                .into_iter()
+                .filter(|(_, ports)| ports.contains(&port))
+                .map(|(pid, _)| pid)
+                .collect();
+            for pid in pids {
+                let r = Command::new("taskkill")
+                    .args(["/PID", &pid.to_string(), "/T", "/F"])
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .output();
+                let ok = r.as_ref().map(|o| o.status.success()).unwrap_or(false);
+                crate::debug_log::entry(
+                    PROC_SCOPE,
+                    if ok { "INFO" } else { "WARN" },
+                    "start_prepare",
+                    "kill_port_orphan",
+                    &format!("port={port} pid={pid} 清理{}", if ok { "成功" } else { "失败" }),
+                );
+                if ok {
+                    killed.push(pid);
+                }
+            }
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        if let Ok(out) = Command::new("lsof")
+            .args(["-t", "-i", &format!("TCP:{port}")])
+            .output()
+        {
+            for line in String::from_utf8_lossy(&out.stdout).lines() {
+                if let Ok(pid) = line.trim().parse::<i32>() {
+                    let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
+                    crate::debug_log::entry(
+                        PROC_SCOPE,
+                        "INFO",
+                        "start_prepare",
+                        "kill_port_orphan",
+                        &format!("port={port} pid={pid} 已清理"),
+                    );
+                    killed.push(pid as u32);
+                }
+            }
+        }
+    }
+    killed
+}
+
 /// 一次全量进程快照：把「逐服务起子进程」的探测合并为「一轮子进程 + 内存匹配」。
 ///
 /// Windows 上每次 tasklist / netstat / PowerShell 都是 0.1-2s 的子进程调用，
