@@ -19,15 +19,67 @@ import {
   Stack,
   Typography,
 } from "@mui/material";
-import { Close, ContentCopy, Download, MoreVert, Pause, PlayArrow, Refresh } from "@mui/icons-material";
+import { Close, ContentCopy, DnsOutlined, Download, HealthAndSafety, MoreVert, Pause, PlayArrow, Refresh, Update } from "@mui/icons-material";
 import Menu from "@mui/material/Menu";
 import MenuItem from "@mui/material/MenuItem";
+import { alpha } from "@mui/material/styles";
 import { useOpsStore, useAppSettingsStore } from "../store";
 import { ServiceCard } from "../components/ServiceCard";
 import ReadinessCard from "../components/ReadinessCard";
 import { PageHeader } from "../components/PageHeader";
 import { api } from "../api";
 import type { DiagnosisResponse } from "../types";
+
+/** 首页统计卡：左侧品牌色图标锚点 + 右侧标签/大数字，替代原先的白框裸数字 */
+function StatCard({
+  label,
+  icon,
+  children,
+}: {
+  label: string;
+  icon: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <Paper variant="outlined" sx={{ p: 2, borderRadius: 2, height: "100%" }}>
+      <Stack direction="row" spacing={1.5} alignItems="center">
+        <Box
+          sx={{
+            width: 40,
+            height: 40,
+            borderRadius: 2,
+            display: "grid",
+            placeItems: "center",
+            bgcolor: alpha("#1e3f66", 0.08),
+            color: "#1e3f66",
+            flexShrink: 0,
+          }}
+        >
+          {icon}
+        </Box>
+        <Box sx={{ minWidth: 0 }}>
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block", lineHeight: 1.4 }}>
+            {label}
+          </Typography>
+          {children}
+        </Box>
+      </Stack>
+    </Paper>
+  );
+}
+
+/** 内容分区标题：组名 + 数量徽标 + 延伸分隔线，替代原先孤零零一行灰色小字 */
+function SectionHeader({ title, count }: { title: string; count: number }) {
+  return (
+    <Stack direction="row" spacing={1.5} alignItems="center">
+      <Typography variant="overline" color="text.secondary" sx={{ flexShrink: 0 }}>
+        {title}
+      </Typography>
+      <Chip size="small" variant="outlined" label={`${count} 个`} sx={{ flexShrink: 0 }} />
+      <Divider sx={{ flex: 1 }} />
+    </Stack>
+  );
+}
 
 export default function Dashboard() {
   const {
@@ -259,70 +311,52 @@ export default function Dashboard() {
         }
       />
 
-      {/* 聚合数字：一眼看到全局健康度 */}
+      {/* 聚合数字：图标锚点 + 大数字，一眼看到全局健康度 */}
       <Grid container spacing={2}>
         <Grid item xs={6} sm={3}>
-          <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 2 }}>
-            <Typography variant="caption" color="text.secondary">
-              部署就绪
-            </Typography>
-            <Typography variant="h4" sx={{ mt: 0.5, fontFamily: MONO_STACK, fontVariantNumeric: "tabular-nums" }}>
+          <StatCard label="部署就绪" icon={<DnsOutlined fontSize="small" />}>
+            <Typography variant="h5" sx={{ fontFamily: MONO_STACK, fontVariantNumeric: "tabular-nums", fontWeight: 800, lineHeight: 1.15 }}>
               {services.filter((s) => s.installed).length}
-              <Typography variant="body2" color="text.secondary" sx={{ ml: 0.5, fontSize: "1rem" }}>
+              <Typography component="span" variant="body2" color="text.secondary" sx={{ ml: 0.5 }}>
                 / {services.length}
               </Typography>
             </Typography>
-          </Paper>
+          </StatCard>
         </Grid>
         <Grid item xs={6} sm={3}>
-          <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 2 }}>
-            <Typography variant="caption" color="text.secondary">
-              运行中
-            </Typography>
+          <StatCard label="运行中" icon={<PlayArrow fontSize="small" />}>
             <Typography
-              variant="h4"
-              sx={{ mt: 0.5, fontFamily: MONO_STACK, fontVariantNumeric: "tabular-nums" }}
+              variant="h5"
+              sx={{ fontFamily: MONO_STACK, fontVariantNumeric: "tabular-nums", fontWeight: 800, lineHeight: 1.15 }}
               color={services.filter((s) => s.running).length > 0 ? "primary.main" : "text.secondary"}
             >
               {services.filter((s) => s.running).length}
             </Typography>
-          </Paper>
+          </StatCard>
         </Grid>
         <Grid item xs={6} sm={3}>
-          <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 2 }}>
-            <Typography variant="caption" color="text.secondary">
-              健康
-            </Typography>
+          <StatCard label="健康" icon={<HealthAndSafety fontSize="small" />}>
             <Typography
-              variant="h4"
-              sx={{ mt: 0.5, fontFamily: MONO_STACK, fontVariantNumeric: "tabular-nums" }}
+              variant="h5"
+              sx={{ fontFamily: MONO_STACK, fontVariantNumeric: "tabular-nums", fontWeight: 800, lineHeight: 1.15 }}
               color={healthyCount === services.length && services.length > 0 ? "primary.main" : "warning.main"}
             >
               {healthyCount}
             </Typography>
-          </Paper>
+          </StatCard>
         </Grid>
         <Grid item xs={6} sm={3}>
-          <Paper variant="outlined" sx={{ p: 2.5, borderRadius: 2 }}>
-            <Typography variant="caption" color="text.secondary">
-              上次更新
-            </Typography>
+          <StatCard label="上次更新" icon={<Update fontSize="small" />}>
             <Typography
               variant="body2"
-              sx={{
-                mt: 1.25,
-                fontFamily: MONO_STACK,
-                fontVariantNumeric: "tabular-nums",
-                fontWeight: 600,
-                fontSize: "1rem",
-              }}
+              sx={{ fontFamily: MONO_STACK, fontVariantNumeric: "tabular-nums", fontWeight: 700, fontSize: "1.05rem", lineHeight: 1.3 }}
             >
               {lastUpdate ? lastUpdate.toLocaleTimeString("zh-CN") : "—"}
             </Typography>
-            <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 0.25 }}>
+            <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
               实时刷新{pollingActive ? "中" : "已暂停"}
             </Typography>
-          </Paper>
+          </StatCard>
         </Grid>
       </Grid>
 
@@ -357,29 +391,15 @@ export default function Dashboard() {
         </Alert>
       )}
 
-      <Typography variant="overline" color="text.secondary">
-        自研服务
-      </Typography>
+      <SectionHeader title="自研服务" count={own.length} />
       {cardGrid(own)}
 
       {thirdParty.length > 0 && (
         <>
-          <Typography variant="overline" color="text.secondary">
-            第三方依赖（系统级中间件 · 只检测不托管）
-          </Typography>
+          <SectionHeader title="第三方依赖（系统级中间件 · 只检测不托管）" count={thirdParty.length} />
           {cardGrid(thirdParty)}
         </>
       )}
-
-      <Paper variant="outlined" sx={{ p: 2 }}>
-        <Typography variant="subtitle2" gutterBottom>
-          说明
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          本平台为运维控制台，统一管理 DFY 系列异构服务的构建、启停、健康检查与日志。
-          未包含任何远程运维（终端/SSH/SFTP/远程桌面）功能。
-        </Typography>
-      </Paper>
 
       <Snackbar
         open={snack.open}
