@@ -652,6 +652,28 @@ pub async fn log_files(State(state): State<Arc<AppState>>) -> Json<serde_json::V
                         }
                     } else if pb.is_file() {
                         files.push(log_file_meta(pb));
+                        // 归档/衍生文件一并收录：logback 按天滚动出的
+                        // dfy-server.log.2026-11-04.0.gz、轮转的 .prev.log、
+                        // 平台备份的 .bak-*。长年运行归档会积累得非常大，
+                        // 运维必须在监控中心里看到并可清理（2026-11-04 定案）
+                        if let (Some(dir), Some(name)) = (pb.parent(), pb.file_name()) {
+                            if let Ok(rd) = std::fs::read_dir(dir) {
+                                let prefix = format!("{}.", name.to_string_lossy());
+                                for e in rd.flatten() {
+                                    let ep = e.path();
+                                    if !ep.is_file() {
+                                        continue;
+                                    }
+                                    let en = e.file_name();
+                                    let en = en.to_string_lossy();
+                                    if en.starts_with(&prefix) {
+                                        let mut m = log_file_meta(&ep);
+                                        m["derived"] = serde_json::Value::Bool(true);
+                                        files.push(m);
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
                 files.sort_by(|a, b| {
@@ -702,7 +724,20 @@ fn log_path_allowed(def: &crate::ops::registry::ServiceDef, p: &str) -> bool {
         if lpb.is_dir() {
             pp.starts_with(lpb) && pp.extension().map(|x| x == "log").unwrap_or(false)
         } else {
+            // 精确匹配声明文件，或其归档/备份衍生（同目录、以「声明名.」开头）：
+            // dfy-server.log.2026-11-04.0.gz / .prev.log / .bak-* 与主日志同属
+            // 维护范围，删除前同样受白名单约束
             lpb == pp
+                || (pp.parent() == lpb.parent()
+                    && pp
+                        .file_name()
+                        .zip(lpb.file_name())
+                        .map(|(pf, lf)| {
+                            let pf = pf.to_string_lossy();
+                            let lf = lf.to_string_lossy();
+                            pf.starts_with(&format!("{lf}.")) && !pf.ends_with(".pid")
+                        })
+                        .unwrap_or(false))
         }
     })
 }

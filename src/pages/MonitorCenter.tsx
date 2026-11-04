@@ -43,7 +43,13 @@ import { PageHeader } from "../components/PageHeader";
  * - 日志维护：备份（.bak-时间戳）/ 删除（二次确认），路径白名单由后端校验
  */
 
-type LogFileMeta = { path: string; name: string; size: number; modified: number };
+type LogFileMeta = {
+  path: string;
+  name: string;
+  size: number;
+  modified: number;
+  derived?: boolean;
+};
 type LogFileService = {
   id: string;
   name: string;
@@ -402,6 +408,22 @@ export default function MonitorCenter() {
                           <Box sx={{ minWidth: 0, flex: 1 }}>
                             <Typography variant="body2" noWrap>
                               {f.name}
+                              {f.derived && (
+                                <Box
+                                  component="span"
+                                  sx={{
+                                    ml: 0.75,
+                                    px: 0.5,
+                                    borderRadius: 0.5,
+                                    fontSize: 10,
+                                    bgcolor: "action.selected",
+                                    color: "text.secondary",
+                                    verticalAlign: "middle",
+                                  }}
+                                >
+                                  归档
+                                </Box>
+                              )}
                             </Typography>
                             <Typography variant="caption" color="text.secondary" noWrap display="block">
                               {fmtSize(f.size)} · {fmtTime(f.modified)}
