@@ -5,32 +5,41 @@ import {
   Button,
   Chip,
   CircularProgress,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogContentText,
+  DialogTitle,
   Divider,
   MenuItem,
   Paper,
   Select,
+  Snackbar,
   Stack,
   Switch,
   ToggleButton,
   ToggleButtonGroup,
+  Tooltip,
   Typography,
   FormControlLabel,
 } from "@mui/material";
+import Alert from "@mui/material/Alert";
 import Pause from "@mui/icons-material/Pause";
 import PlayArrow from "@mui/icons-material/PlayArrow";
 import Refresh from "@mui/icons-material/Refresh";
 import Description from "@mui/icons-material/Description";
 import FolderOpen from "@mui/icons-material/FolderOpen";
-import Tooltip from "@mui/material/Tooltip";
+import BackupOutlined from "@mui/icons-material/BackupOutlined";
+import DeleteOutline from "@mui/icons-material/DeleteOutline";
 import { api } from "../api";
 import { PageHeader } from "../components/PageHeader";
 
 /**
- * 监控中心：统一管理所有服务的运行状况与日志。
- * 左列 = 服务 × 日志文件清单（运行状态点 + 大小/最后修改，修改时间倒序——
- * 「日志还在不在动」一眼可辨，停更通常意味着进程卡死或退出）；
- * 右侧 = 选中文件的日志终端（可选自动跟随刷新，默认 3s）。
- * 单文件读取走 /api/services/:id/logs?path=（后端按 registry 日志声明白名单校验）。
+ * 监控中心：统一管理「本地可收集日志」的服务（2026-11-04 用户定案）。
+ * - 左列按服务分组：服务名 + 运行状态 + 组内日志文件（远程服务如 MinIO/VerneMQ
+ *   自身日志无法收集，后端已过滤，不在这里运维）
+ * - 右侧日志终端：选中文件的尾部 200 行，自动跟随刷新，ERROR/WARN 着色
+ * - 日志维护：备份（.bak-时间戳）/ 删除（二次确认），路径白名单由后端校验
  */
 
 type LogFileMeta = { path: string; name: string; size: number; modified: number };
@@ -41,7 +50,7 @@ type LogFileService = {
   files: LogFileMeta[];
 };
 
-const REFRESH_OPTIONS = [0, 3, 5, 10];
+const REFRESH_OPTIONS = [3, 5, 10];
 
 const fmtSize = (n: number) =>
   n >= 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`;
@@ -58,15 +67,20 @@ export default function MonitorCenter() {
   const [services, setServices] = useState<LogFileService[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // 选中：{服务id, 文件path}。默认选第一个有日志的服务最新文件（多数场景就是 dfy-server.log）
   const [sel, setSel] = useState<{ id: string; path: string } | null>(null);
-  // 日志终端状态
   const [lines, setLines] = useState<string[]>([]);
   const [live, setLive] = useState(true);
   const [intervalSecs, setIntervalSecs] = useState(3);
   const [tailBusy, setTailBusy] = useState(false);
   const [lastFetch, setLastFetch] = useState<number | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
+  // 日志维护
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [snack, setSnack] = useState<{ open: boolean; msg: string; severity: "success" | "error" }>({
+    open: false,
+    msg: "",
+    severity: "success",
+  });
   const boxRef = useRef<HTMLDivElement | null>(null);
   const tickRef = useRef<number | null>(null);
 
@@ -75,7 +89,6 @@ export default function MonitorCenter() {
       const r = await api.logFiles();
       setServices(r.services);
       setError(null);
-      // 首次加载：默认选中修改时间最新的文件
       setSel((cur) => {
         if (cur) return cur;
         const all = r.services.flatMap((s) =>
@@ -93,7 +106,7 @@ export default function MonitorCenter() {
 
   useEffect(() => {
     void fetchList();
-    const id = window.setInterval(() => void fetchList(), 10000); // 清单 10s 刷一次（状态点/大小/修改时间）
+    const id = window.setInterval(() => void fetchList(), 10000);
     return () => window.clearInterval(id);
   }, [fetchList]);
 
@@ -112,13 +125,11 @@ export default function MonitorCenter() {
     }
   }, [sel]);
 
-  // 选中变化立即拉一次
   useEffect(() => {
     setLines([]);
     if (sel) void tail();
   }, [sel, tail]);
 
-  // 自动跟随轮询
   useEffect(() => {
     if (tickRef.current) window.clearInterval(tickRef.current);
     if (live && intervalSecs > 0 && sel) {
@@ -129,14 +140,12 @@ export default function MonitorCenter() {
     };
   }, [live, intervalSecs, sel, tail]);
 
-  // 自动滚动到最新行
   useEffect(() => {
     if (autoScroll && boxRef.current) {
       boxRef.current.scrollTop = boxRef.current.scrollHeight;
     }
   }, [lines, autoScroll]);
 
-  // 当前选中文件的元信息（活跃灯/大小/时间显示）
   const selMeta = useMemo(() => {
     for (const s of services) {
       const f = s.files.find((x) => x.path === sel?.path);
@@ -163,25 +172,52 @@ export default function MonitorCenter() {
     await api.openConfigDir(sel.id, "logs").catch(() => {});
   };
 
+  const doBackup = async () => {
+    if (!sel) return;
+    try {
+      const r = await api.backupLog(sel.id, sel.path);
+      if (r.ok) {
+        setSnack({ open: true, msg: `已备份为 ${(r.backup ?? "").split(/[\\/]/).pop()}`, severity: "success" });
+        void fetchList();
+      } else {
+        setSnack({ open: true, msg: r.error ?? "备份失败", severity: "error" });
+      }
+    } catch (e) {
+      setSnack({ open: true, msg: "备份失败：" + (e instanceof Error ? e.message : String(e)), severity: "error" });
+    }
+  };
+
+  const doDelete = async () => {
+    if (!sel) return;
+    setConfirmDel(false);
+    try {
+      const r = await api.deleteLog(sel.id, sel.path);
+      if (r.ok) {
+        setSnack({
+          open: true,
+          msg: "已删除。正在写入的服务（logback/nginx）会自动重建日志文件",
+          severity: "success",
+        });
+        setLines([]);
+        void fetchList();
+      } else {
+        setSnack({ open: true, msg: r.error ?? "删除失败", severity: "error" });
+      }
+    } catch (e) {
+      setSnack({ open: true, msg: "删除失败：" + (e instanceof Error ? e.message : String(e)), severity: "error" });
+    }
+  };
+
   return (
     <Box sx={{ p: 2.5, maxWidth: 1400, mx: "auto" }}>
       <PageHeader
         title="监控中心"
-        description="统一查看各服务运行状况与运行日志：列表按最后修改时间排序，活跃（60 秒内有写入）的文件带绿灯；选中文件可自动跟随刷新。"
+        description="统一管理本地服务的运行日志：按服务分组，活跃（60 秒内有写入）的文件带绿灯；支持备份与删除。远程部署的服务（MinIO/VerneMQ/Redis 等）自身日志无法收集，不在此运维。"
       />
 
-      {/* 总览条 */}
       <Stack direction="row" spacing={1.5} sx={{ mt: 2, mb: 1.5, flexWrap: "wrap" }}>
-        <Chip size="small" color="success" label={`运行中 ${runningCount}/${services.length}`} />
+        <Chip size="small" color="success" label={`本地服务运行中 ${runningCount}/${services.length}`} />
         <Chip size="small" variant="outlined" label={`日志文件 ${fileCount} 个`} />
-        {selMeta && (
-          <Chip
-            size="small"
-            variant="outlined"
-            label={`正在查看：${selMeta.service.name} / ${selMeta.file.name}`}
-            onDelete={() => setSel(null)}
-          />
-        )}
       </Stack>
 
       {loading ? (
@@ -197,10 +233,10 @@ export default function MonitorCenter() {
         </Paper>
       ) : (
         <Stack direction="row" spacing={2} alignItems="stretch">
-          {/* 左列：服务 × 文件清单 */}
+          {/* 左列：按服务分组的日志清单 */}
           <Paper
             variant="outlined"
-            sx={{ width: 340, flexShrink: 0, overflowY: "auto", maxHeight: "calc(100vh - 250px)" }}
+            sx={{ width: 350, flexShrink: 0, overflowY: "auto", maxHeight: "calc(100vh - 250px)" }}
           >
             {services.map((s, i) => (
               <Box key={s.id}>
@@ -209,23 +245,37 @@ export default function MonitorCenter() {
                   direction="row"
                   spacing={1}
                   alignItems="center"
-                  sx={{ px: 1.5, py: 1, bgcolor: "action.hover" }}
+                  sx={{
+                    px: 1.5,
+                    py: 1.1,
+                    bgcolor: "rgba(22,58,94,0.06)",
+                    borderBottom: "1px solid",
+                    borderColor: "divider",
+                    position: "sticky",
+                    top: 0,
+                    zIndex: 1,
+                  }}
                 >
                   <Box
                     sx={{
-                      width: 8,
-                      height: 8,
+                      width: 9,
+                      height: 9,
                       borderRadius: "50%",
                       bgcolor: s.running ? "success.main" : "grey.400",
                       flexShrink: 0,
                     }}
                   />
-                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
                     {s.name}
                   </Typography>
-                  <Typography variant="caption" color="text.secondary" sx={{ ml: "auto" }}>
-                    {s.running ? "运行中" : "已停止"}
-                  </Typography>
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={s.running ? "运行中" : "已停止"}
+                    color={s.running ? "success" : "default"}
+                    sx={{ height: 20, fontSize: 11, ml: "auto" }}
+                  />
+                  <Chip size="small" label={`${s.files.length} 个日志`} sx={{ height: 20, fontSize: 11 }} />
                 </Stack>
                 {s.files.length === 0 ? (
                   <Typography variant="caption" color="text.disabled" sx={{ px: 2.5, py: 0.5, display: "block" }}>
@@ -242,7 +292,8 @@ export default function MonitorCenter() {
                         alignItems="center"
                         onClick={() => setSel({ id: s.id, path: f.path })}
                         sx={{
-                          px: 2.5,
+                          pl: 3,
+                          pr: 1.5,
                           py: 0.75,
                           cursor: "pointer",
                           bgcolor: active ? "rgba(22,58,94,0.08)" : "transparent",
@@ -260,10 +311,7 @@ export default function MonitorCenter() {
                             <Typography variant="caption" color="text.secondary" noWrap display="block">
                               {fmtSize(f.size)} · {fmtTime(f.modified)}
                               {isActive(f.modified) && (
-                                <Box
-                                  component="span"
-                                  sx={{ color: "success.main", fontWeight: 700, ml: 0.5 }}
-                                >
+                                <Box component="span" sx={{ color: "success.main", fontWeight: 700, ml: 0.5 }}>
                                   ● 活跃
                                 </Box>
                               )}
@@ -278,7 +326,7 @@ export default function MonitorCenter() {
             ))}
           </Paper>
 
-          {/* 右侧：日志终端 */}
+          {/* 右侧：日志终端 + 维护操作 */}
           <Paper variant="outlined" sx={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
             <Stack
               direction="row"
@@ -286,10 +334,18 @@ export default function MonitorCenter() {
               alignItems="center"
               sx={{ px: 1.5, py: 1, borderBottom: "1px solid", borderColor: "divider", flexWrap: "wrap" }}
             >
-              <Typography variant="subtitle2" sx={{ mr: "auto" }}>
-                {selMeta ? `${selMeta.service.name} / ${selMeta.file.name}` : "未选择日志文件"}
-              </Typography>
-              {selMeta?.file && isActive(selMeta.file.modified) && (
+              <Box sx={{ mr: "auto", minWidth: 0 }}>
+                {/* 服务名大标题：一眼看清当前看的是哪个服务的日志 */}
+                <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.2 }} noWrap>
+                  {selMeta ? selMeta.service.name : "未选择日志文件"}
+                </Typography>
+                <Tooltip title={selMeta?.file.path ?? ""}>
+                  <Typography variant="caption" color="text.secondary" noWrap display="block">
+                    {selMeta ? selMeta.file.name : "从左侧选择要查看的日志"}
+                  </Typography>
+                </Tooltip>
+              </Box>
+              {selMeta && isActive(selMeta.file.modified) && (
                 <Chip size="small" color="success" label="日志活跃" />
               )}
               <FormControlLabel
@@ -304,7 +360,7 @@ export default function MonitorCenter() {
                 disabled={!live}
                 sx={{ height: 30, fontSize: 12, width: 82 }}
               >
-                {REFRESH_OPTIONS.filter((v) => v > 0).map((v) => (
+                {REFRESH_OPTIONS.map((v) => (
                   <MenuItem key={v} value={v}>
                     {v} 秒
                   </MenuItem>
@@ -316,6 +372,16 @@ export default function MonitorCenter() {
               <Tooltip title="保存当前显示的尾部日志（最多 200 行）">
                 <Button size="small" onClick={downloadLog} disabled={!sel}>
                   保存尾部
+                </Button>
+              </Tooltip>
+              <Tooltip title="复制一份为 <原名>.bak-时间戳，留一份现场再清理">
+                <Button size="small" startIcon={<BackupOutlined />} onClick={() => void doBackup()} disabled={!sel}>
+                  备份
+                </Button>
+              </Tooltip>
+              <Tooltip title="删除此日志文件；正在写入的服务会自动重建">
+                <Button size="small" color="error" startIcon={<DeleteOutline />} onClick={() => setConfirmDel(true)} disabled={!sel}>
+                  删除
                 </Button>
               </Tooltip>
               <Button size="small" startIcon={<FolderOpen />} onClick={() => void openLogDir()} disabled={!sel}>
@@ -395,6 +461,38 @@ export default function MonitorCenter() {
           </Paper>
         </Stack>
       )}
+
+      {/* 删除确认：日志删了就没了（除非先备份） */}
+      <Dialog open={confirmDel} onClose={() => setConfirmDel(false)}>
+        <DialogTitle>删除日志文件？</DialogTitle>
+        <DialogContent>
+          <DialogContentText component="div">
+            <Typography variant="body2" sx={{ fontFamily: MONO_STACK, mb: 1 }}>
+              {selMeta?.file.path}
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              删除后不可恢复。如需留存现场请先「备份」。正在写入此文件的服务（如 logback/nginx）会在下次写入时自动重建空文件，不影响运行。
+            </Typography>
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmDel(false)}>取消</Button>
+          <Button onClick={() => void doDelete()} color="error" variant="contained">
+            删除
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      <Snackbar
+        open={snack.open}
+        autoHideDuration={5000}
+        onClose={() => setSnack((s) => ({ ...s, open: false }))}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      >
+        <Alert severity={snack.severity} variant="filled" sx={{ minWidth: 300 }}>
+          {snack.msg}
+        </Alert>
+      </Snackbar>
     </Box>
   );
 }

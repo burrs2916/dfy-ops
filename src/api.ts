@@ -120,6 +120,17 @@ export const api = {
     request<LogsResponse>(
       `/api/services/${id}/logs${path ? `?path=${encodeURIComponent(path)}` : ""}`,
     ),
+  // 监控中心日志维护：备份/删除（路径白名单由后端按 registry 声明校验）
+  backupLog: (id: string, path: string) =>
+    request<{ ok: boolean; backup?: string; error?: string }>(
+      `/api/services/${id}/logs/backup`,
+      { method: "POST", body: JSON.stringify({ path }), headers: { "Content-Type": "application/json" } },
+    ),
+  deleteLog: (id: string, path: string) =>
+    request<{ ok: boolean; error?: string }>(
+      `/api/services/${id}/logs/delete`,
+      { method: "POST", body: JSON.stringify({ path }), headers: { "Content-Type": "application/json" } },
+    ),
   diagnosis: () => request<DiagnosisResponse>("/api/diagnosis"),
   envCheck: (id: string) =>
     request<ServiceEnvReport>(`/api/services/${id}/env`),

@@ -633,6 +633,10 @@ pub async fn log_files(State(state): State<Arc<AppState>>) -> Json<serde_json::V
             .collect();
         s.registry
             .iter()
+            // 只收录「本地可收集日志」的服务：log_paths 为空 = 纯远程或无日志
+            // （Redis/VerneMQ/MinIO 等远程部署，其自身日志无法在运维端收集，
+            // 2026-11-04 用户定案：远程服务不进监控中心，只运维本地）
+            .filter(|d| !d.log_paths.is_empty())
             .map(|d| {
                 let mut files: Vec<serde_json::Value> = Vec::new();
                 for p in &d.log_paths {
@@ -687,6 +691,111 @@ fn log_file_meta(p: &std::path::Path) -> serde_json::Value {
         "size": size,
         "modified": modified,
     })
+}
+
+/// 校验 path 是否在某服务的日志声明白名单内（与 service_logs ?path= 同一规则）。
+/// 返回 (允许, 服务的 install_dir)——install_dir 用于日志目录兜底定位。
+fn log_path_allowed(def: &crate::ops::registry::ServiceDef, p: &str) -> bool {
+    def.log_paths.iter().any(|lp| {
+        let lpb = std::path::Path::new(lp);
+        let pp = std::path::Path::new(p);
+        if lpb.is_dir() {
+            pp.starts_with(lpb) && pp.extension().map(|x| x == "log").unwrap_or(false)
+        } else {
+            lpb == pp
+        }
+    })
+}
+
+#[derive(Deserialize)]
+pub struct LogMaintainBody {
+    path: String,
+}
+
+/// 日志维护：备份（复制为 <原名>.bak-YYYYMMDD-HHMMSS）。
+/// 日志不断增长，运维在删除/轮转前先留一份现场。
+pub async fn log_backup(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<LogMaintainBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
+    if !log_path_allowed(&def, &body.path) {
+        return Ok(Json(serde_json::json!({"ok": false, "error": "该文件不在此服务的日志声明范围内"})));
+    }
+    let src = body.path.clone();
+    let result = blocking(move || {
+        let sp = std::path::Path::new(&src);
+        if !sp.is_file() {
+            return Err("日志文件不存在".to_string());
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        // 时间戳 → 本地时间格式（简单按 secs 格式化，交付机本地时区由前端展示负责）
+        let (y, mo, d, h, mi, s) = unix_to_local(ts);
+        let name = sp
+            .file_name()
+            .map(|x| x.to_string_lossy().to_string())
+            .unwrap_or_else(|| "log".into());
+        let dst = sp.with_file_name(format!("{name}.bak-{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}"));
+        std::fs::copy(sp, &dst)
+            .map(|_| format!("{}", dst.display()))
+            .map_err(|e| format!("备份失败：{e}"))
+    })
+    .await;
+    match result {
+        Ok(dst) => Ok(Json(serde_json::json!({"ok": true, "backup": dst}))),
+        Err(e) => Ok(Json(serde_json::json!({"ok": false, "error": e}))),
+    }
+}
+
+/// 日志维护：删除日志文件。正在写该文件的服务（logback/nginx）会自动重建，
+/// 不影响运行；删除前由前端二次确认。
+pub async fn log_delete(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<LogMaintainBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
+    if !log_path_allowed(&def, &body.path) {
+        return Ok(Json(serde_json::json!({"ok": false, "error": "该文件不在此服务的日志声明范围内"})));
+    }
+    let src = body.path.clone();
+    let result = blocking(move || {
+        let sp = std::path::Path::new(&src);
+        if !sp.is_file() {
+            return Err("日志文件不存在".to_string());
+        }
+        std::fs::remove_file(sp).map_err(|e| format!("删除失败（文件可能被占用）：{e}"))
+    })
+    .await;
+    match result {
+        Ok(()) => Ok(Json(serde_json::json!({"ok": true}))),
+        Err(e) => Ok(Json(serde_json::json!({"ok": false, "error": e}))),
+    }
+}
+
+/// unix secs → (年,月,日,时,分,秒) 本地时区。chrono 未引入，用 libc localtime_r
+/// 代价也不小——直接用 std 无法本地化，此处用 UTC+8 硬偏移（交付机固定在国内）。
+fn unix_to_local(ts: u64) -> (u32, u32, u32, u32, u32, u32) {
+    let ts = ts + 8 * 3600;
+    let days = (ts / 86400) as i64;
+    let rem = ts % 86400;
+    let (h, mi, s) = ((rem / 3600) as u32, ((rem % 3600) / 60) as u32, (rem % 60) as u32);
+    // civil_from_days（Howard Hinnant 算法）
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097);
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = if m <= 2 { y + 1 } else { y } as u32;
+    (y, m, d, h, mi, s)
 }
 
 pub async fn diagnosis(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {

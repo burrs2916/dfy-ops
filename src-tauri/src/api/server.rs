@@ -165,6 +165,15 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         // 监控中心：日志文件清单（服务 × 文件元信息）
         .route("/api/log-files", axum::routing::get(handlers::log_files))
+        // 监控中心日志维护：备份/删除（白名单校验同读取）
+        .route(
+            "/api/services/:id/logs/backup",
+            axum::routing::post(handlers::log_backup),
+        )
+        .route(
+            "/api/services/:id/logs/delete",
+            axum::routing::post(handlers::log_delete),
+        )
         .route("/api/diagnosis", axum::routing::get(handlers::diagnosis))
         .route("/api/env", axum::routing::get(handlers::env_check_all))
         .route(

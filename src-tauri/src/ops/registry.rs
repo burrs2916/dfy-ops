@@ -160,7 +160,10 @@ fn builtin() -> Vec<ServiceDef> {
             process_names: vec![],
             product_names: vec![],
             health_url: None,
-            log_paths: vec!["C:/services/nginx/logs/access.log".into()],
+            log_paths: vec![
+                "C:/services/nginx/logs/access.log".into(),
+                "C:/services/nginx/logs/error.log".into(),
+            ],
             depends_on: vec!["dfy-backend".into(), "nginx".into()],
             is_daemon: true,
             third_party: false,
@@ -185,7 +188,11 @@ fn builtin() -> Vec<ServiceDef> {
             process_names: vec![],
             product_names: vec![],
             health_url: None,
-            log_paths: vec![],
+            // 网关控制台用独立 nginx 实例（-p 指向前缀目录），日志在自己目录下
+            log_paths: vec![
+                "C:/services/gateway-console/logs/access.log".into(),
+                "C:/services/gateway-console/logs/error.log".into(),
+            ],
             depends_on: vec![],
             is_daemon: true,
             third_party: false,
@@ -361,7 +368,6 @@ fn builtin() -> Vec<ServiceDef> {
             log_paths: vec![
                 "C:/services/nginx/logs/access.log".into(),
                 "C:/services/nginx/logs/error.log".into(),
-                "C:/services/nginx/logs/nginx.pid".into(),
             ],
             depends_on: vec![],
             is_daemon: true,
