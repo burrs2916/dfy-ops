@@ -308,11 +308,13 @@ export default function ServiceDetail() {
                 <Chip size="small" label={`依赖 ${svc.dependsOn.join(", ")}`} />
               )}
             </Stack>
-            {svc.thirdParty ? (
+            {svc.thirdParty || svc.staticSite ? (
               <Alert severity="info" sx={{ mt: 2 }}>
-                {svc.remoteOnly
-                  ? "远程部署依赖：由虚拟机/远程主机承载，平台只检测远程端点可达性，不提供启停与构建。"
-                  : "第三方依赖：由 Windows 服务管理器 / 容器运行时管理，平台只检测运行状态，不提供启停与构建。"}
+                {svc.staticSite
+                  ? "静态托管服务：nginx 反代静态目录承载，无独立进程。检测 = 端口可达性；更新前端请直接覆盖部署目录。"
+                  : svc.remoteOnly
+                    ? "远程部署依赖：由虚拟机/远程主机承载，平台只检测远程端点可达性，不提供启停与构建。"
+                    : "第三方依赖：由 Windows 服务管理器 / 容器运行时管理，平台只检测运行状态，不提供启停与构建。"}
               </Alert>
             ) : (
               <Stack direction="row" spacing={1.5} sx={{ mt: 2.5 }} flexWrap="wrap">

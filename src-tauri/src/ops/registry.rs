@@ -93,6 +93,8 @@ pub struct ServiceDef {
     /// 第三方依赖（VerneMQ / MinIO 等系统级中间件）：平台只检测不托管——
     /// 不参与「全部启动/停止」、不提供启停按钮、runCmd 无意义。运行由
     /// Windows 服务管理器或容器运行时负责。
+    /// 也适用于「静态托管」服务（dfy-ui：nginx 反代静态目录，无独立进程）——
+    /// 检测 = 对声明端口做 TCP 探测，正常部署后即「运行中」。
     #[serde(rename = "thirdParty", default)]
     pub third_party: bool,
     /// 纯远程第三方（Redis/VerneMQ/MinIO/GreptimeDB）：本机不安装、不检测本地进程/端口，
@@ -101,6 +103,11 @@ pub struct ServiceDef {
     /// 安装与维护不再提供这些服务的本地安装/卸载入口。
     #[serde(rename = "remoteOnly", default)]
     pub remote_only: bool,
+    /// 静态托管服务（dfy-ui：nginx 反代静态目录，无独立进程）：检测 = 本地
+    /// 声明端口 TCP 探测；无启停（部署 = 放置静态目录 + nginx 在跑），不参与
+    /// 全部启停；prepare_start 不得清其端口（80 属于 nginx，清了误杀 nginx）。
+    #[serde(rename = "staticSite", default)]
+    pub static_site: bool,
     /// 声明式依赖检查（环境检查按此探测，不在代码里硬编码路径/端口）
     #[serde(default)]
     pub requires: Vec<RequiresCheck>,
@@ -139,6 +146,7 @@ fn builtin() -> Vec<ServiceDef> {
             is_daemon: true,
             third_party: false,
             remote_only: false,
+            static_site: false,
             requires: vec![RequiresCheck {
                 id: "jar".into(),
                 label: "后端 JAR 产物".into(),
@@ -154,9 +162,13 @@ fn builtin() -> Vec<ServiceDef> {
             java_major: None,
             install_dir: "C:/services/dfy-ui-admin-vue3-master".into(),
             build_cmd: Some("pnpm build:prod".into()),
-            // 静态目录：nginx 服务统一反代，dfy-ui 不独立启动进程
+            // 静态目录：nginx 服务统一反代，dfy-ui 不独立启动进程。
+            // 2026-11-05 用户定案：前端不需要「启动」，检测 = 端口可达。
+            // 走 static_site（静态托管）语义：无启停按钮、不参与全部启停、
+            // prepare_start 不清端口（80 属于 nginx）；声明 nginx 站口 80，
+            // 检测即 TCP 探测——用户正常部署后立即显示「运行中」。
             run_cmd: String::new(),
-            ports: vec![],
+            ports: vec![80],
             process_names: vec![],
             product_names: vec![],
             health_url: None,
@@ -168,6 +180,7 @@ fn builtin() -> Vec<ServiceDef> {
             is_daemon: true,
             third_party: false,
             remote_only: false,
+            static_site: true,
             requires: vec![RequiresCheck {
                 id: "dist".into(),
                 label: "前端 dist 目录".into(),
@@ -197,6 +210,7 @@ fn builtin() -> Vec<ServiceDef> {
             is_daemon: true,
             third_party: false,
             remote_only: false,
+            static_site: false,
             requires: vec![],
             description: "Angular 19 网关控制台，静态托管。".into(),
         },
@@ -218,6 +232,7 @@ fn builtin() -> Vec<ServiceDef> {
             is_daemon: true,
             third_party: false,
             remote_only: false,
+            static_site: false,
             // GreptimeDB/VerneMQ/MinIO 均为远程部署：无任何本地二进制/路径检查项
             //（曾经声明的 greptime 本地二进制检查已随远程化移除，勿再添加）。
             requires: vec![],
@@ -243,6 +258,7 @@ fn builtin() -> Vec<ServiceDef> {
             is_daemon: false,
             third_party: false,
             remote_only: false,
+            static_site: false,
             requires: vec![],
             description: "空间数据驱动程序桌面客户端；无端口，按镜像名判「跑没跑」、卸载注册表判「装没装」（非常驻，不参与批量启动）。".into(),
         },
@@ -265,6 +281,7 @@ fn builtin() -> Vec<ServiceDef> {
             is_daemon: true,
             third_party: true,
             remote_only: true,
+            static_site: false,
             requires: vec![],
             description: "远程部署的 MQTT broker（Erlang/OTP）：平台不安装不托管，检测 = 「远程部署」配置页指向的端点可达性（MQTT 18830）。".into(),
         },
@@ -287,6 +304,7 @@ fn builtin() -> Vec<ServiceDef> {
             is_daemon: true,
             third_party: true,
             remote_only: true,
+            static_site: false,
             requires: vec![],
             description: "远程部署的 S3 兼容对象存储：平台不安装不托管，检测 = 「远程部署」配置页指向的端点可达性（API 9000）。".into(),
         },
@@ -309,6 +327,7 @@ fn builtin() -> Vec<ServiceDef> {
             is_daemon: true,
             third_party: true,
             remote_only: true,
+            static_site: false,
             requires: vec![],
             description: "边缘计算的附属时序库：随 Edge Conductor 一同启动，平台不安装不托管，只做「远程部署」配置页指向的端点可达性检测（HTTP 4000）。".into(),
         },
@@ -329,6 +348,7 @@ fn builtin() -> Vec<ServiceDef> {
             is_daemon: true,
             third_party: true,
             remote_only: false,
+            static_site: false,
             requires: vec![],
             description: "第三方业务数据库，平台只检测不托管；实际监听端口由进程反查（本机由 OrbStack 容器提供，走端口兜底探测）。".into(),
         },
@@ -350,6 +370,7 @@ fn builtin() -> Vec<ServiceDef> {
             is_daemon: true,
             third_party: true,
             remote_only: true,
+            static_site: false,
             requires: vec![],
             description: "远程部署模式的缓存服务：本机不安装，检测目标为「远程部署」配置页托管的远程端点（默认 192.168.56.101:6379）；连接不可达时请在远程部署配置中检查主机/端口/密码。".into(),
         },
@@ -373,6 +394,7 @@ fn builtin() -> Vec<ServiceDef> {
             is_daemon: true,
             third_party: false,
             remote_only: false,
+            static_site: false,
             requires: vec![],
             description: "Nginx 反向代理：监听 80 端口，默认反代 /api 到后端 48085，root 指向 dfy-ui dist。".into(),
         },

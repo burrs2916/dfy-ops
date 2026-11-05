@@ -24,6 +24,8 @@ export interface ServiceStatus {
   thirdParty: boolean;
   /** 纯远程部署（Redis/VerneMQ/MinIO）：本机不安装，检测 = 托管端点可达性；UI 提示用远程承载语义 */
   remoteOnly: boolean;
+  /** 静态托管（dfy-ui：nginx 反代静态目录）：无独立进程，检测 = 本地端口可达；UI 隐藏启停按钮 */
+  staticSite: boolean;
   /** 「已安装」（Windows 卸载注册表判定）。false=确认未安装；未声明 productNames 的服务恒为 true（不适用） */
   installed: boolean;
   description: string;

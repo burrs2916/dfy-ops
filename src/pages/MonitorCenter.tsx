@@ -554,25 +554,30 @@ export default function MonitorCenter() {
           {/* 右侧：日志终端 + 维护操作 */}
           <Paper variant="outlined" sx={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
             <Stack
-              direction="row"
-              spacing={1}
-              alignItems="center"
-              sx={{ px: 1.5, py: 1, borderBottom: "1px solid", borderColor: "divider", flexWrap: "wrap" }}
+              spacing={0.75}
+              // 布局稳定（2026-11-05 用户定案）：上下两层——第一行「服务名+活跃+文件名」
+              // 占满整行，文件名独享剩余宽度基本不截断；第二行工具按钮，窄窗口时在
+              // 按钮区内自行折行（rowGap 保持间距），标题与按钮互不挤压、位置稳定。
+              sx={{ px: 1.5, py: 1, borderBottom: "1px solid", borderColor: "divider" }}
             >
-              <Box sx={{ mr: "auto", minWidth: 0 }}>
-                {/* 服务名大标题：一眼看清当前看的是哪个服务的日志 */}
-                <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.2 }} noWrap>
+              <Stack direction="row" spacing={1} alignItems="center">
+                <Typography variant="subtitle1" sx={{ fontWeight: 700, lineHeight: 1.2, flexShrink: 0 }}>
                   {selMeta ? selMeta.service.name : "未选择日志文件"}
                 </Typography>
+                {selMeta && isActive(selMeta.file.modified) && (
+                  <Chip size="small" color="success" label="日志活跃" sx={{ height: 18, fontSize: 10, flexShrink: 0 }} />
+                )}
                 <Tooltip title={selMeta?.file.path ?? ""}>
-                  <Typography variant="caption" color="text.secondary" noWrap display="block">
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                  >
                     {selMeta ? selMeta.file.name : "从左侧选择要查看的日志"}
                   </Typography>
                 </Tooltip>
-              </Box>
-              {selMeta && isActive(selMeta.file.modified) && (
-                <Chip size="small" color="success" label="日志活跃" />
-              )}
+              </Stack>
+              <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: "wrap", rowGap: 0.75 }}>
               <FormControlLabel
                 control={<Switch size="small" checked={live} onChange={(e) => setLive(e.target.checked)} />}
                 label={<Typography variant="caption">自动刷新</Typography>}
@@ -627,6 +632,7 @@ export default function MonitorCenter() {
               <Button size="small" startIcon={<FolderOpen />} onClick={() => void openLogDir()} disabled={!sel}>
                 打开目录
               </Button>
+              </Stack>
             </Stack>
             <Box
               ref={boxRef}

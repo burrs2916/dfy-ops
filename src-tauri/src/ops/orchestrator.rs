@@ -135,7 +135,8 @@ pub fn stop_order(defs: &[ServiceDef]) -> Result<Vec<String>, String> {
 /// 再起新（隐式重启语义，避免新旧进程抢端口双双失败）。
 fn prepare_start(def: &ServiceDef) {
     // remote_only：端口在远程机器上，本机 netstat 查不到、也不能清
-    if def.remote_only {
+    // static_site：端口归宿主（dfy-ui 的 80 属于 nginx），清了会误杀宿主
+    if def.remote_only || def.static_site {
         return;
     }
     if let Some(port) = def.ports.first() {
@@ -153,8 +154,10 @@ fn act_all(
         .into_iter()
         .filter_map(|id| {
             let def = defs.iter().find(|d| d.id == id)?;
-            // 第三方依赖不归平台托管（由系统服务/容器运行时管理），启停一律跳过
-            if def.third_party {
+            // 第三方依赖不归平台托管（由系统服务/容器运行时管理），启停一律跳过；
+            // 静态托管（dfy-ui）无进程可启停，且 stop_deep 按端口兜底会把宿主
+            // nginx 杀掉，同样跳过
+            if def.third_party || def.static_site {
                 return None;
             }
             // 停止不按 is_running 预过滤：它只认平台句柄，外部拉起的实例会被
@@ -187,7 +190,7 @@ fn act_all(
 pub fn start_all(procs: &ProcManager, defs: &[ServiceDef]) -> Vec<ActionResult> {
     let daemon_ids: HashSet<&str> = defs
         .iter()
-        .filter(|d| d.is_daemon && !d.third_party)
+        .filter(|d| d.is_daemon && !d.third_party && !d.static_site)
         .map(|d| d.id.as_str())
         .collect();
     match start_order(defs) {
@@ -317,6 +320,7 @@ mod tests {
             is_daemon,
             third_party: false,
             remote_only: false,
+            static_site: false,
             description: String::new(),
         }
     }

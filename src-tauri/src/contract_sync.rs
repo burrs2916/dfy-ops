@@ -55,6 +55,7 @@ fn service_status_contract() {
         is_daemon: true,
         third_party: false,
         remote_only: false,
+        static_site: false,
         installed: true,
         description: String::new(),
         install_dir: String::new(),
@@ -67,8 +68,8 @@ fn service_status_contract() {
         &serde_json::to_value(&s).unwrap(),
         &[
             "id", "name", "kind", "running", "runState", "healthy", "ports", "dependsOn",
-            "isDaemon", "thirdParty", "remoteOnly", "installed", "description", "installDir",
-            "buildCmd", "runCmd", "healthUrl", "logPaths",
+            "isDaemon", "thirdParty", "remoteOnly", "staticSite", "installed", "description",
+            "installDir", "buildCmd", "runCmd", "healthUrl", "logPaths",
         ],
     );
     // RunState 枚举值

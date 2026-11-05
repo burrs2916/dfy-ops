@@ -86,6 +86,10 @@ pub struct ServiceStatus {
     /// 前端据此把「Windows 服务管理器」类提示换成远程承载语义。
     #[serde(rename = "remoteOnly")]
     pub remote_only: bool,
+    /// 静态托管服务（dfy-ui：nginx 反代静态目录）：无独立进程，检测 = 本地
+    /// 声明端口 TCP 探测；无启停按钮，不参与全部启停，前端据此隐藏启停入口。
+    #[serde(rename = "staticSite")]
+    pub static_site: bool,
     /// 「已安装」（Windows 卸载注册表判定）。三态语义：false = 确认未安装；
     /// true = 已安装或「不适用」（未声明 productNames 的服务一律 true，
     /// 维持既有「已停止/运行中」显示，不误报未安装）。
@@ -170,6 +174,7 @@ fn to_status(
         is_daemon: def.is_daemon,
         third_party: def.third_party,
         remote_only: def.remote_only,
+        static_site: def.static_site,
         installed,
         description: def.description.clone(),
         install_dir: def.install_dir.clone(),
@@ -426,6 +431,29 @@ fn open_in_file_manager(
     }
 }
 
+/// 打开文件管理器并【定位选中】指定文件（监控中心「打开目录」用：不仅开到
+/// 日志所在目录，还要高亮该日志文件本身，免得用户在一堆日志里再找一遍）。
+/// - Windows：`explorer /select,"<完整路径>"`（注意 /select, 与路径是一个参数，
+///   路径必须反斜杠原生格式，否则资源管理器只开到默认页）
+/// - macOS：Finder 反显（open -R）
+/// - 其他 Unix：退化为打开父目录（无通用反显命令）
+fn open_in_file_manager_select(file: &std::path::Path) -> std::io::Result<std::process::Child> {
+    #[cfg(target_os = "windows")]
+    {
+        let arg = format!("/select,{}", file.display());
+        std::process::Command::new("explorer").arg(arg).spawn()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg("-R").arg(file).spawn()
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let dir = file.parent().unwrap_or(file);
+        std::process::Command::new("xdg-open").arg(dir).spawn()
+    }
+}
+
 /// 全量状态探测：一次进程快照 + 并行逐服务检测。
 ///
 /// 服务间无共享可变状态，各自的 TCP 探测/注册表查询完全独立——此前串行
@@ -480,6 +508,11 @@ pub async fn start_service(
     if find_def(&state, &id).is_none() {
         return Json(serde_json::json!({"ok": false, "error": "service not found"}));
     }
+    // 静态托管（dfy-ui）：无进程可启动，nginx 已代为承载
+    if find_def(&state, &id).map(|d| d.static_site).unwrap_or(false) {
+        return Json(serde_json::json!({"ok": false,
+            "error": "静态托管服务：由 nginx 反代承载，无需启动；检测按端口可达性判定"}));
+    }
     let id_for_result = id.clone();
     let results =
         blocking(move || orchestrator::start_with_deps(&state.procs, &state.registry, &id)).await;
@@ -496,6 +529,12 @@ pub async fn stop_service(
 ) -> Json<serde_json::Value> {
     // 克隆声明端口后再进 blocking：stop_deep 无句柄时按端口强杀外部拉起的实例
     let def_ports = match find_def(&state, &id) {
+        Some(d) if d.static_site => {
+            // 关键守卫：dfy-ui 声明的 80 就是 nginx 的端口，stop_deep 按端口
+            // 兜底会把宿主 nginx 整个杀掉——静态托管服务一律拒绝停止
+            return Json(serde_json::json!({"ok": false,
+                "error": "静态托管服务：无独立进程，无需停止（如需维护请停 nginx）"}));
+        }
         Some(d) => d.ports.clone(),
         None => return Json(serde_json::json!({"ok": false, "error": "service not found"})),
     };
@@ -513,6 +552,11 @@ pub async fn restart_service(
     Path(id): Path<String>,
 ) -> Json<serde_json::Value> {
     let def_ports = match find_def(&state, &id) {
+        Some(d) if d.static_site => {
+            // 同 stop_service 守卫：restart = stop_deep + start，会误杀宿主 nginx
+            return Json(serde_json::json!({"ok": false,
+                "error": "静态托管服务：无独立进程，无需重启（更新前端请直接覆盖部署目录）"}));
+        }
         Some(d) => d.ports.clone(),
         None => return Json(serde_json::json!({"ok": false, "error": "service not found"})),
     };
@@ -1455,14 +1499,15 @@ pub async fn open_config_dir(
                 return Ok(Json(serde_json::json!({ "ok": false, "error": "路径异常：无父目录" })));
             }
         };
-        return match open_in_file_manager(&dir) {
+        // 定位到文件本身：资源管理器打开所在目录并高亮该日志（2026-11-05 用户要求）
+        return match open_in_file_manager_select(file) {
             Ok(_) => {
                 crate::debug_log::entry(
                     crate::debug_log::APP_SCOPE,
                     "INFO",
                     "open_config_dir",
-                    "open",
-                    &format!("open-log-file-dir target={} dir={}", id, dir.display()),
+                    "open_select",
+                    &format!("open-log-file-dir target={} file={} dir={}", id, file.display(), dir.display()),
                 );
                 Ok(Json(serde_json::json!({ "ok": true, "dir": dir.display().to_string() })))
             }
@@ -1472,7 +1517,7 @@ pub async fn open_config_dir(
                     "WARN",
                     "open_config_dir",
                     "open_failed",
-                    &format!("打开目录 {} 失败：{e}", dir.display()),
+                    &format!("定位日志文件 {} 失败：{e}", file.display()),
                 );
                 Ok(Json(serde_json::json!({
                     "ok": false,

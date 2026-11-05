@@ -132,8 +132,9 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
             </Stack>
             {/* 快捷操作：阻止冒泡，避免误触卡片跳转。
                 第三方依赖（VerneMQ/MinIO/Redis）由系统服务/虚拟机管理，平台只检测不托管
-                → 无启停按钮；「先设置、后检测」：待配置态显示显式配置按钮引导完成设置 */}
-            {s.thirdParty ? (
+                → 无启停按钮；「先设置、后检测」：待配置态显示显式配置按钮引导完成设置。
+                静态托管（dfy-ui）无进程可启停 → 同样隐藏启停，仅保留刷新 */}
+            {s.thirdParty || s.staticSite ? (
               <Stack
                 direction="row"
                 spacing={0.25}
@@ -141,7 +142,8 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
                 onClick={(e) => e.stopPropagation()}
                 sx={{ flexShrink: 0 }}
               >
-                {s.runState === "needs-config" ? (
+                {s.thirdParty &&
+                  (s.runState === "needs-config" ? (
                   <Tooltip title="服务部署在虚拟机/远程主机：去「远程部署」配置地址">
                     <Button
                       size="small"
@@ -160,7 +162,7 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
                       <Radar fontSize="small" />
                     </IconButton>
                   </Tooltip>
-                )}
+                ))}
                 <Tooltip title="刷新此服务状态">
                   <IconButton size="small" onClick={reload} disabled={reloading || busy}>
                     {reloading ? (
