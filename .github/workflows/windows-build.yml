@@ -2,15 +2,31 @@ name: Windows Build
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: '运行模式'
+        required: false
+        default: 'build'
+        type: choice
+        options:
+          - build
+          - release-only
+      tag:
+        description: 'release-only 模式专用：要发 release 的 tag（如 v0.2.68）'
+        required: false
+        type: string
 
 permissions:
   contents: write
+  actions: read
 
 jobs:
   test:
     name: Rust test & clippy
+    if: inputs.mode != 'release-only'
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -57,6 +73,7 @@ jobs:
   build-windows:
     name: Build Windows installer
     needs: test
+    if: inputs.mode != 'release-only'
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -121,44 +138,55 @@ jobs:
         with:
           files: |
             src-tauri/target/release/bundle/nsis/*.exe
-          # softprops/action-gh-release 重试逻辑不覆盖 GitHub API 500 抽风
-          # 场景（finalize release 阶段 server error 重试 3 次必挂）。
-          # 加 retry 和 timeout，仍挂就去 Actions 页手动重跑 manual-release。
+          # GitHub release API 偶发 500（finalize 阶段）；默认重试次数不够。
+          # 仍挂 → Actions 页手动 Run workflow → mode=release-only + tag。
           retries: 5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  # ===== Release 挂掉时的救星：只从构建产物发 release，不重编 =====
+  # ===== Release 挂掉时的救星：只从既有构建 artifact 重发 release，不重编 =====
   #
-  # 背景：GitHub release API 偶尔在 finalize 阶段 500（softprops 内置重试
-  # 只有 3 次且是指数退避但不增间隔），此时安装包 asset 已上传成功但
-  # release 永远不 visible。过去必须重跑整个 build-windows（等 5-10 分钟）。
-  # 现在只需在 Actions 页手动点 Run workflow → 选 tag → 再跑 release。
+  # 两个历史坑（v0.2.68 的 #132 两次踩中）：
+  # 1. workflow_dispatch 必须声明在工作流级 on: 下，写进 job 是非法语法，
+  #    会导致整个工作流文件 invalid、所有构建一起挂；
+  # 2. download-artifact@v4 默认只下载「当前 run」的 artifact，跨 run 下载
+  #    必须显式给 run-id + github-token（且 token 需要 actions:read）。
+  #
+  # 用法：Actions 页 Run workflow → mode=release-only，tag 填 v0.2.68。
   manual-release:
-    name: Manual release (asset 已在时重试 finalize)
+    name: Release only (不重编，从既有 artifact 重发)
+    if: inputs.mode == 'release-only'
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    workflow_dispatch:
-      inputs:
-        tag:
-          description: '要发 release 的 tag（如 v0.2.68）。该 tag 已对应一次成功的构建'
-          required: true
-          type: string
+      actions: read
     steps:
-      - name: Download installer from last successful build
+      - name: Locate build run for tag
+        id: findrun
+        run: |
+          RUN_ID=$(curl -sf -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs?branch=${{ inputs.tag }}&per_page=1" \
+            | jq -r '.workflow_runs[0].id // empty')
+          if [ -z "$RUN_ID" ]; then
+            echo "::error::tag ${{ inputs.tag }} 没有对应的构建 run"
+            exit 1
+          fi
+          echo "使用构建 run: $RUN_ID"
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+
+      - name: Download installer from that run
         uses: actions/download-artifact@v4
         with:
           name: dfy-ops-windows
           path: ./artifacts
+          run-id: ${{ steps.findrun.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Finalize release
+      - name: Create / finalize release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag }}
-          files: |
-            artifacts/*.exe
+          files: artifacts/*.exe
           retries: 5
-          timeout: 600000
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
