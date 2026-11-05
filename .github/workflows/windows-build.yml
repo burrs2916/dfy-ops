@@ -121,5 +121,44 @@ jobs:
         with:
           files: |
             src-tauri/target/release/bundle/nsis/*.exe
+          # softprops/action-gh-release 重试逻辑不覆盖 GitHub API 500 抽风
+          # 场景（finalize release 阶段 server error 重试 3 次必挂）。
+          # 加 retry 和 timeout，仍挂就去 Actions 页手动重跑 manual-release。
+          retries: 5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ===== Release 挂掉时的救星：只从构建产物发 release，不重编 =====
+  #
+  # 背景：GitHub release API 偶尔在 finalize 阶段 500（softprops 内置重试
+  # 只有 3 次且是指数退避但不增间隔），此时安装包 asset 已上传成功但
+  # release 永远不 visible。过去必须重跑整个 build-windows（等 5-10 分钟）。
+  # 现在只需在 Actions 页手动点 Run workflow → 选 tag → 再跑 release。
+  manual-release:
+    name: Manual release (asset 已在时重试 finalize)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    workflow_dispatch:
+      inputs:
+        tag:
+          description: '要发 release 的 tag（如 v0.2.68）。该 tag 已对应一次成功的构建'
+          required: true
+          type: string
+    steps:
+      - name: Download installer from last successful build
+        uses: actions/download-artifact@v4
+        with:
+          name: dfy-ops-windows
+          path: ./artifacts
+
+      - name: Finalize release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: |
+            artifacts/*.exe
+          retries: 5
+          timeout: 600000
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
