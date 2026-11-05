@@ -129,6 +129,10 @@ export default function MonitorCenter() {
   const [autoScroll, setAutoScroll] = useState(true);
   // 日志维护
   const [confirmDel, setConfirmDel] = useState(false);
+  // 删除失败（文件被占用）后的兜底：清空内容（文件保留、长度归零）
+  const [confirmClear, setConfirmClear] = useState(false);
+  // 备用日志管理弹窗：备份/归档衍生文件不占主列表，集中在这里看和删
+  const [backupMgr, setBackupMgr] = useState<{ id: string; name: string; files: LogFileMeta[] } | null>(null);
   // 归档管理：批量清理滚动归档/备份衍生（keepDays=0 全清；主日志永不删）
   const [cleanup, setCleanup] = useState<{ id: string; name: string; count: number; bytes: number } | null>(null);
   const [cleanupKeep, setCleanupKeep] = useState(0);
@@ -279,7 +283,20 @@ export default function MonitorCenter() {
 
   const openLogDir = async () => {
     if (!sel) return;
-    await api.openConfigDir(sel.id, "logs").catch(() => {});
+    // 传当前日志文件路径，后端打开其所在目录（任意服务通用）；
+    // 失败必须提示出来——此前 .catch(() => {}) 静默吞错，用户点按钮像「没反应」
+    try {
+      const r = await api.openConfigDir(sel.id, undefined, sel.path);
+      if (!r.ok) {
+        setSnack({ open: true, msg: r.error ?? "打开目录失败", severity: "error" });
+      }
+    } catch (e) {
+      setSnack({
+        open: true,
+        msg: "打开目录失败：" + (e instanceof Error ? e.message : String(e)),
+        severity: "error",
+      });
+    }
   };
 
   const doBackup = async () => {
@@ -309,6 +326,48 @@ export default function MonitorCenter() {
           severity: "success",
         });
         setLines([]);
+        void fetchList();
+      } else {
+        setSnack({ open: true, msg: r.error ?? "删除失败", severity: "error" });
+        // 文件被占用删不掉 → 弹「清空内容」兜底：文件保留、长度归零，服务继续写
+        if (r.error && (r.error.includes("占用") || r.error.includes("锁定") || r.error.includes("busy"))) {
+          setConfirmClear(true);
+        }
+      }
+    } catch (e) {
+      setSnack({ open: true, msg: "删除失败：" + (e instanceof Error ? e.message : String(e)), severity: "error" });
+    }
+  };
+
+  // 清空当前日志文件内容（删除被占用时的兜底；文件本体保留，服务无需重建）
+  const doClear = async () => {
+    if (!sel) return;
+    setConfirmClear(false);
+    try {
+      const r = await api.clearLog(sel.id, sel.path);
+      if (r.ok) {
+        setSnack({
+          open: true,
+          msg: `已清空文件内容，释放 ${fmtSize(r.freed ?? 0)}。文件保留，服务继续写入不受影响`,
+          severity: "success",
+        });
+        setLines([]);
+        void tail();
+      } else {
+        setSnack({ open: true, msg: r.error ?? "清空失败", severity: "error" });
+      }
+    } catch (e) {
+      setSnack({ open: true, msg: "清空失败：" + (e instanceof Error ? e.message : String(e)), severity: "error" });
+    }
+  };
+
+  // 备用日志弹窗里的单文件删除（都是备份/归档衍生，低风险，直接删）
+  const deleteBackupFile = async (id: string, path: string) => {
+    try {
+      const r = await api.deleteLog(id, path);
+      if (r.ok) {
+        setSnack({ open: true, msg: "已删除", severity: "success" });
+        setBackupMgr((b) => (b ? { ...b, files: b.files.filter((f) => f.path !== path) } : b));
         void fetchList();
       } else {
         setSnack({ open: true, msg: r.error ?? "删除失败", severity: "error" });
@@ -372,7 +431,11 @@ export default function MonitorCenter() {
             variant="outlined"
             sx={{ width: 350, flexShrink: 0, overflowY: "auto", maxHeight: "calc(100vh - 250px)" }}
           >
-            {services.map((s, i) => (
+            {services.map((s, i) => {
+              // 主列表只放实时业务日志；备份/归档衍生收进「备用」弹窗，不占日常视线
+              const mainFiles = s.files.filter((f) => !f.derived);
+              const extraFiles = s.files.filter((f) => f.derived);
+              return (
               <Box key={s.id}>
                 {i > 0 && <Divider />}
                 <Stack
@@ -409,25 +472,25 @@ export default function MonitorCenter() {
                     color={s.running ? "success" : "default"}
                     sx={{ height: 20, fontSize: 11, ml: "auto" }}
                   />
-                  <Chip size="small" label={`${s.files.length} 个日志`} sx={{ height: 20, fontSize: 11 }} />
-                  {s.archiveCount > 0 && (
-                    <Chip
-                      size="small"
-                      variant="outlined"
-                      label={`归档 ${s.archiveCount} · ${fmtSize(s.archiveBytes)}`}
-                      sx={{ height: 20, fontSize: 11 }}
-                      onClick={() =>
-                        setCleanup({ id: s.id, name: s.name, count: s.archiveCount, bytes: s.archiveBytes })
-                      }
-                    />
+                  <Chip size="small" label={`${mainFiles.length} 个日志`} sx={{ height: 20, fontSize: 11 }} />
+                  {extraFiles.length > 0 && (
+                    <Tooltip title="备份/归档日志收在这里，点开可查看与清理">
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        label={`备用 ${extraFiles.length} · ${fmtSize(extraFiles.reduce((n, f) => n + f.size, 0))}`}
+                        sx={{ height: 20, fontSize: 11 }}
+                        onClick={() => setBackupMgr({ id: s.id, name: s.name, files: extraFiles })}
+                      />
+                    </Tooltip>
                   )}
                 </Stack>
-                {s.files.length === 0 ? (
+                {mainFiles.length === 0 ? (
                   <Typography variant="caption" color="text.disabled" sx={{ px: 2.5, py: 0.5, display: "block" }}>
                     （该服务未声明日志文件）
                   </Typography>
                 ) : (
-                  s.files.map((f) => {
+                  mainFiles.map((f) => {
                     const active = sel?.path === f.path;
                     return (
                       <Stack
@@ -484,7 +547,8 @@ export default function MonitorCenter() {
                   })
                 )}
               </Box>
-            ))}
+              );
+            })}
           </Paper>
 
           {/* 右侧：日志终端 + 维护操作 */}
@@ -676,6 +740,84 @@ export default function MonitorCenter() {
           <Button onClick={() => void doCleanup()} color="error" variant="contained" disabled={cleaning}>
             {cleaning ? "清理中…" : "清理"}
           </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* 清空内容兜底：文件被占用删不掉时，保留文件只清内容，服务继续写 */}
+      <Dialog open={confirmClear} onClose={() => setConfirmClear(false)}>
+        <DialogTitle>文件被占用，无法删除</DialogTitle>
+        <DialogContent>
+          <DialogContentText component="div">
+            <Typography variant="body2" sx={{ mb: 1 }}>
+              {selMeta?.file.name ?? "该日志"} 正在被服务进程写入，删除会失败。
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              可以改为「清空内容」：文件保留、长度归零，立即释放磁盘空间，服务继续写入不受影响。
+            </Typography>
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setConfirmClear(false)}>取消</Button>
+          <Button onClick={() => void doClear()} color="warning" variant="contained">
+            清空内容
+          </Button>
+        </DialogActions>
+      </Dialog>
+
+      {/* 备用日志管理：备份/归档衍生集中在此查看与删除，不占主列表 */}
+      <Dialog open={!!backupMgr} onClose={() => setBackupMgr(null)} maxWidth="sm" fullWidth>
+        <DialogTitle>
+          {backupMgr?.name} · 备用日志（{backupMgr?.files.length ?? 0}）
+        </DialogTitle>
+        <DialogContent dividers>
+          <DialogContentText component="div">
+            <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+              备份（.bak-时间戳）与滚动归档（.gz）集中在这里管理；正在写入的业务日志在左侧主列表。
+            </Typography>
+            {backupMgr?.files.length === 0 && (
+              <Typography variant="body2" color="text.disabled" sx={{ py: 2, textAlign: "center" }}>
+                已全部清理
+              </Typography>
+            )}
+            {backupMgr?.files.map((f) => (
+              <Stack
+                key={f.path}
+                direction="row"
+                spacing={1}
+                alignItems="center"
+                sx={{ py: 0.75, borderBottom: "1px solid", borderColor: "divider" }}
+              >
+                <Description sx={{ fontSize: 16, color: "text.secondary" }} />
+                <Box sx={{ minWidth: 0, flex: 1 }}>
+                  <Tooltip title={f.path} placement="top" arrow>
+                    <Typography variant="body2" noWrap>
+                      {f.name}
+                    </Typography>
+                  </Tooltip>
+                  <Typography variant="caption" color="text.secondary">
+                    {fmtSize(f.size)}
+                  </Typography>
+                </Box>
+                <Button size="small" color="error" onClick={() => void deleteBackupFile(backupMgr.id, f.path)}>
+                  删除
+                </Button>
+              </Stack>
+            ))}
+          </DialogContentText>
+        </DialogContent>
+        <DialogActions>
+          <Button
+            onClick={() => {
+              if (!backupMgr) return;
+              const bytes = backupMgr.files.reduce((n, f) => n + f.size, 0);
+              setCleanup({ id: backupMgr.id, name: backupMgr.name, count: backupMgr.files.length, bytes });
+              setBackupMgr(null);
+            }}
+            disabled={!backupMgr?.files.length}
+          >
+            按保留天数批量清理…
+          </Button>
+          <Button onClick={() => setBackupMgr(null)}>关闭</Button>
         </DialogActions>
       </Dialog>
 

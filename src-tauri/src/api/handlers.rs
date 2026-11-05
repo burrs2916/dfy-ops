@@ -949,6 +949,54 @@ pub async fn log_delete(
     }
 }
 
+/// 日志维护：清空日志文件内容（截断为 0 字节）。
+/// 用途：文件被进程占用删不掉时的兜底——服务（logback/nginx）持有句柄通常是
+/// 共享写模式，截断一般能成功；即使个别句柄不允许写，也如实报错。
+/// 与删除不同：文件本体保留、inode/句柄不动，服务无需重建文件，运行不受影响。
+pub async fn log_clear(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    axum::Json(body): axum::Json<LogMaintainBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
+    if !log_path_allowed(def, &body.path) {
+        return Ok(Json(serde_json::json!({"ok": false, "error": "该文件不在此服务的日志声明范围内"})));
+    }
+    let path = body.path.clone();
+    let result = blocking(move || {
+        let sp = std::path::Path::new(&path);
+        let before = std::fs::metadata(sp).map(|m| m.len()).unwrap_or(0);
+        // OpenOptions write + truncate：不重建文件，只把长度归零
+        std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(sp)
+            .map_err(|e| {
+                let msg = e.to_string().to_lowercase();
+                if msg.contains("being used") || msg.contains("denied") || msg.contains("busy") {
+                    "文件被其他进程以独占方式锁定，无法清空（只能等占用进程退出）".to_string()
+                } else {
+                    format!("清空失败：{e}")
+                }
+            })
+            .map(|_| before)
+    })
+    .await;
+    match result {
+        Ok(before) => {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "INFO",
+                "log_clear",
+                "clear",
+                &format!("path={} freed={before}", body.path),
+            );
+            Ok(Json(serde_json::json!({"ok": true, "freed": before})))
+        }
+        Err(e) => Ok(Json(serde_json::json!({"ok": false, "error": e}))),
+    }
+}
+
 /// unix secs → (年,月,日,时,分,秒) 本地时区。chrono 未引入，用 libc localtime_r
 /// 代价也不小——直接用 std 无法本地化，此处用 UTC+8 硬偏移（交付机固定在国内）。
 fn unix_to_local(ts: u64) -> (u32, u32, u32, u32, u32, u32) {
@@ -1364,10 +1412,12 @@ pub async fn external_config_update(
     }
 }
 
-/// `open-config-dir` 查询参数：缺省打开配置目录；`dir=logs` 打开日志目录。
+/// `open-config-dir` 查询参数：缺省打开配置目录；`dir=logs` 打开 nginx 日志目录；
+/// `path=<日志文件>` 打开该文件所在目录（监控中心用，任意服务通用）。
 #[derive(Debug, Deserialize)]
 pub struct OpenDirQuery {
     dir: Option<String>,
+    path: Option<String>,
 }
 
 /// 在系统文件管理器中打开服务配置/日志目录（只读便利操作）。
@@ -1382,6 +1432,56 @@ pub async fn open_config_dir(
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?;
     let want_logs = q.dir.as_deref() == Some("logs");
     let install = std::path::Path::new(&def.install_dir);
+    // 监控中心「打开目录」：按选中日志文件的路径打开其所在目录（任意服务通用）。
+    // 此前只有 nginx 支持 ?dir=logs，其余服务一律返回「暂不支持」且前端静默吞错，
+    // 表现就是点按钮没反应。走日志白名单校验，防任意路径探测。
+    if let Some(p) = q.path.as_deref() {
+        if !log_path_allowed(def, p) {
+            return Ok(Json(serde_json::json!({
+                "ok": false,
+                "error": "该文件不在此服务的日志声明范围内",
+            })));
+        }
+        let file = std::path::Path::new(p);
+        let dir = match file.parent() {
+            Some(d) if d.exists() => d.to_path_buf(),
+            Some(d) => {
+                return Ok(Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("目录不存在：{}", d.display()),
+                })));
+            }
+            None => {
+                return Ok(Json(serde_json::json!({ "ok": false, "error": "路径异常：无父目录" })));
+            }
+        };
+        return match open_in_file_manager(&dir) {
+            Ok(_) => {
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "INFO",
+                    "open_config_dir",
+                    "open",
+                    &format!("open-log-file-dir target={} dir={}", id, dir.display()),
+                );
+                Ok(Json(serde_json::json!({ "ok": true, "dir": dir.display().to_string() })))
+            }
+            Err(e) => {
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "WARN",
+                    "open_config_dir",
+                    "open_failed",
+                    &format!("打开目录 {} 失败：{e}", dir.display()),
+                );
+                Ok(Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("打开失败：{e}"),
+                    "dir": dir.display().to_string(),
+                })))
+            }
+        };
+    }
     let path = if def.id == "nginx" {
         if want_logs {
             install.join("logs").join("access.log")

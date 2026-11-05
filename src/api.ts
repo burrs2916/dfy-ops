@@ -133,6 +133,12 @@ export const api = {
       `/api/services/${id}/logs/delete`,
       { method: "POST", body: JSON.stringify({ path }), headers: { "Content-Type": "application/json" } },
     ),
+  // 清空日志内容（文件被占用删不掉时的兜底：文件保留、长度归零，服务继续写）
+  clearLog: (id: string, path: string) =>
+    request<{ ok: boolean; freed?: number; error?: string }>(
+      `/api/services/${id}/logs/clear`,
+      { method: "POST", body: JSON.stringify({ path }), headers: { "Content-Type": "application/json" } },
+    ),
   // 归档管理：批量清理归档/衍生日志。keepDays=0 清全部；主日志永不删。
   cleanupArchives: (id: string, keepDays: number) =>
     request<{ ok: boolean; removed: number; bytes: number; errors: string[] }>(
@@ -573,11 +579,16 @@ export const api = {
       body: JSON.stringify(config),
     }),
   // 打开服务配置/日志所在目录（nginx：conf/ 或 ?dir=logs → logs/；dfy-backend → config/）
-  openConfigDir: (id: string, dir?: "logs") =>
-    request<{ ok: boolean; dir?: string; error?: string }>(
-      `/api/services/${id}/open-config-dir${dir ? `?dir=${dir}` : ""}`,
+  openConfigDir: (id: string, dir?: "logs", path?: string) => {
+    const qs = new URLSearchParams();
+    if (dir) qs.set("dir", dir);
+    if (path) qs.set("path", path);
+    const q = qs.toString();
+    return request<{ ok: boolean; dir?: string; error?: string }>(
+      `/api/services/${id}/open-config-dir${q ? `?${q}` : ""}`,
       { method: "POST" },
-    ),
+    );
+  },
   // 一键打开平台页面（后端按 nginx 实际监听端口生成 URL，默认浏览器打开）
   openPlatform: () =>
     request<{
