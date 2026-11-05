@@ -249,6 +249,27 @@ http {
             proxy_set_header X-Real-IP $remote_addr;
         }
 
+        # 积木报表/大屏页面与静态资源（此前缺这组转发，经 nginx 域名打开报表 404）。
+        # nginx 前缀 location 按最长匹配优先，/jmreport/ 等长前缀天然赢过 location /，
+        # 不会被 SPA 的 try_files 兜底吞掉；proxy_pass 带同路径，URI 原样透传。
+        location /jmreport/ {
+            proxy_pass http://127.0.0.1:48085/jmreport/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        location /drag/ {
+            proxy_pass http://127.0.0.1:48085/drag/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
+        location /jimubi/ {
+            proxy_pass http://127.0.0.1:48085/jimubi/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+        }
+
         error_log  C:/services/nginx/logs/error.log;
         access_log C:/services/nginx/logs/access.log;
         pid        C:/services/nginx/logs/nginx.pid;
