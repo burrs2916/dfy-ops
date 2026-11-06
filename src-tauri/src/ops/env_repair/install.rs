@@ -576,6 +576,15 @@ fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<u6
     Ok(n)
 }
 
+/// 平台内置默认配置模板（随二进制分发——CI 解压产物只有 exe 的场景，
+/// 安装时自动生成，之后在配置中心可改）。内容与 edge-conductor 仓库的
+/// config.example.toml / greptimedb/greptimedb.toml 保持同步，仓库模板
+/// 更新时需同步拷贝。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const EDGE_CONFIG_TEMPLATE: &str = include_str!("../../../templates/edge-conductor-config.toml");
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const EDGE_GREPTIMEDB_TEMPLATE: &str = include_str!("../../../templates/edge-greptimedb.toml");
+
 /// 在资源目录定位 greptimedb 目录：约定顶层 greptimedb/ 或 greptime/
 /// （内含 greptime.exe 即视为就绪），一级子目录兜底（资源目录分层布局）。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -623,8 +632,18 @@ fn integrate_greptimedb(
         );
     };
     let n = copy_dir_recursive(&src, &dst)?;
+    // 资源里只有 exe 没带 toml：生成平台内置默认模板（greptimedb.toml
+    // 含端口拓扑 HTTP 4000/gRPC 4001/MySQL 4002/Postgres 4003——改错端口
+    // edge-conductor 连不上时序库，所以模板默认值与 edge-conductor 一致）
+    let toml_msg = if !dst.join("greptimedb.toml").is_file() {
+        std::fs::write(dst.join("greptimedb.toml"), EDGE_GREPTIMEDB_TEMPLATE)
+            .map_err(|e| format!("写入默认 greptimedb.toml 失败：{e}"))?;
+        "，资源未带配置，已生成默认 greptimedb.toml"
+    } else {
+        ""
+    };
     Ok(format!(
-        "已整合 GreptimeDB 时序库：{} → {}（{n} 个文件）",
+        "已整合 GreptimeDB 时序库：{} → {}（{n} 个文件）{toml_msg}",
         src.display(),
         dst.display()
     ))
@@ -801,14 +820,23 @@ async fn run_edge_dir_install(
     state.patch(|j| j.stage = "verify".into());
     let exe = std::path::Path::new(&install_dir).join("edgecd-daemon.exe");
     if exe.is_file() {
-        let has_cfg = std::path::Path::new(&install_dir).join("config.toml").is_file();
         state.log("验证通过：edgecd-daemon.exe 就绪");
-        if has_cfg {
+        // 配置继承：exe 解压产物不带 config.toml（CI 产物只有 exe）——
+        // 平台内置默认模板自动生成，装完即可启动；之后配置中心可改
+        let cfg_path = std::path::Path::new(&install_dir).join("config.toml");
+        if cfg_path.is_file() {
             state.log("config.toml 已就位，可在服务总览启动边缘计算");
+        } else if let Err(e) = std::fs::write(&cfg_path, EDGE_CONFIG_TEMPLATE) {
+            finish(
+                state,
+                env_cache,
+                false,
+                format!("生成默认 config.toml 失败（{}）：{e}", cfg_path.display()),
+            )
+            .await;
+            return;
         } else {
-            state.log(format!(
-                "警告：config.toml 缺失——启动前请把配置文件放到 {install_dir}\\config.toml（edge-conductor 没有它无法启动）"
-            ));
+            state.log("已生成默认 config.toml（端口 8084/8085）——可在配置中心修改，重启后生效");
         }
         debug_log::entry(
             debug_log::APP_SCOPE,

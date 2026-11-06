@@ -1,0 +1,170 @@
+########################################
+# GreptimeDB 主配置文件
+# 用于 Standalone 模式启动
+########################################
+
+# 默认时区
+default_timezone = "UTC"
+
+# 是否在后台初始化所有 region
+init_regions_in_background = false
+# region 初始化并行度
+init_regions_parallelism = 16
+
+# 最大并发查询数，0 表示无限制
+max_concurrent_queries = 0
+
+# 数据写入的最大 in-flight 字节数，0 表示无限制
+max_in_flight_write_bytes = "1GB"
+
+########################################
+# HTTP 服务配置
+########################################
+[http]
+addr = "127.0.0.1:4000"           # HTTP 服务监听地址
+timeout = "30s"                   # HTTP 请求超时
+body_limit = "64MB"               # HTTP 请求体大小限制
+enable_cors = true                # 是否开启跨域访问
+cors_allowed_origins = []   # 允许跨域的域名
+
+# Prometheus remote write 数据验证模式
+prom_validation_mode = "strict"
+
+########################################
+# gRPC 服务配置
+########################################
+[grpc]
+bind_addr = "127.0.0.1:4001"      # gRPC 服务监听地址
+runtime_size = 8                  # gRPC 服务线程数
+[grpc.tls]
+mode = "disable"                  # TLS 模式关闭
+
+########################################
+# MySQL 服务配置
+########################################
+[mysql]
+enable = true                     # 是否启用 MySQL 协议
+addr = "127.0.0.1:4002"           # MySQL 服务端口
+runtime_size = 2                   # MySQL 工作线程
+keep_alive = "0s"                  # MySQL 保活时间
+prepared_stmt_cache_size = 10000
+[mysql.tls]
+mode = "disable"
+
+########################################
+# Postgres 服务配置
+########################################
+[postgres]
+enable = true
+addr = "127.0.0.1:4003"
+runtime_size = 2
+keep_alive = "0s"
+[postgres.tls]
+mode = "disable"
+
+########################################
+# 协议支持
+########################################
+[opentsdb]
+enable = true
+
+[influxdb]
+enable = true
+
+[jaeger]
+enable = true
+
+[prom_store]
+enable = true
+with_metric_engine = true
+
+########################################
+# 数据存储配置
+########################################
+[storage]
+data_home = "./data/greptime"    # 数据根目录（相对于配置文件目录）
+type = "File"                     # 存储类型
+cache_capacity = "5GiB"           # 本地缓存容量
+
+########################################
+# WAL 日志配置 (raft_engine)
+########################################
+[wal]
+provider = "raft_engine"
+dir = "./data/greptime/wal"       # WAL 日志存放目录（相对于配置文件目录）
+file_size = "128MB"
+purge_threshold = "1GB"
+purge_interval = "1m"
+read_batch_size = 128
+sync_write = false
+enable_log_recycle = true
+prefill_log_files = false
+sync_period = "10s"
+recovery_parallelism = 12
+
+########################################
+# 日志配置
+########################################
+[logging]
+dir = "./data/greptime/logs"      # 日志存放目录（相对于配置文件目录）
+level = "info"
+append_stdout = true
+log_format = "text"
+max_log_files = 720
+enable_otlp_tracing = false
+
+########################################
+# Mito 引擎 (Region Engine)
+########################################
+[[region_engine]]
+[region_engine.mito]
+num_workers = 8
+worker_channel_size = 128
+worker_request_batch_size = 64
+manifest_checkpoint_distance = 10
+compress_manifest = false
+max_background_flushes = 6
+max_background_compactions = 3
+max_background_purges = 12
+auto_flush_interval = "1h"
+global_write_buffer_size = "1GB"
+global_write_buffer_reject_size = "2GB"
+sst_meta_cache_size = "128MB"
+vector_cache_size = "512MB"
+page_cache_size = "512MB"
+selector_result_cache_size = "512MB"
+enable_write_cache = false
+write_cache_size = "5GiB"
+sst_write_buffer_size = "8MB"
+parallel_scan_channel_size = 32
+max_concurrent_scan_files = 384
+allow_stale_entries = false
+
+[region_engine.mito.memtable]
+type = "time_series"
+
+########################################
+# Procedure 配置
+########################################
+[procedure]
+max_retry_times = 3
+retry_delay = "500ms"
+max_running_procedures = 128
+
+########################################
+# Flow 引擎配置
+########################################
+[flow]
+num_workers = 6
+
+########################################
+# 查询引擎
+########################################
+[query]
+parallelism = 0  # 默认使用 CPU 核数
+
+########################################
+# 内存配置
+########################################
+[memory]
+enable_heap_profiling = false   # 关闭 heap profiling 避免警告

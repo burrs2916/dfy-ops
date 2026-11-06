@@ -1,0 +1,160 @@
+# ========================================
+# EdgeConductorv2.2 配置文件模板
+# 复制为 config.toml 后按需修改（config.toml 已被 .gitignore 忽略，不会入库）
+# ========================================
+
+# ========================================
+# @section HTTP配置
+# ========================================
+[http]
+bind = "127.0.0.1"
+port = 8084
+
+# ========================================
+# @section WebSocket配置
+# ========================================
+[websocket]
+bind = "127.0.0.1"
+port = 8085
+max_connections = 100
+connection_timeout = 60
+auto_close_after_provision = true
+# ========================================
+# @section CORS配置
+# ========================================
+[cors]
+allowed_origins = [
+    "http://localhost:4200",
+    "http://127.0.0.1:4200",
+    "http://localhost:1422",
+    "http://127.0.0.1:1422"
+]
+allowed_methods = ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"]
+allowed_headers = ["content-type", "authorization", "accept", "origin", "tenant-id", "user-id", "x-provision-id"]
+allow_credentials = true
+max_age = 3600
+
+# ========================================
+# @section 上游服务配置
+# ========================================
+[upstream.external]
+upstream_server_url = "http://localhost:48085"
+api_prefix = "/admin-api"
+max_retries = 3
+retry_interval = 1000
+
+# ========================================
+# @section 认证配置
+# ========================================
+[auth]
+# 系统初始化口令列表（务必修改为强口令！）
+provision_keys = ["CHANGE_ME_provision_key"]
+# 允许访问系统的角色列表
+allowed_roles = ["gateway", "admin", "test"]
+
+# ========================================
+# @section 初始化配置
+# ========================================
+[provisioning]
+init_timeout_secs = 300
+heartbeat_secs = 10
+allow_reinit = false
+
+# ========================================
+# @section GreptimeDB配置
+# ========================================
+[greptimedb]
+# 是否启用 GreptimeDB 自动启动
+enabled = true
+# Postgres 协议地址（greptimedb.toml [postgres] 段）
+addr = "127.0.0.1:4003"
+# HTTP SQL 接口端口（greptimedb.toml [http] 段，表检查 /v1/sql 用）
+http_port = 4000
+database = "greptime"
+# 用户名（可选）
+# username = "greptime"
+# 密码（可选）
+# password = "greptime"
+# 可执行文件路径（运行时自行放置对应平台的 greptime 二进制）
+executable_path = "./greptimedb/greptime"
+config_file = "./greptimedb/greptimedb.toml"
+
+# ========================================
+# @section SQLite配置（Edge Conductor）
+# ========================================
+[sqlite]
+[sqlite.cache]
+db_path = "data/sqlite/cache.db"
+max_connections = 10
+connect_timeout_secs = 5
+enable_wal = true
+enable_foreign_keys = false
+
+[sqlite.system_mqtt_client]
+db_path = "data/sqlite/system_mqtt_client.db"
+max_connections = 5
+connect_timeout_secs = 10
+enable_wal = true
+enable_foreign_keys = true
+
+[sqlite.system_session]
+db_path = "data/sqlite/system_session.db"
+max_connections = 5
+connect_timeout_secs = 10
+enable_wal = true
+enable_foreign_keys = true
+
+[sqlite.system_config]
+db_path = "data/sqlite/system_config.db"
+max_connections = 5
+connect_timeout_secs = 10
+enable_wal = true
+enable_foreign_keys = true
+
+[sqlite.device]
+db_path = "data/sqlite/device.db"
+max_connections = 10
+connect_timeout_secs = 5
+enable_wal = true
+enable_foreign_keys = true
+
+# ========================================
+# @section VerneMQ配置
+# ========================================
+[VerneMQ]
+broker_url = "127.0.0.1"
+broker_port = 18830
+client_id = "ec-001"
+default_username = "CHANGE_ME"
+default_password = "CHANGE_ME"
+keep_alive = 60
+reconnect_interval = 5
+max_reconnect_attempts = 10
+qos = 1
+
+# ========================================
+# @section 心跳监控配置
+# ========================================
+[heartbeat_monitor]
+timeout_seconds = 45
+check_interval_seconds = 5
+concurrent_limit = 0
+wait_response_seconds = 30
+total_timeout_seconds = 60
+
+# ========================================
+# @section 重试策略配置
+# ========================================
+[retry]
+sqlite_max_retries = 3
+sqlite_retry_base_ms = 100
+
+# ========================================
+# @section 超时配置
+# ========================================
+[timeouts]
+socket_read_secs = 30
+socket_write_secs = 3
+protocol_start_secs = 30
+protocol_stop_secs = 10
+protocol_heartbeat_secs = 3600
