@@ -234,18 +234,46 @@ pub async fn start_generic_repair(
 /// 平台内卸载覆盖：mysql/redis（zip 管线，服务+目录全由平台掌控）+ java
 /// （MSI 注册表条目静默卸载）+ nginx（Windows 服务可选注册，先优雅停服再删目录）
 /// + dfy-backend/dfy-ui（无服务注册，停平台进程 + 删目录）
-/// + edge-conductor（无服务注册，停 edgecd-daemon 进程 + 删目录）。
-pub const UNINSTALLABLE: [&str; 7] =
-    ["mysql", "redis", "java", "nginx", "dfy-backend", "dfy-ui", "edge-conductor"];
+/// + edge-conductor（无服务注册，停 edgecd-daemon 进程 + 删目录）
+/// + greptime（捆绑时序库：停 greptime.exe 子进程 + 删 greptimedb 目录）。
+pub const UNINSTALLABLE: [&str; 8] = [
+    "mysql",
+    "redis",
+    "java",
+    "nginx",
+    "dfy-backend",
+    "dfy-ui",
+    "edge-conductor",
+    "greptime",
+];
 
 /// 可探测安装痕迹的全部目标（= UNINSTALLABLE）。
 /// 其中 nginx/dfy-backend/dfy-ui/edge-conductor 不注册 Windows 服务、不走
 /// net start/stop，但需要在修复中心「已安装/待安装」卡片上正确显示状态
 /// （「待安装」列表有没有条目全靠这份探测），所以纳入探测列表。
-pub const PROBEABLE: [&str; 7] =
-    ["mysql", "redis", "java", "nginx", "dfy-backend", "dfy-ui", "edge-conductor"];
+/// greptime（GreptimeDB）是 edge-conductor 的捆绑子进程组件：安装随边缘计算
+/// 管线整合，卡片上独立显示安装状态、支持单独卸载。
+pub const PROBEABLE: [&str; 8] = [
+    "mysql",
+    "redis",
+    "java",
+    "nginx",
+    "dfy-backend",
+    "dfy-ui",
+    "edge-conductor",
+    "greptime",
+];
 
 pub(crate) fn registry_install_dir(state: &AppState, target: &str) -> String {
+    // greptime 的 registry def 是远程端点语义（install_dir 为空）；捆绑本地化后
+    // 它的物理位置挂在 edge-conductor 安装目录的 greptimedb/ 子目录——探测、
+    // 卸载统一从这条特判取真实路径，与 probe_target/卸载端点同源
+    if target == "greptime" {
+        return format!(
+            "{}\\greptimedb",
+            registry_install_dir(state, "edge-conductor")
+        );
+    }
     state
         .registry
         .iter()
@@ -366,6 +394,8 @@ fn find_key_shallow(dir: &std::path::Path, key: &str, depth: u8) -> bool {
 /// 5. edge-conductor — 无 service_spec（exe 拷贝管线），按 install_dir +
 ///    edgecd-daemon.exe 判已装；运行态按进程镜像（8084/8085 是 Rust 端口，
 ///    探测进程名更直接）
+/// 6. greptime — edge-conductor 的捆绑时序库，按 greptimedb/greptime.exe 判
+///    已装；greptime.exe 是 edgecd-daemon 拉起的子进程，运行态按进程镜像
 pub(crate) async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
     if target == "java" {
         let installed = blocking(|| {
@@ -377,21 +407,25 @@ pub(crate) async fn probe_target(state: &AppState, target: &str) -> (bool, bool,
     }
     let install_dir = registry_install_dir(state, target);
     // dfy-backend/dfy-ui/nginx/edge-conductor 都不注册 Windows 服务：按 install_dir + 关键文件判定
-    if matches!(target, "dfy-backend" | "dfy-ui" | "nginx" | "edge-conductor") {
+    if matches!(target, "dfy-backend" | "dfy-ui" | "nginx" | "edge-conductor" | "greptime") {
         let install_dir = install_dir.clone();
         let key_filename: String = match target {
             "nginx" => "nginx.exe".into(),
             "dfy-backend" => "dfy-server.jar".into(),
             "dfy-ui" => "index.html".into(),
             "edge-conductor" => "edgecd-daemon.exe".into(),
+            // greptime：捆绑在 edge-conductor/greptimedb 下的时序库二进制
+            "greptime" => "greptime.exe".into(),
             _ => unreachable!(),
         };
         // 运行态探测口径：dfy-backend 用 48085 端口（image_running("java.exe")
-        // 会把任何 Java 程序误判成后端在跑）；nginx/edge-conductor 仍按进程名；
+        // 会把任何 Java 程序误判成后端在跑）；nginx/edge-conductor/greptime
+        // 仍按进程镜像（greptime 是 edgecd-daemon 拉起的子进程，无独立服务）；
         // dfy-ui 无进程
         let proc_image: Option<&'static str> = match target {
             "nginx" => Some("nginx.exe"),
             "edge-conductor" => Some("edgecd-daemon.exe"),
+            "greptime" => Some("greptime.exe"),
             "dfy-backend" | "dfy-ui" => None,
             _ => unreachable!(),
         };

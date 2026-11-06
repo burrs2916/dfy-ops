@@ -54,12 +54,16 @@ export const REPAIR_TARGETS = new Set([
   "edge-conductor",
 ]);
 /** 纯远程部署的软件：不进待安装/已安装列表（本机不安装、无安装包可识别），
- *  集中在「远程部署」区配置地址与访问密码。与后端 ServiceDef.remoteOnly 同口径。 */
-export const FIXED_REMOTE = new Set(["redis", "vernemq", "minio", "greptime"]);
+ *  集中在「远程部署」区配置地址与访问密码。与后端 ServiceDef.remoteOnly 同口径。
+ *  注意：GreptimeDB 不在此列——它已随边缘计算捆绑本地化（edge-conductor\greptimedb，
+ *  greptime.exe 作为 edgecd-daemon 的子进程运行），在待安装/已安装里独立展示、可卸载。 */
+export const FIXED_REMOTE = new Set(["redis", "vernemq", "minio"]);
 /** 有平台托管端点的远程服务（「远程部署」面板可配地址/密码）——与面板 SERVICES 同口径。 */
 export const MANAGED_ENDPOINT_TARGETS = new Set(["redis", "vernemq", "minio", "greptime"]);
 export function repairTarget(checkId: string): string | null {
   const c = checkId.replace(/^dep-/, "").replace(/^service-/, "");
+  // GreptimeDB 的安装/修复随边缘计算管线走（捆绑体：程序 + 时序库 + 配置一起装）
+  if (c === "greptime") return "edge-conductor";
   return REPAIR_TARGETS.has(c) ? c : null;
 }
 /** 折叠后命中的检查项 → 引导去「远程部署」配置页（地址/密码都在那里改）。 */
@@ -104,7 +108,7 @@ export const TARGET_DESC: Record<string, string> = {
   redis: "缓存数据库（远程）",
   vernemq: "MQTT 消息队列（远程）",
   minio: "对象存储（远程）",
-  greptime: "时序数据库（远程）",
+  greptime: "时序数据库 · 随边缘计算捆绑",
   nginx: "反向代理 · 80 端口",
   "dfy-backend": "Spring Boot · 48085",
   "dfy-ui": "Vue3 管理后台 · 静态托管",

@@ -172,9 +172,10 @@ pub fn start_uninstall(
     if !matches!(
         target,
         "mysql" | "redis" | "java" | "nginx" | "dfy-backend" | "dfy-ui" | "edge-conductor"
+            | "greptime"
     ) {
         return Err(format!(
-            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis/Java/Nginx/DFY 后端/DFY 前端/边缘计算），请使用 AI 方案或控制面板手动卸载",
+            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis/Java/Nginx/DFY 后端/DFY 前端/边缘计算/GreptimeDB 时序库），请使用 AI 方案或控制面板手动卸载",
             crate::ops::resource::target_label(target)
         ));
     }
@@ -490,7 +491,146 @@ async fn run_edge_uninstall(
     }
 }
 
-/// 通用卸载分派：按 target 路由到各管线（java/nginx/dfy/edge/mysql/redis）。
+/// GreptimeDB（捆绑时序库）单独卸载：停 greptime.exe 子进程 + 删 greptimedb 目录。
+/// install_dir 由 registry_install_dir 特判指向 edge-conductor\greptimedb。
+/// - 勾选「删除数据」时连 data/greptime 时序数据一并清（greptimedb.toml 的
+///   data-home 落在 edge-conductor\data\greptime，取 install_dir 的父目录拼接）
+/// - 卸载后边缘计算无法启动（greptime 是 edgecd-daemon 的启动依赖），日志如实提示
+#[cfg(target_os = "windows")]
+async fn run_greptimedb_uninstall(
+    state: Arc<RepairState>,
+    install_dir: String,
+    remove_data: bool,
+    env_cache: EnvCache,
+) {
+    let label = crate::ops::resource::target_label("greptime");
+
+    // 前置探测：目录与子进程现状（用户在卸载前看清要删什么）
+    let dir_exists = std::path::Path::new(&install_dir).is_dir();
+    let proc_up = crate::api::handlers_repair::image_running("greptime.exe");
+    state.log(format!("开始卸载 {label}（目录 {install_dir}）"));
+    state.log(format!(
+        "当前状态：时序库目录 {}，greptime 子进程 {}",
+        if dir_exists { "存在" } else { "不存在" },
+        if proc_up { "运行中（将先停止）" } else { "未运行" }
+    ));
+    if !dir_exists {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!("未检测到 {label} 的安装痕迹（目录 {install_dir} 不存在），无需卸载"),
+        )
+        .await;
+        return;
+    }
+    state.log("提示：greptime 是边缘计算的启动依赖——卸载后边缘计算无法启动，需重新安装 GreptimeDB 或整个边缘计算");
+
+    // 运行中：先停子进程（taskkill /t /f /im：连 edgecd-daemon 再拉起的实例一起清）
+    state.patch(|j| j.stage = "stop".into());
+    if proc_up {
+        state.log("greptime 子进程运行中 → 先停止…");
+        let kill = tokio::task::spawn_blocking(|| {
+            std::process::Command::new("taskkill")
+                .args(["/f", "/t", "/im", "greptime.exe"])
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        })
+        .await;
+        match kill {
+            Ok(Ok(out)) => state.log(format!("停止指令已执行：{out}")),
+            Ok(Err(e)) => state.log(format!("停止指令执行失败：{e}（复核仍会确认进程镜像）")),
+            Err(e) => {
+                finish(state, env_cache, false, format!("卸载任务异常：{e}")).await;
+                return;
+            }
+        }
+    } else {
+        state.log("greptime 子进程未在运行，跳过停止");
+    }
+
+    // 勾选删数据：连 data/greptime 时序数据一起删（data 在 edge-conductor 目录下）
+    if remove_data {
+        let data_dir = std::path::Path::new(&install_dir)
+            .parent()
+            .map(|p| p.join("data").join("greptime"))
+            .map(|p| p.to_string_lossy().to_string());
+        if let Some(data_dir) = data_dir {
+            if std::path::Path::new(&data_dir).is_dir() {
+                state.patch(|j| j.stage = "delete_data".into());
+                state.log(format!("勾选了删除数据 → 一并删除时序数据目录 {data_dir}"));
+                let script = format!("rmdir /s /q \"{data_dir}\"");
+                let run = tokio::task::spawn_blocking(move || {
+                    runas_wait("cmd.exe", &format!("/c {script}"))
+                })
+                .await;
+                match run {
+                    Ok(Ok(())) => {
+                        let gone = !std::path::Path::new(&data_dir).is_dir();
+                        state.log(if gone {
+                            "时序数据目录已删除".to_string()
+                        } else {
+                            format!("警告：时序数据目录 {data_dir} 仍在（可能被占用），已保留")
+                        });
+                    }
+                    Ok(Err(e)) => state.log(format!("数据目录清理命令返回：{e}（已保留）")),
+                    Err(e) => {
+                        finish(state, env_cache, false, format!("卸载任务异常：{e}")).await;
+                        return;
+                    }
+                }
+            } else {
+                state.log("未发现时序数据目录（data/greptime），跳过数据清理");
+            }
+        }
+    }
+
+    state.patch(|j| j.stage = "delete".into());
+    // greptimedb 目录删除走 UAC 脚本（与 edge-conductor/dfy 同款）：rmdir /s /q
+    let script = format!("rmdir /s /q \"{install_dir}\"");
+    state.log("请在 UAC 弹窗中点击「是」…");
+    let run =
+        tokio::task::spawn_blocking(move || runas_wait("cmd.exe", &format!("/c {script}"))).await;
+    match run {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => state.log(format!("清理命令返回：{e}（将以实际状态复核）")),
+        Err(e) => {
+            finish(state, env_cache, false, format!("卸载任务异常：{e}")).await;
+            return;
+        }
+    }
+
+    // ===== 复核：目录消失 + 子进程消失 = 卸载成功 =====
+    state.patch(|j| j.stage = "verify".into());
+    let dir_gone = !std::path::Path::new(&install_dir).is_dir();
+    let residue = crate::api::handlers_repair::image_running("greptime.exe");
+    crate::debug_log::entry(
+        crate::debug_log::APP_SCOPE,
+        if dir_gone && !residue { "INFO" } else { "ERROR" },
+        "uninstall",
+        "greptime",
+        &format!("复核：目录已删除={dir_gone} 进程残留={residue} dir={install_dir}"),
+    );
+    if dir_gone {
+        state.log(format!(
+            "{label} 已卸载：时序库目录已删除，安装痕迹清零"
+        ));
+        if residue {
+            state.log("警告：greptime.exe 仍在运行——请到任务管理器手动结束后再重试");
+        }
+        finish(state, env_cache, true, String::new()).await;
+    } else {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!("卸载未完成：目录 {install_dir} 仍存在（可能被资源管理器/greptime.exe 占用），请关闭占用后重试"),
+        )
+        .await;
+    }
+}
+
+/// 通用卸载分派：按 target 路由到各管线（java/nginx/dfy/edge/greptime/mysql/redis）。
 #[cfg(target_os = "windows")]
 async fn run_uninstall(
     state: Arc<RepairState>,
@@ -520,6 +660,14 @@ async fn run_uninstall(
     //（greptimedb 时序库目录随安装目录一并删除，卸载前如实告知）。
     if target == "edge-conductor" {
         run_edge_uninstall(state, install_dir, procs, env_cache).await;
+        return;
+    }
+    // greptime：边缘计算的捆绑时序库——单独卸载 = 停 greptime.exe 子进程 +
+    // 删 greptimedb 目录（install_dir 已由 registry_install_dir 特判指向
+    // edge-conductor\greptimedb）；勾选删数据时连 data/greptime 时序数据一起清。
+    // 注意：卸载后边缘计算无法启动（greptime 是它的启动依赖），日志如实提示。
+    if target == "greptime" {
+        run_greptimedb_uninstall(state, install_dir, remove_data, env_cache).await;
         return;
     }
     let label = crate::ops::resource::target_label(target);

@@ -183,12 +183,14 @@ export default function RepairCenter({
   const [busyOps, setBusyOps] = useState<string | null>(null);
 
   /** 一键安装 / 重装统一入口：dfy-backend 先弹配置确认（外部配置落盘），
+   *  greptime 是边缘计算的捆绑组件，安装随边缘计算管线走；
    *  其余目标直接安装。任务进行中拒绝重复发起——实测连续点击会并发出多轮
    *  「解压→拍平→自动启动」，互相踩安装目录。 */
   const launchInstall = useCallback(
     (t: string) => {
       if (repairRunning) return;
       if (t === "dfy-backend") setBackendCfgOpen(true);
+      else if (t === "greptime") onRepair("edge-conductor");
       else onRepair(t);
     },
     [onRepair, repairRunning],
@@ -656,7 +658,11 @@ export default function RepairCenter({
           onClick={() => launchInstall(t)}
           sx={{ textTransform: "none", whiteSpace: "nowrap" }}
         >
-          {repairRunning ? "任务进行中…" : "一键安装"}
+          {repairRunning
+            ? "任务进行中…"
+            : t === "greptime"
+              ? "随边缘计算安装"
+              : "一键安装"}
         </Button>
       );
     } else {
@@ -1244,6 +1250,10 @@ export default function RepairCenter({
                   <>卸载将<b>停止平台拉起的后端进程并删除安装目录</b>（不影响机器上其他 Java 程序），安装目录：</>
                 ) : uninstallTarget?.target === "dfy-ui" ? (
                   <>卸载将<b>删除前端静态目录</b>（Nginx root 指向它，无需停任何进程），安装目录：</>
+                ) : uninstallTarget?.target === "edge-conductor" ? (
+                  <>卸载将<b>停止 edgecd-daemon 进程并删除安装目录</b>（GreptimeDB 时序库目录随安装目录一并删除），安装目录：</>
+                ) : uninstallTarget?.target === "greptime" ? (
+                  <>卸载将<b>停止 greptime 子进程并删除时序库目录</b>（GreptimeDB 是边缘计算的启动依赖，卸载后边缘计算无法启动），时序库目录：</>
                 ) : (
                   <>
                     将停止并注销 Windows 服务
