@@ -167,7 +167,7 @@ export default function ConfigCenterPanel({ onGotoOpsTab }: Props) {
       <Section
         icon={<TuneOutlinedIcon fontSize="small" />}
         title="应用配置"
-        hint="卡片显示配置文件在磁盘上的位置与关键参数，展开即可编辑，保存立即落盘"
+        hint="Nginx / DFY 后端 / 边缘计算——卡片显示配置位置与关键参数，展开即编辑，保存立即落盘"
       />
       <Grid container spacing={1.5} sx={{ mt: 0.25 }}>
         {/* --- Nginx --- */}
