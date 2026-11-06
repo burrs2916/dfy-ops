@@ -88,20 +88,20 @@ const LogRow = styled("div")<{
   $dimmed?: boolean;
 }>`
   font-family: ${MONO_STACK};
-  font-size: 12px;
+  font-size: 12.5px;
   white-space: ${(p) => (p.$noWrap ? "pre" : "pre-wrap")};
   word-break: ${(p) => (p.$noWrap ? undefined : "break-all")};
-  line-height: 1.7;
+  line-height: 1.65;
   padding: 0 2px;
   border-radius: 4px;
   opacity: ${(p) => (p.$dimmed ? 0.75 : 1)};
   background-color: ${(p) =>
     p.$highlight
-      ? "rgba(22,58,94,0.35)"
+      ? "rgba(30,63,102,0.42)"
       : p.$hasErr
         ? "rgba(211,47,47,0.10)"
         : "transparent"};
-  color: #b0b0b0;
+  color: #b8bfc9;
   cursor: ${(p) => (p.$clickable ? "pointer" : undefined)};
   &:hover {
     background-color: ${(p) =>
@@ -110,7 +110,7 @@ const LogRow = styled("div")<{
 `;
 
 const TsSpan = styled("span")`
-  color: #757575;
+  color: #828b99;
   margin-right: 4px;
 `;
 

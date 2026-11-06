@@ -436,7 +436,14 @@ export default function MonitorCenter() {
           {/* 左列：按服务分组的日志清单 */}
           <Paper
             variant="outlined"
-            sx={{ width: 400, flexShrink: 0, overflowY: "auto", maxHeight: "calc(100vh - 250px)" }}
+            sx={{
+              width: 400,
+              flexShrink: 0,
+              overflowY: "auto",
+              maxHeight: "calc(100vh - 250px)",
+              // 左列淡蓝灰底与右侧白底形成明暗层次（品牌蓝体系同源）
+              bgcolor: "#fafbfd",
+            }}
           >
             {services.map((s, i) => {
               // 主列表只放实时业务日志；备份/归档衍生收进「备用」弹窗，不占日常视线
@@ -452,7 +459,8 @@ export default function MonitorCenter() {
                   sx={{
                     px: 1.5,
                     py: 0.9,
-                    bgcolor: "rgba(22,58,94,0.06)",
+                    // 组头品牌蓝浅底（#1e3f66 体系）：与左列淡灰底再叠一层，标题区层次分明
+                    bgcolor: "rgba(30,63,102,0.07)",
                     borderBottom: "1px solid",
                     borderColor: "divider",
                     position: "sticky",
@@ -529,16 +537,23 @@ export default function MonitorCenter() {
                           pr: 1.5,
                           py: 0.75,
                           cursor: "pointer",
-                          bgcolor: active ? "rgba(22,58,94,0.08)" : "transparent",
+                          bgcolor: active ? "rgba(30,63,102,0.09)" : "transparent",
                           borderLeft: 3,
                           borderColor: active ? "primary.main" : "transparent",
-                          "&:hover": { bgcolor: "action.hover" },
+                          "&:hover": { bgcolor: "rgba(30,63,102,0.05)" },
                         }}
                       >
-                        <Description sx={{ fontSize: 15, color: "text.secondary" }} />
+                        <Description
+                          sx={{ fontSize: 15, color: active ? "primary.main" : "text.secondary" }}
+                        />
                         <Tooltip title={f.path} placement="right" arrow>
                           <Box sx={{ minWidth: 0, flex: 1 }}>
-                            <Typography variant="body2" noWrap>
+                            {/* 文件名用等宽字体：与界面中文区隔，运维数据感 */}
+                            <Typography
+                              variant="body2"
+                              noWrap
+                              sx={{ fontFamily: MONO_STACK, fontSize: 12.5, color: active ? "primary.main" : "text.primary" }}
+                            >
                               {f.name}
                               {f.derived && (
                                 <Box
