@@ -115,6 +115,13 @@ function parseQuery(q: string, fallbackDay: string): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
+/** 服务名拆层：「DFY 后端（Spring Boot）」→ 主名「DFY 后端」+ 副题「Spring Boot」。
+ *  主名深色粗体、副题灰色小字——长服务名不再把左列行挤换行（用户定案：不换行）。 */
+function splitServiceName(name: string): [string, string | null] {
+  const m = name.match(/^(.+?)（(.+)）$/);
+  return m ? [m[1], m[2]] : [name, null];
+}
+
 export default function MonitorCenter() {
   // 初始值直接吃模块级缓存：有缓存时跳过骨架屏，回来就是上次的画面
   const [services, setServices] = useState<LogFileService[]>(listCache ?? []);
@@ -402,7 +409,7 @@ export default function MonitorCenter() {
   };
 
   return (
-    <Box sx={{ p: 2.5, maxWidth: 1400, mx: "auto" }}>
+    <Box sx={{ p: 2.5, maxWidth: 1680, mx: "auto" }}>
       <PageHeader
         title="监控中心"
         description="统一管理本地服务的运行日志：按服务分组，活跃（60 秒内有写入）的文件带绿灯；支持备份与删除。远程部署的服务（MinIO/VerneMQ/Redis 等）自身日志无法收集，不在此运维。"
@@ -429,22 +436,22 @@ export default function MonitorCenter() {
           {/* 左列：按服务分组的日志清单 */}
           <Paper
             variant="outlined"
-            sx={{ width: 350, flexShrink: 0, overflowY: "auto", maxHeight: "calc(100vh - 250px)" }}
+            sx={{ width: 400, flexShrink: 0, overflowY: "auto", maxHeight: "calc(100vh - 250px)" }}
           >
             {services.map((s, i) => {
               // 主列表只放实时业务日志；备份/归档衍生收进「备用」弹窗，不占日常视线
               const mainFiles = s.files.filter((f) => !f.derived);
               const extraFiles = s.files.filter((f) => f.derived);
+              // 服务名拆层：主名深色粗体 + 括号副题灰色小字，整行不再换行
+              const [mainName, subName] = splitServiceName(s.name);
               return (
               <Box key={s.id}>
                 {i > 0 && <Divider />}
                 <Stack
-                  direction="row"
-                  spacing={1}
-                  alignItems="center"
+                  spacing={0.25}
                   sx={{
                     px: 1.5,
-                    py: 1.1,
+                    py: 0.9,
                     bgcolor: "rgba(22,58,94,0.06)",
                     borderBottom: "1px solid",
                     borderColor: "divider",
@@ -453,37 +460,55 @@ export default function MonitorCenter() {
                     zIndex: 1,
                   }}
                 >
-                  <Box
-                    sx={{
-                      width: 9,
-                      height: 9,
-                      borderRadius: "50%",
-                      bgcolor: s.running ? "success.main" : "grey.400",
-                      flexShrink: 0,
-                    }}
-                  />
-                  <Typography variant="subtitle2" sx={{ fontWeight: 700 }}>
-                    {s.name}
-                  </Typography>
-                  <Chip
-                    size="small"
-                    variant="outlined"
-                    label={s.running ? "运行中" : "已停止"}
-                    color={s.running ? "success" : "default"}
-                    sx={{ height: 20, fontSize: 11, ml: "auto" }}
-                  />
-                  <Chip size="small" label={`${mainFiles.length} 个日志`} sx={{ height: 20, fontSize: 11 }} />
-                  {extraFiles.length > 0 && (
-                    <Tooltip title="备份/归档日志收在这里，点开可查看与清理">
-                      <Chip
-                        size="small"
-                        variant="outlined"
-                        label={`备用 ${extraFiles.length} · ${fmtSize(extraFiles.reduce((n, f) => n + f.size, 0))}`}
-                        sx={{ height: 20, fontSize: 11 }}
-                        onClick={() => setBackupMgr({ id: s.id, name: s.name, files: extraFiles })}
-                      />
-                    </Tooltip>
-                  )}
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ flexWrap: "nowrap" }}>
+                    <Box
+                      sx={{
+                        width: 9,
+                        height: 9,
+                        borderRadius: "50%",
+                        bgcolor: s.running ? "success.main" : "grey.400",
+                        flexShrink: 0,
+                      }}
+                    />
+                    <Typography
+                      variant="subtitle2"
+                      noWrap
+                      sx={{ fontWeight: 700, color: "primary.main", flexShrink: 0 }}
+                    >
+                      {mainName}
+                    </Typography>
+                    {subName && (
+                      <Typography
+                        variant="caption"
+                        noWrap
+                        sx={{ color: "text.secondary", minWidth: 0 }}
+                        title={subName}
+                      >
+                        {subName}
+                      </Typography>
+                    )}
+                    <Chip
+                      size="small"
+                      variant="outlined"
+                      label={s.running ? "运行中" : "已停止"}
+                      color={s.running ? "success" : "default"}
+                      sx={{ height: 20, fontSize: 11, ml: "auto", flexShrink: 0 }}
+                    />
+                  </Stack>
+                  <Stack direction="row" spacing={0.75} alignItems="center" sx={{ pl: 2, flexWrap: "wrap", rowGap: 0.25 }}>
+                    <Chip size="small" label={`${mainFiles.length} 个日志`} sx={{ height: 20, fontSize: 11 }} />
+                    {extraFiles.length > 0 && (
+                      <Tooltip title={`备份/归档日志 ${extraFiles.length} 个（${fmtSize(extraFiles.reduce((n, f) => n + f.size, 0))}），点开可查看与清理`}>
+                        <Chip
+                          size="small"
+                          variant="outlined"
+                          label={`备用 ${extraFiles.length}`}
+                          sx={{ height: 20, fontSize: 11 }}
+                          onClick={() => setBackupMgr({ id: s.id, name: s.name, files: extraFiles })}
+                        />
+                      </Tooltip>
+                    )}
+                  </Stack>
                 </Stack>
                 {mainFiles.length === 0 ? (
                   <Typography variant="caption" color="text.disabled" sx={{ px: 2.5, py: 0.5, display: "block" }}>
