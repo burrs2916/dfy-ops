@@ -14,8 +14,9 @@
 use serde::Serialize;
 
 /// 资源目录可修复的目标软件（与环境检查项 id 对应，见 repair_target）。
-pub const TARGETS: [&str; 9] = [
+pub const TARGETS: [&str; 10] = [
     "java", "mysql", "redis", "vernemq", "minio", "greptime", "nginx", "dfy-backend", "dfy-ui",
+    "edge-conductor",
 ];
 
 /// 资源目录里的一个文件（识别不出的也列出，target=None 交 AI 判断）。
@@ -73,6 +74,11 @@ fn match_target(name_lower: &str) -> Option<&'static str> {
     } else if name_lower.contains("dfy-ui") {
         Some("dfy-ui")
     }
+    // 边缘计算守护进程：CI 产物 edgecd-daemon.exe / edge-conductor-windows.zip
+    // （不用裸 "edge" 泛词——误伤面太大，只认 edge-conductor / edgecd）
+    else if name_lower.contains("edge-conductor") || name_lower.contains("edgecd") {
+        Some("edge-conductor")
+    }
     // 顺序敏感：vernemq 含 "mq" 但不含 "mysql"；memurai 是 Windows 原生 Redis
     else if name_lower.contains("vernemq") {
         Some("vernemq")
@@ -120,6 +126,8 @@ fn convention_target(dir_name_lower: &str) -> Option<&'static str> {
         // 自研云端三件套：目录名 = service id
         "dfy-backend" => Some("dfy-backend"),
         "dfy-ui" => Some("dfy-ui"),
+        // 边缘计算：约定目录 edge-conductor/（放 edgecd-daemon.exe + config.toml 等）
+        "edge-conductor" => Some("edge-conductor"),
         _ => None,
     }
 }
@@ -311,10 +319,18 @@ pub fn msi_install_command(target: &str, msi_path: &str) -> Option<String> {
 }
 
 /// 检查项 id → 修复目标软件。dep-*/service-* 前缀折叠后按 id 匹配。
+/// greptime 检查项修复 → edge-conductor 安装管线：GreptimeDB 时序库随
+/// edge-conductor 安装整合（greptimedb/ 目录），不单独安装。
 pub fn repair_target(check_id: &str) -> Option<&'static str> {
     let c = check_id.strip_prefix("dep-").unwrap_or(check_id);
     let c = c.strip_prefix("service-").unwrap_or(c);
-    let c = if c == "java" { "java" } else { c };
+    let c = if c == "java" {
+        "java"
+    } else if c == "greptime" {
+        "edge-conductor"
+    } else {
+        c
+    };
     TARGETS.iter().find(|t| **t == c).copied()
 }
 
@@ -327,6 +343,7 @@ pub fn target_label(target: &str) -> &'static str {
         "vernemq" => "VerneMQ",
         "minio" => "MinIO",
         "greptime" => "GreptimeDB",
+        "edge-conductor" => "边缘计算 (Edge Conductor)",
         "nginx" => "Nginx 反向代理",
         "dfy-backend" => "DFY 后端服务 (dfy-boot-base)",
         "dfy-ui" => "DFY 前端 (Vue3)",
@@ -503,7 +520,8 @@ mod tests {
         assert_eq!(repair_target("dep-mysql"), Some("mysql"));
         assert_eq!(repair_target("service-vernemq"), Some("vernemq"));
         assert_eq!(repair_target("dep-minio"), Some("minio"));
-        assert_eq!(repair_target("greptime"), Some("greptime"));
+        // greptime 检查项修复 → edge-conductor 管线：GreptimeDB 随边缘计算安装整合
+        assert_eq!(repair_target("greptime"), Some("edge-conductor"));
         assert_eq!(repair_target("webview2"), None);
         assert_eq!(repair_target("jar"), None);
         // 自研云端三件套现在进修复目标（支持资源目录安装）

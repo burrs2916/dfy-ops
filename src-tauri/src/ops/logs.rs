@@ -75,6 +75,14 @@ fn utf8_char_len(b: u8) -> usize {
     else { 4 }
 }
 
+/// 日志文件名判定：`.log` 结尾，或 `.log.<日期>` 轮转形态。
+/// tracing-appender 按天轮转出的 edgecd-daemon.log.2026-11-06、
+/// logback 的 dfy-server.log.2026-11-04.0.gz 都属于后者——
+/// 目录声明方式收集日志时两者都必须收录，否则轮转文件永远进不了监控中心。
+pub fn is_log_file_name(name: &str) -> bool {
+    name.ends_with(".log") || name.split(".log.").count() > 1
+}
+
 /// 日志字节解码：优先按 UTF-8；无效时回退 GBK。
 /// 写入端已在 v0.2.54 统一 UTF-8（logging.charset + file.encoding），
 /// 但存量 GBK 文件（历史日志、其他未托管服务）仍会被 tail 读到——

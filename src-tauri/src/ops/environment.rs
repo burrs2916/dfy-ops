@@ -951,23 +951,41 @@ mod tests {
         assert!(runtime.fix_hint.contains("nginx") || runtime.fix_hint.contains("Node"), "Warn 提示应给出运行方式指引: {runtime:?}");
     }
 
-    /// 回归：GreptimeDB/VerneMQ/MinIO 远程部署后，edge-conductor 不得再有任何
-    /// 本地二进制/路径检查项（曾经的 greptime requires 检查已随远程化移除）——
-    /// 防止环境检查又冒出「下载二进制放入本地目录」这类误导性修复建议。
+    /// 回归：GreptimeDB 时序库随安装管线整合到 edge-conductor/greptimedb/，
+    /// 由 edgecd-daemon 自己拉起——环境检查必须有「greptimedb/greptime 就位」
+    /// 路径检查项（安装完就有）；VerneMQ/MinIO 仍为远程部署，不得出现本地
+    /// 路径检查项（防止「下载二进制放入本地目录」这类误导性修复建议）。
     #[test]
     fn remote_deps_have_no_local_binary_checks() {
         let def = def_of("edge-conductor");
-        assert!(
-            def.requires.is_empty(),
-            "依赖均为远程部署，不应残留本地路径检查项: {:?}",
-            def.requires
+        let req = def
+            .requires
+            .iter()
+            .find(|r| r.check_id() == "greptime")
+            .expect("edge-conductor 必须声明 greptimedb 本地路径检查项");
+        assert_eq!(
+            req.path.as_deref(),
+            Some("greptimedb/greptime"),
+            "路径必须指向随安装整合的 greptimedb 目录: {req:?}"
         );
-        let report = check_service_env_with(&def, &states(&[]), None);
-        assert!(
-            !report.items.iter().any(|i| i.id == "greptime"),
-            "环境检查不得出现 greptime 本地检查项: {:?}",
-            report.items
-        );
+        let vernemq = def_of("vernemq");
+        let minio = def_of("minio");
+        for (id, d) in [("vernemq", &vernemq), ("minio", &minio)] {
+            assert!(
+                d.requires.is_empty(),
+                "{id} 为远程部署，不应残留本地路径检查项: {:?}",
+                d.requires
+            );
+            let report = check_service_env_with(d, &states(&[]), None);
+            assert!(
+                !report
+                    .items
+                    .iter()
+                    .any(|i| i.id == "greptime" || i.id == "vernemq" || i.id == "minio"),
+                "{id} 环境检查不得出现本地路径检查项: {:?}",
+                report.items
+            );
+        }
     }
 
     /// macOS：Tauri 客户端使用系统内置 WKWebView，未运行也不应产生 WebView2 假警告。

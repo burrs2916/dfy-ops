@@ -93,7 +93,10 @@ pub async fn start_generic_repair(
     }
     let label = resource::target_label(target);
 
+    // dir_for_edge：edge-conductor 目录/exe 兜底管线要用资源目录路径，
+    // 而 dir 已被移进下面的阻塞闭包，先克隆一份（dir 为空时同样传空，兜底分支自己报错）
     let dir = state.app_settings.lock().unwrap().resource_dir.clone();
+    let dir_for_edge = dir.clone();
     let (zip, msi, jar) = if dir.is_empty() {
         (None, None, None)
     } else {
@@ -109,9 +112,10 @@ pub async fn start_generic_repair(
 
     // 管线分流：
     // - java/mysql/nginx/dfy-ui → zip 解压管线
+    // - edge-conductor → zip 解压管线（装完整合 greptimedb）；无 zip 时目录/exe 兜底
     // - dfy-backend → jar 拷贝管线（单独分支）
     // - 其他 → msi 静默安装管线
-    let zip_capable = matches!(target, "mysql" | "java" | "nginx" | "dfy-ui");
+    let zip_capable = matches!(target, "mysql" | "java" | "nginx" | "dfy-ui" | "edge-conductor");
     let jar_capable = target == "dfy-backend";
 
     let started = if jar_capable && jar.is_some() {
@@ -151,6 +155,24 @@ pub async fn start_generic_repair(
             state.procs.clone(),
             state.registry.clone(),
         )
+    } else if target == "edge-conductor" {
+        // zip 之外的兜底：资源目录直接放 edge-conductor/ 目录或 edgecd*.exe 散件
+        if dir_for_edge.is_empty() {
+            Err("请先在「设置 → 本地资源目录」配置资源目录后重试".to_string())
+        } else {
+            let install_dir = state
+                .registry
+                .iter()
+                .find(|d| d.id == "edge-conductor")
+                .map(|d| d.install_dir.clone())
+                .unwrap_or_else(|| "C:\\services\\edge-conductor".to_string());
+            crate::ops::env_repair::start_edge_dir_install(
+                dir_for_edge.clone(),
+                install_dir,
+                state.env_cache.clone(),
+                state.repair.clone(),
+            )
+        }
     } else if let Some(f) = msi.clone() {
         crate::ops::env_repair::start_resource_install(
             target,
@@ -184,6 +206,8 @@ pub async fn start_generic_repair(
         Some("jar")
     } else if zip.is_some() && zip_capable {
         Some("zip")
+    } else if target == "edge-conductor" {
+        Some("edge-dir")
     } else if msi.is_some() {
         Some("msi")
     } else {
@@ -196,6 +220,7 @@ pub async fn start_generic_repair(
             "message": match source {
                 Some("zip") if target == "java" => format!("开始离线安装 {label}（免安装版：解压 → 写 JAVA_HOME → 版本验证，无需管理员权限），进度见下方任务状态"),
                 Some("zip") => format!("开始离线安装 {label}（免安装版：解压 → 初始化 → 注册服务），全程只需一次管理员确认，进度见下方任务状态"),
+                Some("edge-dir") => format!("开始离线安装 {label}（程序 + GreptimeDB 时序库整合：复制 → 整合 → 校验），进度见下方任务状态"),
                 Some("msi") => format!("开始离线安装 {label}（{}）→ 管理员确认 → 验证，进度见下方任务状态", msi.as_ref().map(|f| f.file_name.as_str()).unwrap_or_default()),
                 _ => format!("资源目录无 {label} 安装包，开始在线安装免安装版（下载 → 解压 → 验证）"),
             }

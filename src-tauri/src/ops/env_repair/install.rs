@@ -507,7 +507,11 @@ pub fn start_zip_install(
     procs: Arc<crate::ops::process::ProcManager>,
     registry: Vec<crate::ops::registry::ServiceDef>,
 ) -> Result<(), String> {
-    if service_spec(target).is_none() && target != "java" && target != "dfy-ui" {
+    if service_spec(target).is_none()
+        && target != "java"
+        && target != "dfy-ui"
+        && target != "edge-conductor"
+    {
         return Err(format!(
             "{} 没有免安装版（zip）安装管线，请使用 MSI 安装包或 AI 方案",
             crate::ops::resource::target_label(target)
@@ -547,6 +551,280 @@ pub fn start_zip_install(
         "免安装版（zip）安装仅支持 Windows 目标机，{} 请手动安装",
         crate::ops::resource::target_label(target)
     ))
+}
+
+// ===== edge-conductor 专用：greptimedb 整合 + 裸 exe/约定目录兜底管线 =====
+
+/// 递归复制目录（跨盘安全：逐文件复制而非 rename），返回复制文件数。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<u64, String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("创建目录 {} 失败：{e}", dst.display()))?;
+    let mut n = 0u64;
+    for e in std::fs::read_dir(src)
+        .map_err(|e| format!("读取 {} 失败：{e}", src.display()))?
+        .flatten()
+    {
+        let p = e.path();
+        let t = dst.join(e.file_name());
+        if p.is_dir() {
+            n += copy_dir_recursive(&p, &t)?;
+        } else {
+            std::fs::copy(&p, &t).map_err(|e| format!("复制 {} 失败：{e}", p.display()))?;
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
+/// 在资源目录定位 greptimedb 目录：约定顶层 greptimedb/ 或 greptime/
+/// （内含 greptime.exe 即视为就绪），一级子目录兜底（资源目录分层布局）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn find_greptimedb_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    const DIRS: [&str; 2] = ["greptimedb", "greptime"];
+    for name in DIRS {
+        let d = root.join(name);
+        if d.is_dir() && d.join("greptime.exe").is_file() {
+            return Some(d);
+        }
+    }
+    for e1 in std::fs::read_dir(root).ok()?.flatten() {
+        let p1 = e1.path();
+        if !p1.is_dir() {
+            continue;
+        }
+        for name in DIRS {
+            let d = p1.join(name);
+            if d.is_dir() && d.join("greptime.exe").is_file() {
+                return Some(d);
+            }
+        }
+    }
+    None
+}
+
+/// 把资源目录的 greptimedb 目录整合到 install_dir/greptimedb。
+/// 程序 zip 自带（greptime.exe 已在）时跳过；资源目录没有时明确报错——
+/// edge-conductor 没有时序库起不来，宁可装一半失败也不装个残缺的。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn integrate_greptimedb(
+    resource_root: Option<&std::path::Path>,
+    install_dir: &std::path::Path,
+) -> Result<String, String> {
+    let dst = install_dir.join("greptimedb");
+    if dst.join("greptime.exe").is_file() {
+        return Ok("greptimedb 已随程序包就位，无需整合".into());
+    }
+    let Some(root) = resource_root else {
+        return Err("无法定位资源目录（安装包路径无父目录），greptimedb 整合失败".into());
+    };
+    let Some(src) = find_greptimedb_dir(root) else {
+        return Err(
+            "资源目录中没有 greptimedb 目录（需含 greptime.exe + greptimedb.toml）。请把 Windows 版 greptimedb 文件夹放入资源目录后重试".to_string(),
+        );
+    };
+    let n = copy_dir_recursive(&src, &dst)?;
+    Ok(format!(
+        "已整合 GreptimeDB 时序库：{} → {}（{n} 个文件）",
+        src.display(),
+        dst.display()
+    ))
+}
+
+/// edge-conductor 程序源：zip 之外的兜底形态。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+enum EdgeSource {
+    /// 约定目录 edge-conductor/（整个目录内容 = 安装内容）
+    Dir(std::path::PathBuf),
+    /// 裸 exe（CI 产物散件），复制为 install_dir/edgecd-daemon.exe
+    Exe(std::path::PathBuf),
+}
+
+/// 定位 edge-conductor 程序源：约定目录优先，其次顶层/一级子目录里的裸 exe。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn find_edge_source(resource_dir: &std::path::Path) -> Option<EdgeSource> {
+    let d = resource_dir.join("edge-conductor");
+    if d.is_dir() && d.join("edgecd-daemon.exe").is_file() {
+        return Some(EdgeSource::Dir(d));
+    }
+    let mut roots = vec![resource_dir.to_path_buf()];
+    if let Ok(rd) = std::fs::read_dir(resource_dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                roots.push(p);
+            }
+        }
+    }
+    for r in roots {
+        if let Ok(rd) = std::fs::read_dir(&r) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if let Some(name) = p.file_name().map(|n| n.to_string_lossy().to_lowercase()) {
+                    if p.is_file()
+                        && name.ends_with(".exe")
+                        && (name.contains("edgecd") || name.contains("edge-conductor"))
+                    {
+                        return Some(EdgeSource::Exe(p));
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// 裸 exe/约定目录兜底管线：zip 之外的 edge-conductor 安装路径。
+/// 流程：发现源 → 复制到 install_dir 根 → 整合 greptimedb → 校验。
+#[cfg(target_os = "windows")]
+pub fn start_edge_dir_install(
+    resource_dir: String,
+    install_dir: String,
+    env_cache: EnvCache,
+    state: Arc<RepairState>,
+) -> Result<(), String> {
+    {
+        let mut job = state.job.lock().unwrap();
+        if job.running {
+            return Err("已有修复任务在执行，请等待其完成".into());
+        }
+        job.running = true;
+        job.target = Some("edge-conductor".into());
+        job.op = "install".into();
+        job.stage = "copy".into();
+        job.ok = None;
+        job.error = None;
+        job.logs.clear();
+    }
+    tokio::spawn(async move {
+        run_edge_dir_install(state, resource_dir, install_dir, env_cache).await;
+    });
+    Ok(())
+}
+
+/// 非 Windows：dev 机不提供（交付平台是 Windows）。
+#[cfg(not(target_os = "windows"))]
+pub fn start_edge_dir_install(
+    _resource_dir: String,
+    _install_dir: String,
+    _env_cache: EnvCache,
+    _state: Arc<RepairState>,
+) -> Result<(), String> {
+    Err("边缘计算安装仅支持 Windows 目标机，请手动部署".into())
+}
+
+#[cfg(target_os = "windows")]
+async fn run_edge_dir_install(
+    state: Arc<RepairState>,
+    resource_dir: String,
+    install_dir: String,
+    env_cache: EnvCache,
+) {
+    let label = crate::ops::resource::target_label("edge-conductor");
+    state.log(format!("开始安装 {label}（程序目录/exe）：{resource_dir} → {install_dir}"));
+    let Some(src) = find_edge_source(std::path::Path::new(&resource_dir)) else {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!(
+                "资源目录 {resource_dir} 中没有 {label} 的程序（需 zip 包、edge-conductor/ 目录或 edgecd*.exe）"
+            ),
+        )
+        .await;
+        return;
+    };
+    // ===== 复制程序 =====
+    state.patch(|j| j.stage = "copy".into());
+    let copied = tokio::task::spawn_blocking(move || -> Result<String, String> {
+        let idp = std::path::Path::new(&install_dir);
+        std::fs::create_dir_all(idp).map_err(|e| format!("创建安装目录失败：{e}"))?;
+        match src {
+            EdgeSource::Dir(d) => {
+                let mut n = 0u64;
+                for e in std::fs::read_dir(&d)
+                    .map_err(|e| format!("读取 {} 失败：{e}", d.display()))?
+                    .flatten()
+                {
+                    let p = e.path();
+                    let t = idp.join(e.file_name());
+                    if p.is_dir() {
+                        n += copy_dir_recursive(&p, &t)?;
+                    } else {
+                        std::fs::copy(&p, &t)
+                            .map_err(|e| format!("复制 {} 失败：{e}", p.display()))?;
+                        n += 1;
+                    }
+                }
+                Ok(format!("已复制程序目录内容到安装根（{n} 个文件）"))
+            }
+            EdgeSource::Exe(p) => {
+                std::fs::copy(&p, idp.join("edgecd-daemon.exe"))
+                    .map_err(|e| format!("复制 {} 失败：{e}", p.display()))?;
+                Ok(format!("已复制 {} → edgecd-daemon.exe", p.display()))
+            }
+        }
+    })
+    .await;
+    match copied {
+        Ok(Ok(msg)) => state.log(msg),
+        Ok(Err(e)) => {
+            finish(state, env_cache, false, e).await;
+            return;
+        }
+        Err(e) => {
+            finish(state, env_cache, false, format!("复制任务异常：{e}")).await;
+            return;
+        }
+    }
+    // ===== 整合 greptimedb =====
+    state.patch(|j| j.stage = "greptimedb".into());
+    let rdir = resource_dir.clone();
+    let idd = install_dir.clone();
+    let gt = tokio::task::spawn_blocking(move || {
+        integrate_greptimedb(Some(std::path::Path::new(&rdir)), std::path::Path::new(&idd))
+    })
+    .await;
+    match gt {
+        Ok(Ok(msg)) => state.log(msg),
+        Ok(Err(e)) => {
+            finish(state, env_cache, false, e).await;
+            return;
+        }
+        Err(e) => {
+            finish(state, env_cache, false, format!("GreptimeDB 整合任务异常：{e}")).await;
+            return;
+        }
+    }
+    // ===== 验证 =====
+    state.patch(|j| j.stage = "verify".into());
+    let exe = std::path::Path::new(&install_dir).join("edgecd-daemon.exe");
+    if exe.is_file() {
+        let has_cfg = std::path::Path::new(&install_dir).join("config.toml").is_file();
+        state.log("验证通过：edgecd-daemon.exe 就绪");
+        if has_cfg {
+            state.log("config.toml 已就位，可在服务总览启动边缘计算");
+        } else {
+            state.log(format!(
+                "警告：config.toml 缺失——启动前请把配置文件放到 {install_dir}\\config.toml（edge-conductor 没有它无法启动）"
+            ));
+        }
+        debug_log::entry(
+            debug_log::APP_SCOPE,
+            "INFO",
+            "install_verify",
+            "edge-conductor",
+            &format!("基准 {install_dir}\\edgecd-daemon.exe（目录/exe 管线）"),
+        );
+        finish(state, env_cache, true, String::new()).await;
+    } else {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!("验证失败：未找到 {}", exe.display()),
+        )
+        .await;
+    }
 }
 
 /// jar 快速拷贝管线：自研后端 dfy-boot-base 的 fat jar 直接拷贝到 install_dir 根，
@@ -1230,6 +1508,14 @@ fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
                 Ok("非 Windows 平台无需配置".into())
             }
         }
+        // edge-conductor：无平台预置配置，config.toml 由资源包/用户就位
+        "edge-conductor" => {
+            if std::path::Path::new(home).join("config.toml").is_file() {
+                Ok("config.toml 已就位".into())
+            } else {
+                Ok("警告：安装目录缺少 config.toml——edge-conductor 没有它无法启动，请把配置文件放到安装目录根".into())
+            }
+        }
         _ => Err("该目标没有配置步骤".into()),
     }
 }
@@ -1315,6 +1601,8 @@ async fn run_zip_install(
         "nginx" => "nginx.exe",
         // dfy-ui dist zip 标志文件：index.html
         "dfy-ui" => "index.html",
+        // edge-conductor：CI 产物 zip（可能带顶层目录），标志二进制
+        "edge-conductor" => "edgecd-daemon.exe",
         _ => {
             finish(state, env_cache, false, format!("{label} 没有免安装版（zip）安装管线")).await;
             return;
@@ -1354,7 +1642,7 @@ async fn run_zip_install(
     } else {
         None
     };
-    if matches!(target, "nginx" | "dfy-ui") {
+    if matches!(target, "nginx" | "dfy-ui" | "edge-conductor") {
         let home_was_root = home == install_dir;
         let idd = install_dir.clone();
         let relocated = tokio::task::spawn_blocking(move || relocate_home_contents(&idd, &home)).await;
@@ -1371,6 +1659,33 @@ async fn run_zip_install(
             }
             Err(e) => {
                 finish(state, env_cache, false, format!("搬平目录任务异常：{e}")).await;
+                return;
+            }
+        }
+    }
+
+    // ===== edge-conductor：整合 greptimedb 时序库目录 =====
+    // greptimedb 不在程序 zip 里：资源目录按约定放 greptimedb/（greptime.exe +
+    // greptimedb.toml），安装时整目录复制到 install_dir/greptimedb，由
+    // edgecd-daemon 按相对路径 ./greptimedb/greptime 自行拉起
+    if target == "edge-conductor" {
+        state.patch(|j| j.stage = "greptimedb".into());
+        let zroot = std::path::Path::new(&zip_path)
+            .parent()
+            .map(|p| p.to_path_buf());
+        let idd = install_dir.clone();
+        let gt = tokio::task::spawn_blocking(move || {
+            integrate_greptimedb(zroot.as_deref(), std::path::Path::new(&idd))
+        })
+        .await;
+        match gt {
+            Ok(Ok(msg)) => state.log(msg),
+            Ok(Err(e)) => {
+                finish(state, env_cache, false, e).await;
+                return;
+            }
+            Err(e) => {
+                finish(state, env_cache, false, format!("GreptimeDB 整合任务异常：{e}")).await;
                 return;
             }
         }
@@ -1636,6 +1951,60 @@ async fn run_zip_install(
                     "dfy-ui",
                     &format!(
                         "确保 Nginx 运行：deps_ok={nginx_ok} nginx.exe 进程={up}（页面可达的前置条件）"
+                    ),
+                );
+                finish(state, env_cache, true, String::new()).await;
+            }
+            Ok(Err(e)) => finish(state, env_cache, false, e).await,
+            Err(e) => finish(state, env_cache, false, format!("验证任务异常：{e}")).await,
+        }
+        return;
+    }
+    if target == "edge-conductor" {
+        let home_for_verify = home.clone();
+        let v = tokio::task::spawn_blocking(move || {
+            let p = std::path::Path::new(&home_for_verify);
+            let exe = p.join("edgecd-daemon.exe");
+            if !exe.is_file() {
+                return Err(format!("未找到 edgecd-daemon.exe：{}", exe.display()));
+            }
+            let gt = p.join("greptimedb").join("greptime.exe");
+            if !gt.is_file() {
+                return Err(format!(
+                    "未找到 greptimedb\\greptime.exe：{}（资源目录需有 greptimedb 目录：greptime.exe + greptimedb.toml）",
+                    gt.display()
+                ));
+            }
+            // config.toml 缺失不阻断安装（资源包可能没带），但必须亮出来——
+            // 没有它 edgecd-daemon 起不来，启动时才会报错
+            let cfg = p.join("config.toml");
+            if !cfg.is_file() {
+                return Ok("config.toml 缺失".to_string());
+            }
+            Ok(String::new())
+        })
+        .await;
+        match v {
+            Ok(Ok(missing_cfg)) => {
+                state.log("验证通过：edgecd-daemon.exe + greptimedb/greptime.exe 均就绪");
+                if missing_cfg.is_empty() {
+                    state.log("config.toml 已就位，可在服务总览启动边缘计算");
+                } else {
+                    state.log(format!(
+                        "警告：{missing_cfg}——启动前请把配置文件放到 {install_dir}\\config.toml（edge-conductor 没有它无法启动）"
+                    ));
+                }
+                state.log(format!(
+                    "[状态自检] 修复中心探测基准：{install_dir}\\edgecd-daemon.exe 存在 = 已安装"
+                ));
+                debug_log::entry(
+                    debug_log::APP_SCOPE,
+                    "INFO",
+                    "install_verify",
+                    "edge-conductor",
+                    &format!(
+                        "基准 {install_dir}\\edgecd-daemon.exe；greptimedb=就位；config.toml={}",
+                        if missing_cfg.is_empty() { "有" } else { "缺" }
                     ),
                 );
                 finish(state, env_cache, true, String::new()).await;

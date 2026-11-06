@@ -222,21 +222,28 @@ fn builtin() -> Vec<ServiceDef> {
             install_dir: "C:/services/edge-conductor".into(),
             build_cmd: Some("cargo build --release".into()),
             run_cmd:
-                "C:/services/edge-conductor/target/release/edgecd-daemon --config C:/services/edge-conductor/config.toml".into(),
+                "C:/services/edge-conductor/edgecd-daemon.exe --config C:/services/edge-conductor/config.toml".into(),
             ports: vec![8084, 8085],
             process_names: vec!["edgecd-daemon".into()],
             product_names: vec![],
             health_url: None,
             log_paths: vec!["C:/services/edge-conductor/logs".into()],
-            depends_on: vec!["dfy-backend".into(), "vernemq".into(), "minio".into(), "greptime".into()],
+            // greptime 不再列远程依赖：GreptimeDB 时序库随安装管线整合同目录
+            //（greptimedb/），由 edgecd-daemon 自己拉起（子进程），不单独托管
+            depends_on: vec!["dfy-backend".into(), "vernemq".into(), "minio".into()],
             is_daemon: true,
             third_party: false,
             remote_only: false,
             static_site: false,
-            // GreptimeDB/VerneMQ/MinIO 均为远程部署：无任何本地二进制/路径检查项
-            //（曾经声明的 greptime 本地二进制检查已随远程化移除，勿再添加）。
-            requires: vec![],
-            description: "边缘计算后端，自身监听 8084/8085；依赖 VerneMQ（MQTT 18830）、MinIO（对象存储）与 GreptimeDB（时序库，端点由本服务自身配置），依赖项均为远程部署的独立服务。".into(),
+            // GreptimeDB 随安装整合到 greptimedb/（Windows 自动尝试 .exe 变体）；
+            // VerneMQ/MinIO 仍为远程部署，无本地检查项。
+            requires: vec![RequiresCheck {
+                id: "greptime".into(),
+                label: "GreptimeDB 时序库".into(),
+                path: Some("greptimedb/greptime".into()),
+                port: None,
+            }],
+            description: "边缘计算后端，自身监听 8084/8085；GreptimeDB 时序库随安装整合到 greptimedb/ 目录并由其自行拉起；依赖 VerneMQ（MQTT 18830）与 MinIO（对象存储），均为远程部署的独立服务。".into(),
         },
         ServiceDef {
             id: "biosphere-spatial".into(),

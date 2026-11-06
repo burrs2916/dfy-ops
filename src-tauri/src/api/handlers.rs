@@ -645,7 +645,11 @@ pub async fn service_logs(
                 let lpb = std::path::Path::new(lp);
                 let pp = std::path::Path::new(&p);
                 if lpb.is_dir() {
-                    pp.starts_with(lpb) && pp.extension().map(|x| x == "log").unwrap_or(false)
+                    pp.starts_with(lpb)
+                        && pp
+                            .file_name()
+                            .map(|n| crate::ops::logs::is_log_file_name(&n.to_string_lossy()))
+                            .unwrap_or(false)
                 } else {
                     lpb == pp
                 }
@@ -694,9 +698,17 @@ pub async fn log_files(State(state): State<Arc<AppState>>) -> Json<serde_json::V
                         if let Ok(rd) = std::fs::read_dir(pb) {
                             for e in rd.flatten() {
                                 let ep = e.path();
-                                if ep.extension().map(|x| x == "log").unwrap_or(false) {
-                                    files.push(log_file_meta(&ep));
+                                let fname = e.file_name().to_string_lossy().to_string();
+                                if !crate::ops::logs::is_log_file_name(&fname) {
+                                    continue;
                                 }
+                                let mut m = log_file_meta(&ep);
+                                // 带日期后缀的轮转文件按归档件展示：
+                                // 计入归档占用汇总与一键清理（与 logback 归档同待遇）
+                                if !fname.ends_with(".log") {
+                                    m["derived"] = serde_json::Value::Bool(true);
+                                }
+                                files.push(m);
                             }
                         }
                     } else if pb.is_file() {
