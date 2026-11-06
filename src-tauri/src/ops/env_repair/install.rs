@@ -621,7 +621,16 @@ fn integrate_greptimedb(
 ) -> Result<String, String> {
     let dst = install_dir.join("greptimedb");
     if dst.join("greptime.exe").is_file() {
-        return Ok("greptimedb 已随程序包就位，无需整合".into());
+        // 程序包自带时序库：exe 在就跳过整合，但 greptimedb.toml 缺失仍要补
+        // 生成内置模板（没它 greptime 起不来，与 exe-only 程序包补 config.toml 同理）
+        let toml_msg = if !dst.join("greptimedb.toml").is_file() {
+            std::fs::write(dst.join("greptimedb.toml"), EDGE_GREPTIMEDB_TEMPLATE)
+                .map_err(|e| format!("写入默认 greptimedb.toml 失败：{e}"))?;
+            "；资源未带配置，已生成默认 greptimedb.toml"
+        } else {
+            ""
+        };
+        return Ok(format!("greptimedb 已随程序包就位，无需整合{toml_msg}"));
     }
     let Some(root) = resource_root else {
         return Err("无法定位资源目录（安装包路径无父目录），greptimedb 整合失败".into());
@@ -1538,12 +1547,17 @@ fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
                 Ok("非 Windows 平台无需配置".into())
             }
         }
-        // edge-conductor：无平台预置配置，config.toml 由资源包/用户就位
+        // edge-conductor：CI 解压产物只有 exe——config.toml 缺失时用平台内置
+        // 模板自动生成（生产实际值，装完即可启动），与目录/exe 兜底管线同口径；
+        // 之后配置中心可改
         "edge-conductor" => {
-            if std::path::Path::new(home).join("config.toml").is_file() {
+            let cfg = std::path::Path::new(home).join("config.toml");
+            if cfg.is_file() {
                 Ok("config.toml 已就位".into())
             } else {
-                Ok("警告：安装目录缺少 config.toml——edge-conductor 没有它无法启动，请把配置文件放到安装目录根".into())
+                std::fs::write(&cfg, EDGE_CONFIG_TEMPLATE)
+                    .map(|_| "资源包未带 config.toml，已生成平台内置默认配置（端口 8084/8085，配置中心可改）".to_string())
+                    .map_err(|e| format!("生成默认 config.toml 失败（{}）：{e}", cfg.display()))
             }
         }
         _ => Err("该目标没有配置步骤".into()),
