@@ -116,7 +116,9 @@ pub struct ServiceStatus {
 /// 第三方服务的远程检测目标：全部路由到 service_remote 的统一口径——
 /// - Redis（remoteOnly）：端点在凭据文件 redis_credential.json；
 /// - VerneMQ / MinIO（remoteOnly + thirdParty）：端点在 remote_endpoints.json
-///   （「远程部署」配置面板统一保存）。
+///   （「远程部署」配置面板统一保存）；
+/// - GreptimeDB：随边缘计算捆绑本地化后，端点优先读边缘计算 config.toml
+///   [greptimedb] addr（真实生效值），未安装边缘计算时回退 remote_endpoints.json。
 ///
 /// 两者从未保存过地址时都返回 None → 状态转「待配置」，引导用户先完成设置，
 /// 绝不拿默认值兜底探测（会误导），也绝不回退本机进程/端口检测

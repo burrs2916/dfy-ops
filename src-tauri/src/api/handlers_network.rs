@@ -509,6 +509,22 @@ pub fn service_remote(state: &AppState, service_id: &str) -> Option<(String, u16
         let cred = crate::ops::redis_credential::load(&state.config_dir);
         return Some((cred.host, cred.port));
     }
+    // greptime 已随边缘计算捆绑本地化（greptime.exe 是 edgecd-daemon 的子进程）：
+    // 真实生效的端点是边缘计算 config.toml [greptimedb] 的 addr（默认 127.0.0.1:4003），
+    // 而不是远程部署面板的配置——检测/端点展示必须读真实值，否则会出现
+    // 「检查项判未配置/不可达，但时序库明明活着」的断层。边缘计算未安装时
+    // 才回退远程部署面板配置（真·远程部署 GreptimeDB 的场景）。
+    if service_id == "greptime" {
+        let edge_dir = crate::api::handlers_repair::registry_install_dir(state, "edge-conductor");
+        if let Ok(Some(cfg)) = crate::ops::edge_config::read(std::path::Path::new(&edge_dir)) {
+            let addr = cfg.greptime_addr.trim().to_string();
+            if let Some((host, port)) = addr.rsplit_once(':') {
+                if let Ok(p) = port.parse::<u16>() {
+                    return Some((host.to_string(), p));
+                }
+            }
+        }
+    }
     crate::ops::remote_endpoints::load(&state.config_dir, service_id)
         .map(|e| (e.host, e.port))
 }
@@ -531,6 +547,24 @@ pub async fn get_remote(
             "username": "",
             "password": cred.password,
         }));
+    }
+    // greptime：捆绑本地化后真实端点在边缘计算 config.toml（与 service_remote 同口径），
+    // 远程部署面板展示用；无边缘计算安装时回退远程部署配置
+    if service_id == "greptime" {
+        let edge_dir = crate::api::handlers_repair::registry_install_dir(&state, "edge-conductor");
+        if let Ok(Some(cfg)) = crate::ops::edge_config::read(std::path::Path::new(&edge_dir)) {
+            let addr = cfg.greptime_addr.trim().to_string();
+            if let Some((host, port)) = addr.rsplit_once(':') {
+                if let Ok(p) = port.parse::<u16>() {
+                    return Json(serde_json::json!({
+                        "host": host,
+                        "port": p,
+                        "username": "",
+                        "password": "",
+                    }));
+                }
+            }
+        }
     }
     match crate::ops::remote_endpoints::load(&state.config_dir, &service_id) {
         Some(e) => Json(serde_json::json!({

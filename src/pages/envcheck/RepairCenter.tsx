@@ -836,7 +836,10 @@ export default function RepairCenter({
           {(() => {
             // 纯远程软件（FIXED_REMOTE）不进待安装/已安装——本机不安装、无安装包可识别；
             // 用户声明的远程部署（remoteSet）仍可与固定远程共存展示。
-            const local = (t: string) => !remoteSet.has(t) && !FIXED_REMOTE.has(t);
+            // 例外：greptime 已捆绑本地化（随边缘计算安装），无论历史声明与否都强制本地，
+            // 免得旧设置残留把它藏进远程页签导致「待安装看不到 GreptimeDB」。
+            const local = (t: string) =>
+              t === "greptime" || (!remoteSet.has(t) && !FIXED_REMOTE.has(t));
             const toInstall = SOFTWARE_ORDER.filter(
               (t) => local(t) && !installedOf(t)?.serviceInstalled,
             );
@@ -844,7 +847,7 @@ export default function RepairCenter({
               (t) => local(t) && installedOf(t)?.serviceInstalled,
             );
             const remoteList = SOFTWARE_ORDER.filter(
-              (t) => remoteSet.has(t) || FIXED_REMOTE.has(t),
+              (t) => t !== "greptime" && (remoteSet.has(t) || FIXED_REMOTE.has(t)),
             );
             const TabLabel = ({ text, count }: { text: string; count: number }) => (
               <Stack direction="row" spacing={0.75} alignItems="center">
@@ -1315,25 +1318,54 @@ export default function RepairCenter({
                   </Box>
                 </Alert>
               )}
-              <FormControlLabel
-                sx={{ mt: 1.5, alignItems: "flex-start" }}
-                control={
-                  <Checkbox
-                    checked={removeData}
-                    onChange={(e) => {
-                      setRemoveData(e.target.checked);
-                      if (!e.target.checked) setConfirmText("");
-                    }}
-                    sx={{ pt: 0.25 }}
-                  />
-                }
-                label={
-                  <Typography variant="body2" color={removeData ? "error" : "text.secondary"}>
-                    同时删除程序与数据目录（<b>数据库内的所有数据将不可恢复！</b>
-                    不勾选则仅注销服务并保留数据，重装可复用）
-                  </Typography>
-                }
-              />
+              {/* greptime 关联影响强警告：它是边缘计算的启动依赖，卸载 = 边缘计算无法启动 */}
+              {uninstallTarget?.target === "greptime" && (
+                <Alert severity="warning" sx={{ mt: 1.5 }}>
+                  <b>关联影响提示：</b>
+                  <Box component="div" sx={{ mt: 0.5 }}>
+                    · GreptimeDB 是<b>边缘计算的启动依赖</b>——卸载后边缘计算将无法启动
+                  </Box>
+                  <Box component="div">· 只删时序库不删边缘计算：重装边缘计算（一键安装）会自动恢复 GreptimeDB</Box>
+                  <Box component="div" sx={{ mt: 0.5 }}>
+                    如边缘计算正在采集数据，请先确认再继续卸载。
+                  </Box>
+                </Alert>
+              )}
+              {/* edge-conductor 卸载整目录（时序库+数据随目录一起删），勾选框无效——改为如实说明 */}
+              {uninstallTarget?.target === "edge-conductor" ? (
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1.5 }}>
+                  卸载将删除整个安装目录（含 GreptimeDB 时序库与已采集数据），无需单独勾选。
+                </Typography>
+              ) : (
+                <FormControlLabel
+                  sx={{ mt: 1.5, alignItems: "flex-start" }}
+                  control={
+                    <Checkbox
+                      checked={removeData}
+                      onChange={(e) => {
+                        setRemoveData(e.target.checked);
+                        if (!e.target.checked) setConfirmText("");
+                      }}
+                      sx={{ pt: 0.25 }}
+                    />
+                  }
+                  label={
+                    <Typography variant="body2" color={removeData ? "error" : "text.secondary"}>
+                      {uninstallTarget?.target === "greptime" ? (
+                        <>
+                          同时删除时序数据目录 data\greptime（<b>已采集的历史数据将不可恢复！</b>
+                          不勾选则仅删除程序目录，时序数据保留）
+                        </>
+                      ) : (
+                        <>
+                          同时删除程序与数据目录（<b>数据库内的所有数据将不可恢复！</b>
+                          不勾选则仅注销服务并保留数据，重装可复用）
+                        </>
+                      )}
+                    </Typography>
+                  }
+                />
+              )}
               {uninstallTarget?.target === "mysql" && removeData && (
                 <>
                   <Alert severity="info" sx={{ mt: 1 }}>
