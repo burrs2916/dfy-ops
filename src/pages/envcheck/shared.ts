@@ -43,7 +43,7 @@ export function ackId(reportId: string, itemId: string) {
 }
 
 /** 与后端 ops/resource.rs 的 repair_target 口径一致：dep- 与 service- 前缀折叠后匹配。
- *  云端三件套（nginx/dfy-backend/dfy-ui）支持资源目录一键安装；
+ *  云端三件套（nginx/dfy-backend/dfy-ui）与边缘计算（edge-conductor）支持资源目录一键安装；
  *  Redis/VerneMQ/MinIO/GreptimeDB 均为远程部署，问题项走「去远程部署」配置。 */
 export const REPAIR_TARGETS = new Set([
   "java",
@@ -51,6 +51,7 @@ export const REPAIR_TARGETS = new Set([
   "nginx",
   "dfy-backend",
   "dfy-ui",
+  "edge-conductor",
 ]);
 /** 纯远程部署的软件：不进待安装/已安装列表（本机不安装、无安装包可识别），
  *  集中在「远程部署」区配置地址与访问密码。与后端 ServiceDef.remoteOnly 同口径。 */
@@ -78,6 +79,7 @@ export const TARGET_LABEL: Record<string, string> = {
   nginx: "Nginx 反向代理",
   "dfy-backend": "DFY 后端",
   "dfy-ui": "DFY 前端",
+  "edge-conductor": "边缘计算 (Edge Conductor)",
 };
 
 /** 安装与维护卡片的展示顺序：后端三件套在前（nginx 先装），再是中间件 */
@@ -85,6 +87,7 @@ export const SOFTWARE_ORDER = [
   "nginx",
   "dfy-backend",
   "dfy-ui",
+  "edge-conductor",
   "mysql",
   "java",
   "redis",
@@ -92,8 +95,8 @@ export const SOFTWARE_ORDER = [
   "minio",
   "greptime",
 ];
-/** 注册了 Windows 服务、可启停的软件（与后端 service_spec 口径一致；java 无服务） */
-export const SERVICE_TARGETS = new Set(["mysql", "nginx", "dfy-backend"]);
+/** 注册了 Windows 服务或走平台进程管理器、可启停的软件（与后端 service_action 口径一致；java 无服务） */
+export const SERVICE_TARGETS = new Set(["mysql", "nginx", "dfy-backend", "edge-conductor"]);
 /** 一句话说清每个软件是干嘛的（卡片副标题，消灭抽象概念） */
 export const TARGET_DESC: Record<string, string> = {
   mysql: "数据库",
@@ -105,6 +108,7 @@ export const TARGET_DESC: Record<string, string> = {
   nginx: "反向代理 · 80 端口",
   "dfy-backend": "Spring Boot · 48085",
   "dfy-ui": "Vue3 管理后台 · 静态托管",
+  "edge-conductor": "边缘计算网关 · 8084/8085",
 };
 /** 约定子目录名（与后端 convention_target 对齐）：无包时引导用户放到哪 */
 export const CONVENTION_DIR: Record<string, string> = {
@@ -117,6 +121,7 @@ export const CONVENTION_DIR: Record<string, string> = {
   nginx: "nginx",
   "dfy-backend": "dfy-backend",
   "dfy-ui": "dfy-ui",
+  "edge-conductor": "edge-conductor",
 };
 
 /** 包体积 → 人读文案（KB/MB/GB，1 位小数）。 */

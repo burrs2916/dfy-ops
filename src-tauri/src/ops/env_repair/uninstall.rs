@@ -171,10 +171,10 @@ pub fn start_uninstall(
 ) -> Result<(), String> {
     if !matches!(
         target,
-        "mysql" | "redis" | "java" | "nginx" | "dfy-backend" | "dfy-ui"
+        "mysql" | "redis" | "java" | "nginx" | "dfy-backend" | "dfy-ui" | "edge-conductor"
     ) {
         return Err(format!(
-            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis/Java/Nginx/DFY 后端/DFY 前端），请使用 AI 方案或控制面板手动卸载",
+            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis/Java/Nginx/DFY 后端/DFY 前端/边缘计算），请使用 AI 方案或控制面板手动卸载",
             crate::ops::resource::target_label(target)
         ));
     }
@@ -362,7 +362,135 @@ async fn run_flat_dir_uninstall(
     }
 }
 
-/// 通用卸载分派：按 target 路由到各管线（java/nginx/dfy/mysql/redis）。
+/// edge-conductor 卸载：无服务注册、无 MSI 条目——停 edgecd-daemon 进程 + 删目录。
+/// greptimedb 时序库目录（greptime.exe + 数据）随安装目录一并删除，卸载前如实告知。
+/// 运行态探测与复核统一按进程镜像 edgecd-daemon.exe（与 probe_target 同源）。
+#[cfg(target_os = "windows")]
+async fn run_edge_uninstall(
+    state: Arc<RepairState>,
+    install_dir: String,
+    procs: Arc<crate::ops::process::ProcManager>,
+    env_cache: EnvCache,
+) {
+    let label = crate::ops::resource::target_label("edge-conductor");
+
+    // 前置探测：目录与进程现状（用户在卸载前看清要删什么）
+    let dir_exists = std::path::Path::new(&install_dir).is_dir();
+    let proc_up = crate::api::handlers_repair::image_running("edgecd-daemon.exe");
+    state.log(format!("开始卸载 {label}（目录 {install_dir}）"));
+    state.log(format!(
+        "当前状态：安装目录 {}，edgecd-daemon 进程 {}",
+        if dir_exists { "存在" } else { "不存在" },
+        if proc_up { "运行中（将先停止）" } else { "未运行" }
+    ));
+    if !dir_exists {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!("未检测到 {label} 的安装痕迹（目录 {install_dir} 不存在），无需卸载"),
+        )
+        .await;
+        return;
+    }
+    state.log("提示：卸载后边缘计算数据采集中断，greptimedb 时序库目录随安装目录一并删除");
+
+    // 运行中：先停进程树（平台句柄精确杀；停止动作已写 debug.log）
+    state.patch(|j| j.stage = "stop".into());
+    if proc_up {
+        state.log("边缘计算运行中 → 先停止 edgecd-daemon 进程…");
+        // stop_deep：平台重启过/外部拉起时无句柄，按 8084/8085 兜底强杀
+        if let Err(e) = procs.stop_deep("edge-conductor", &[8084, 8085]) {
+            state.log(format!(
+                "停止指令执行失败：{e}（复核仍会确认进程镜像）"
+            ));
+        }
+    } else {
+        state.log("边缘计算未在运行，跳过进程停止");
+    }
+
+    state.patch(|j| j.stage = "delete".into());
+    // 删除前记录目录规模：事后确认「删了什么、删干净没有」的唯一证据
+    let dir_for_scale = install_dir.clone();
+    let scale = tokio::task::spawn_blocking(move || {
+        fn walk(d: &std::path::Path, n: &mut u64, bytes: &mut u64, depth: u32) {
+            if depth > 8 {
+                return;
+            }
+            if let Ok(rd) = std::fs::read_dir(d) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.is_dir() {
+                        walk(&p, n, bytes, depth + 1);
+                    } else if let Ok(m) = e.metadata() {
+                        *n += 1;
+                        *bytes += m.len();
+                    }
+                }
+            }
+        }
+        let mut n = 0u64;
+        let mut bytes = 0u64;
+        walk(std::path::Path::new(&dir_for_scale), &mut n, &mut bytes, 0);
+        (n, bytes)
+    })
+    .await
+    .unwrap_or((0, 0));
+    crate::debug_log::entry(
+        crate::debug_log::APP_SCOPE,
+        "INFO",
+        "uninstall",
+        "pre_delete",
+        &format!(
+            "target=edge-conductor 待删除目录 {install_dir}：{} 个文件 / {} 字节",
+            scale.0, scale.1
+        ),
+    );
+    // 目录删除走 UAC 脚本（与 nginx/dfy 同款）：rmdir /s /q
+    let script = format!("rmdir /s /q \"{install_dir}\"");
+    state.log("请在 UAC 弹窗中点击「是」…");
+    let run =
+        tokio::task::spawn_blocking(move || runas_wait("cmd.exe", &format!("/c {script}"))).await;
+    match run {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => state.log(format!("清理命令返回：{e}（将以实际状态复核）")),
+        Err(e) => {
+            finish(state, env_cache, false, format!("卸载任务异常：{e}")).await;
+            return;
+        }
+    }
+
+    // ===== 复核：目录消失 + 进程消失 = 卸载成功 =====
+    state.patch(|j| j.stage = "verify".into());
+    let dir_gone = !std::path::Path::new(&install_dir).is_dir();
+    let residue = crate::api::handlers_repair::image_running("edgecd-daemon.exe");
+    crate::debug_log::entry(
+        crate::debug_log::APP_SCOPE,
+        if dir_gone && !residue { "INFO" } else { "ERROR" },
+        "uninstall",
+        "edge-conductor",
+        &format!(
+            "复核：目录已删除={dir_gone} 进程残留={residue} dir={install_dir}"
+        ),
+    );
+    if dir_gone {
+        state.log(format!("{label} 已卸载：安装目录已删除（含 greptimedb 时序库），安装痕迹清零"));
+        if residue {
+            state.log("警告：edgecd-daemon.exe 仍在运行——可能是非平台拉起的实例，请到任务管理器确认");
+        }
+        finish(state, env_cache, true, String::new()).await;
+    } else {
+        finish(
+            state,
+            env_cache,
+            false,
+            format!("卸载未完成：目录 {install_dir} 仍存在（可能被资源管理器/greptime.exe 占用），请关闭占用后重试"),
+        )
+        .await;
+    }
+}
+
+/// 通用卸载分派：按 target 路由到各管线（java/nginx/dfy/edge/mysql/redis）。
 #[cfg(target_os = "windows")]
 async fn run_uninstall(
     state: Arc<RepairState>,
@@ -386,6 +514,12 @@ async fn run_uninstall(
     // 指向的目录消失，页面 404——都提示但不阻止（用户主动行为）。
     if matches!(target, "dfy-backend" | "dfy-ui") {
         run_flat_dir_uninstall(state, target, install_dir, procs, env_cache).await;
+        return;
+    }
+    // edge-conductor：无服务注册、无 MSI 条目——停 edgecd-daemon 进程 + 删目录
+    //（greptimedb 时序库目录随安装目录一并删除，卸载前如实告知）。
+    if target == "edge-conductor" {
+        run_edge_uninstall(state, install_dir, procs, env_cache).await;
         return;
     }
     let label = crate::ops::resource::target_label(target);

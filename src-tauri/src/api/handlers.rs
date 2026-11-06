@@ -1797,7 +1797,7 @@ pub async fn platform_open(State(state): State<Arc<AppState>>) -> Json<serde_jso
 pub async fn diagnostics_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     // 各服务判定：复用修复中心的探测口径（install_dir + 关键文件 + 运行态）
     let mut services = serde_json::Map::new();
-    for id in ["mysql", "redis", "java", "nginx", "dfy-backend", "dfy-ui"] {
+    for id in ["mysql", "redis", "java", "nginx", "dfy-backend", "dfy-ui", "edge-conductor"] {
         let (installed, dir_ok, running) =
             crate::api::handlers_repair::probe_target(&state, id).await;
         services.insert(

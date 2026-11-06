@@ -233,13 +233,17 @@ pub async fn start_generic_repair(
 
 /// 平台内卸载覆盖：mysql/redis（zip 管线，服务+目录全由平台掌控）+ java
 /// （MSI 注册表条目静默卸载）+ nginx（Windows 服务可选注册，先优雅停服再删目录）
-/// + dfy-backend/dfy-ui（无服务注册，停平台进程 + 删目录）。
-pub const UNINSTALLABLE: [&str; 6] = ["mysql", "redis", "java", "nginx", "dfy-backend", "dfy-ui"];
+/// + dfy-backend/dfy-ui（无服务注册，停平台进程 + 删目录）
+/// + edge-conductor（无服务注册，停 edgecd-daemon 进程 + 删目录）。
+pub const UNINSTALLABLE: [&str; 7] =
+    ["mysql", "redis", "java", "nginx", "dfy-backend", "dfy-ui", "edge-conductor"];
 
-/// 可探测安装痕迹的全部目标（= UNINSTALLABLE + 三个云端组件）。
-/// 这三个云端组件不注册 Windows 服务、不走 net start/stop，但需要在修复中心
-/// 「已安装/待安装」卡片上正确显示状态，所以纳入探测列表。
-pub const PROBEABLE: [&str; 6] = ["mysql", "redis", "java", "nginx", "dfy-backend", "dfy-ui"];
+/// 可探测安装痕迹的全部目标（= UNINSTALLABLE）。
+/// 其中 nginx/dfy-backend/dfy-ui/edge-conductor 不注册 Windows 服务、不走
+/// net start/stop，但需要在修复中心「已安装/待安装」卡片上正确显示状态
+/// （「待安装」列表有没有条目全靠这份探测），所以纳入探测列表。
+pub const PROBEABLE: [&str; 7] =
+    ["mysql", "redis", "java", "nginx", "dfy-backend", "dfy-ui", "edge-conductor"];
 
 pub(crate) fn registry_install_dir(state: &AppState, target: &str) -> String {
     state
@@ -359,6 +363,9 @@ fn find_key_shallow(dir: &std::path::Path, key: &str, depth: u8) -> bool {
 ///    按 install_dir 根 + nginx.exe 判已装（根上没有时限深搜子目录兜底）
 /// 4. dfy-backend/dfy-ui — 无 service_spec（jar 拷贝管线 / 静态目录），按
 ///    install_dir + 关键文件（dfy-server.jar / index.html）判已装（同样限深兜底）
+/// 5. edge-conductor — 无 service_spec（exe 拷贝管线），按 install_dir +
+///    edgecd-daemon.exe 判已装；运行态按进程镜像（8084/8085 是 Rust 端口，
+///    探测进程名更直接）
 pub(crate) async fn probe_target(state: &AppState, target: &str) -> (bool, bool, bool) {
     if target == "java" {
         let installed = blocking(|| {
@@ -369,19 +376,22 @@ pub(crate) async fn probe_target(state: &AppState, target: &str) -> (bool, bool,
         return (installed, false, false);
     }
     let install_dir = registry_install_dir(state, target);
-    // dfy-backend/dfy-ui/nginx 都不注册 Windows 服务：按 install_dir + 关键文件判定
-    if matches!(target, "dfy-backend" | "dfy-ui" | "nginx") {
+    // dfy-backend/dfy-ui/nginx/edge-conductor 都不注册 Windows 服务：按 install_dir + 关键文件判定
+    if matches!(target, "dfy-backend" | "dfy-ui" | "nginx" | "edge-conductor") {
         let install_dir = install_dir.clone();
         let key_filename: String = match target {
             "nginx" => "nginx.exe".into(),
             "dfy-backend" => "dfy-server.jar".into(),
             "dfy-ui" => "index.html".into(),
+            "edge-conductor" => "edgecd-daemon.exe".into(),
             _ => unreachable!(),
         };
         // 运行态探测口径：dfy-backend 用 48085 端口（image_running("java.exe")
-        // 会把任何 Java 程序误判成后端在跑）；nginx 仍按进程名；dfy-ui 无进程
+        // 会把任何 Java 程序误判成后端在跑）；nginx/edge-conductor 仍按进程名；
+        // dfy-ui 无进程
         let proc_image: Option<&'static str> = match target {
             "nginx" => Some("nginx.exe"),
+            "edge-conductor" => Some("edgecd-daemon.exe"),
             "dfy-backend" | "dfy-ui" => None,
             _ => unreachable!(),
         };
@@ -857,6 +867,132 @@ pub async fn service_action(
             &format!("手动{action_label}成功（80 端口监听状态：{running}）"),
         );
         return Json(serde_json::json!({ "ok": true, "running": running, "message": final_msg }));
+    }
+    // edge-conductor：进程管理器通道（registry run_cmd = edgecd-daemon.exe --config
+    // config.toml，start_with_deps 自动带起 dfy-backend 依赖）。与 nginx 同款：
+    // 不注册 Windows 服务，启停全走平台进程管理器；停止按句柄树 + 端口兜底强杀。
+    if req.target == "edge-conductor" {
+        if !matches!(req.action.as_str(), "start" | "stop") {
+            return Json(serde_json::json!({ "ok": false, "error": format!("未知操作：{}", req.action) }));
+        }
+        let running_before = blocking(|| image_running("edgecd-daemon.exe")).await;
+        crate::debug_log::entry(
+            crate::ops::process::PROC_SCOPE,
+            "INFO",
+            "service_action",
+            "request",
+            &format!(
+                "target=edge-conductor action={} 操作前={}（进程管理器通道）",
+                req.action,
+                if running_before { "运行中" } else { "已停止" }
+            ),
+        );
+        let action_label = if req.action == "start" { "启动" } else { "停止" };
+        let verb = req.action.clone();
+        let st = state.clone();
+        let res = blocking(move || {
+            if verb == "start" {
+                let results =
+                    crate::ops::orchestrator::start_with_deps(&st.procs, &st.registry, "edge-conductor");
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    "INFO",
+                    "start",
+                    "deps_started",
+                    &results
+                        .iter()
+                        .map(|r| format!("{}:{}", r.id, if r.ok { "ok" } else { "失败" }))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+                results
+                    .iter()
+                    .find(|r| !r.ok)
+                    .map(|r| Err::<(), String>(r.error.clone().unwrap_or_else(|| "启动失败".into())))
+                    .unwrap_or(Ok(()))
+            } else {
+                // 停止兜底：句柄树 taskkill（平台拉起的守护进程）→ 无句柄时按
+                // 声明端口强杀外部拉起的实例（8084/8085 归边缘计算专用）
+                if let Err(e) = st.procs.stop_deep("edge-conductor", &[8084, 8085]) {
+                    return Err(format!("停止指令执行失败：{e}"));
+                }
+                Ok(())
+            }
+        })
+        .await;
+        match res {
+            Ok(()) => {}
+            Err(e) => {
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    "ERROR",
+                    "service_action",
+                    "action_failed",
+                    &format!("target=edge-conductor action={} 失败：{e}", req.action),
+                );
+                crate::ops_events::record("user", "edge-conductor", &req.action, false, &e);
+                return Json(serde_json::json!({ "ok": false, "error": e }));
+            }
+        }
+        // 运行态复核（probe 同源）：启动给 1.2s 绑定端口，停止给 0.6s 收尾
+        if req.action == "start" {
+            blocking(|| std::thread::sleep(std::time::Duration::from_millis(1200))).await;
+        } else {
+            blocking(|| std::thread::sleep(std::time::Duration::from_millis(600))).await;
+        }
+        let running = blocking(|| image_running("edgecd-daemon.exe")).await;
+        let install_dir = registry_install_dir(&state, "edge-conductor");
+        crate::debug_log::entry(
+            crate::ops::process::PROC_SCOPE,
+            if running || req.action == "stop" { "INFO" } else { "ERROR" },
+            "service_action",
+            &req.action,
+            &format!(
+                "target=edge-conductor running={running} install_dir={install_dir} 耗时={:?}",
+                t0.elapsed()
+            ),
+        );
+        if req.action == "start" && !running {
+            // 进程秒退：把 spawn 日志尾部带回给前端（config.toml 缺失/端口占用就在这）
+            let dir = install_dir.trim_end_matches('/').to_string();
+            let tail = blocking(move || spawn_log_tail(&format!("{dir}/logs/platform-spawn.log"))).await;
+            crate::ops_events::record(
+                "user",
+                "edge-conductor",
+                "start",
+                false,
+                &format!("手动启动后进程立即退出。日志尾部：{tail}"),
+            );
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": format!("边缘计算启动后立即退出（常见原因：安装目录缺 config.toml、VerneMQ/MinIO 地址不通）。日志：{tail}")
+            }));
+        }
+        if req.action == "stop" && running {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "ERROR",
+                "service_action",
+                "stop_residue",
+                &format!(
+                    "target=edge-conductor 停止（句柄树 + 端口强杀）执行后仍探测到 edgecd-daemon.exe（总耗时={:?}）——大概率是用户手工另起的实例，需人工确认",
+                    t0.elapsed()
+                ),
+            );
+            return Json(serde_json::json!({
+                "ok": false,
+                "error": "停止命令已执行，但仍有 edgecd-daemon.exe 进程残留（可能是非平台拉起的实例），请到任务管理器确认"
+            }));
+        }
+        let msg = if req.action == "start" { "边缘计算已启动" } else { "边缘计算已停止" };
+        crate::ops_events::record(
+            "user",
+            "edge-conductor",
+            &req.action,
+            true,
+            &format!("手动{action_label}成功（edgecd-daemon 运行状态：{running}）"),
+        );
+        return Json(serde_json::json!({ "ok": true, "running": running, "message": msg }));
     }
     // dfy-backend：进程管理器通道（registry run_cmd = {java} -jar dfy-server.jar，
     // start_with_deps 自动带起 MySQL/Redis）。此前没有任何启动入口——装完提示

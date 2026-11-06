@@ -9,6 +9,7 @@ import {
   Language,
   Terminal,
   WebAsset,
+  Hub,
 } from "@mui/icons-material";
 
 /** 软件图标：卡片视觉锚点（圆润底色块 + 白色图形，专业感） */
@@ -22,4 +23,5 @@ export const TARGET_ICON: Record<string, React.ReactNode> = {
   nginx: <Language />,
   "dfy-backend": <Terminal />,
   "dfy-ui": <WebAsset />,
+  "edge-conductor": <Hub />,
 };
