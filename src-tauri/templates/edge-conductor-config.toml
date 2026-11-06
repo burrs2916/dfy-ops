@@ -47,8 +47,8 @@ retry_interval = 1000
 # @section 认证配置
 # ========================================
 [auth]
-# 系统初始化口令列表（务必修改为强口令！）
-provision_keys = ["CHANGE_ME_provision_key"]
+# 系统初始化口令列表（与当前生产使用的值一致——平台初始化边缘计算时用它）
+provision_keys = ["edge-conductor@000000"]
 # 允许访问系统的角色列表
 allowed_roles = ["gateway", "admin", "test"]
 
@@ -125,12 +125,15 @@ enable_foreign_keys = true
 broker_url = "127.0.0.1"
 broker_port = 18830
 client_id = "ec-001"
-default_username = "CHANGE_ME"
-default_password = "CHANGE_ME"
-keep_alive = 60
-reconnect_interval = 5
+# 默认认证信息（与当前生产使用的值一致——当无法从 Spring Boot 获取时使用）
+default_username = "ec"
+default_password = "ec-pwd"
+# 连接参数
+keep_alive = 60  # 秒
+reconnect_interval = 5  # 秒
 max_reconnect_attempts = 10
-qos = 1
+# QoS 配置（默认值）
+qos = 1  # 0: 最多一次, 1: 至少一次, 2: 恰好一次
 
 # ========================================
 # @section 心跳监控配置
