@@ -735,8 +735,10 @@ async fn run_edge_dir_install(
     };
     // ===== 复制程序 =====
     state.patch(|j| j.stage = "copy".into());
+    // install_dir 后续 greptimedb 整合还要用（L782）——闭包 move 前先克隆
+    let install_dir_for_copy = install_dir.clone();
     let copied = tokio::task::spawn_blocking(move || -> Result<String, String> {
-        let idp = std::path::Path::new(&install_dir);
+        let idp = std::path::Path::new(&install_dir_for_copy);
         std::fs::create_dir_all(idp).map_err(|e| format!("创建安装目录失败：{e}"))?;
         match src {
             EdgeSource::Dir(d) => {
