@@ -28,6 +28,7 @@ import type { ExternalConfigResponse, NginxConfig } from "../types";
 import { MONO_STACK } from "../theme";
 import NginxConfigPanel from "./NginxConfigPanel";
 import ExternalConfigPanel from "./ExternalConfigPanel";
+import EdgeConfigPanel from "./EdgeConfigPanel";
 
 /** 分区标题：圆底图标 + 标题 + 一句话说明（全页统一节奏） */
 function Section({ icon, title, hint }: { icon: React.ReactNode; title: string; hint: string }) {
@@ -106,19 +107,22 @@ interface Props {
 export default function ConfigCenterPanel({ onGotoOpsTab }: Props) {
   const [nginxCfg, setNginxCfg] = useState<ExternalConfigResponse | null>(null);
   const [backendCfg, setBackendCfg] = useState<ExternalConfigResponse | null>(null);
+  const [edgeCfg, setEdgeCfg] = useState<ExternalConfigResponse | null>(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    // nginx 与 dfy-backend 共用 external-config API（后端按 service id 分流）
+    // nginx / dfy-backend / edge-conductor 共用 external-config API（后端按 service id 分流）
     Promise.all([
       api.getExternalConfig("nginx").catch(() => null),
       api.getExternalConfig("dfy-backend").catch(() => null),
-    ]).then(([n, b]) => {
+      api.getExternalConfig("edge-conductor").catch(() => null),
+    ]).then(([n, b, e]) => {
       if (!alive) return;
       setNginxCfg(n);
       setBackendCfg(b);
+      setEdgeCfg(e);
       setLoading(false);
     });
     return () => {
@@ -128,6 +132,7 @@ export default function ConfigCenterPanel({ onGotoOpsTab }: Props) {
 
   const nginx = (nginxCfg?.config as unknown as NginxConfig | undefined) ?? null;
   const backendAny = backendCfg?.config as Record<string, string> | undefined;
+  const edgeAny = edgeCfg?.config as Record<string, string> | undefined;
 
   const middlewareCards = [
     {
@@ -293,6 +298,74 @@ export default function ConfigCenterPanel({ onGotoOpsTab }: Props) {
               </AccordionSummary>
               <AccordionDetails sx={{ pt: 0, px: 2, pb: 1.5 }}>
                 <ExternalConfigPanel serviceId="dfy-backend" />
+              </AccordionDetails>
+            </Accordion>
+          </Paper>
+        </Grid>
+
+        {/* --- 边缘计算（Edge Conductor） --- */}
+        <Grid item xs={12} md={6}>
+          <Paper
+            variant="outlined"
+            sx={{ height: "100%", display: "flex", flexDirection: "column", overflow: "hidden" }}
+          >
+            <Stack direction="row" spacing={1.25} alignItems="center" sx={{ px: 2, pt: 1.75, pb: 0.75 }}>
+              <SettingsInputAntennaIcon color="primary" fontSize="small" />
+              <Typography variant="subtitle2" sx={{ fontWeight: 700, flex: 1 }}>
+                边缘计算（Edge Conductor）
+              </Typography>
+              <Chip
+                size="small"
+                color={edgeCfg?.exists ? "success" : "default"}
+                variant="outlined"
+                sx={{ height: 22 }}
+                label={edgeCfg?.exists ? "配置就绪" : "未安装"}
+              />
+            </Stack>
+            <Box sx={{ px: 2, pb: 1.5, display: "grid", gap: 0.5 }}>
+              {loading ? (
+                <>
+                  <Skeleton height={18} width="80%" />
+                  <Skeleton height={18} width="65%" />
+                </>
+              ) : (
+                <>
+                  <SummaryRow label="配置文件" value={edgeCfg?.configPath} />
+                  <SummaryRow
+                    label="API / WS"
+                    value={
+                      edgeAny?.httpPort
+                        ? `${edgeAny.httpBind}:${edgeAny.httpPort} / ${edgeAny.wsBind}:${edgeAny.wsPort}`
+                        : null
+                    }
+                  />
+                  <SummaryRow label="上游后端" value={edgeAny?.upstreamServerUrl} />
+                  <SummaryRow
+                    label="MQTT"
+                    value={
+                      edgeAny?.mqttBrokerUrl ? `${edgeAny.mqttBrokerUrl}:${edgeAny.mqttBrokerPort}` : null
+                    }
+                  />
+                </>
+              )}
+            </Box>
+            <Box sx={{ flex: 1 }} />
+            <Accordion
+              elevation={0}
+              disableGutters
+              sx={{ "&:before": { display: "none" }, borderTop: "1px solid", borderColor: "divider", flexShrink: 0 }}
+            >
+              <AccordionSummary
+                expandIcon={<ExpandMoreIcon />}
+                sx={{ minHeight: 42, px: 2, "& .MuiAccordionSummary-content": { my: 0.5, alignItems: "center", gap: 0.75 } }}
+              >
+                <EditNoteOutlinedIcon fontSize="small" color="primary" />
+                <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                  编辑 config.toml
+                </Typography>
+              </AccordionSummary>
+              <AccordionDetails sx={{ pt: 0, px: 2, pb: 1.5 }}>
+                <EdgeConfigPanel serviceId="edge-conductor" />
               </AccordionDetails>
             </Accordion>
           </Paper>

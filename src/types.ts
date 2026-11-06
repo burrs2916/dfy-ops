@@ -306,6 +306,18 @@ export interface NginxConfig {
   errorLog: string;
 }
 
+/** edge-conductor config.toml 托管字段（ops::edge_config） */
+export interface EdgeConfig {
+  httpBind: string;
+  httpPort: string;
+  wsBind: string;
+  wsPort: string;
+  upstreamServerUrl: string;
+  greptimeAddr: string;
+  mqttBrokerUrl: string;
+  mqttBrokerPort: string;
+}
+
 /** POST /api/env/repair/uninstall 启动结果 */
 export interface GenericUninstallStart {
   ok: boolean;

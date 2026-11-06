@@ -1277,6 +1277,36 @@ pub async fn external_config_get(
             }
         }));
     }
+    // edge-conductor：config.toml 字段级编辑（换 IP/端口的主要运维入口）
+    if def.id == "edge-conductor" {
+        let install_dir = def.install_dir.clone();
+        let cfg = blocking(move || crate::ops::edge_config::read(std::path::Path::new(&install_dir))).await;
+        let path = crate::ops::edge_config::config_path(std::path::Path::new(&def.install_dir));
+        return Ok(Json(match cfg {
+            Ok(Some(c)) => serde_json::json!({
+                "ok": true,
+                "exists": true,
+                "configPath": path.display().to_string(),
+                "config": c,
+            }),
+            Ok(None) => serde_json::json!({
+                "ok": true,
+                "exists": false,
+                "configPath": path.display().to_string(),
+                "hint": "config.toml 不存在：请先通过资源目录安装边缘计算（安装包或 edge-conductor/ 目录）。",
+            }),
+            Err(e) => {
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "WARN",
+                    "edge_config",
+                    "read_failed",
+                    &format!("读取 {} 失败：{e}", path.display()),
+                );
+                serde_json::json!({ "ok": false, "error": e })
+            }
+        }));
+    }
     let install_dir = backend_install_dir(&state, def);
     let path = crate::ops::external_config::config_path(&install_dir);
     let cfg = blocking(move || crate::ops::external_config::read(&install_dir)).await;
@@ -1410,6 +1440,65 @@ pub async fn external_config_update(
                     &format!("写入 nginx.conf 失败（{summary}）：{e}"),
                 );
                 crate::ops_events::record("user", "nginx", "config_update", false, &format!("{summary}：{e}"));
+                serde_json::json!({ "ok": false, "error": e })
+            }
+        }));
+    }
+    // edge-conductor：config.toml 保存（校验 + TOML 语法兜底 + 备份 + 原子写回）
+    if def.id == "edge-conductor" {
+        let cfg: crate::ops::edge_config::EdgeConfig = match serde_json::from_value(body) {
+            Ok(c) => c,
+            Err(e) => {
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "WARN",
+                    "edge_config",
+                    "parse_failed",
+                    &format!("edge-conductor 配置保存请求解析失败：{e}"),
+                );
+                return Ok(Json(serde_json::json!({ "ok": false, "error": format!("配置格式错误：{e}") })));
+            }
+        };
+        // 审计摘要：端口与地址拓扑（无凭据字段）
+        let summary = format!(
+            "http={}:{} ws={}:{} upstream={} mqtt={}:{}",
+            cfg.http_bind, cfg.http_port, cfg.ws_bind, cfg.ws_port,
+            cfg.upstream_server_url, cfg.mqtt_broker_url, cfg.mqtt_broker_port
+        );
+        let install_dir = def.install_dir.clone();
+        let saved = blocking(move || {
+            crate::ops::edge_config::save(std::path::Path::new(&install_dir), &cfg)
+        })
+        .await;
+        return Ok(Json(match saved {
+            Ok(()) => {
+                crate::ops_events::record(
+                    "user",
+                    "edge-conductor",
+                    "config_update",
+                    true,
+                    &summary,
+                );
+                serde_json::json!({
+                    "ok": true,
+                    "hint": "已保存 config.toml。重启边缘计算后生效（服务总览 → 启动）。",
+                })
+            }
+            Err(e) => {
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "ERROR",
+                    "edge_config",
+                    "write_failed",
+                    &format!("写入 config.toml 失败（{summary}）：{e}"),
+                );
+                crate::ops_events::record(
+                    "user",
+                    "edge-conductor",
+                    "config_update",
+                    false,
+                    &format!("{summary}：{e}"),
+                );
                 serde_json::json!({ "ok": false, "error": e })
             }
         }));
