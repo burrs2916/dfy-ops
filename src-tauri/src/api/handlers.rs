@@ -145,12 +145,16 @@ fn to_status(
             true,
         )
     } else if managed {
-        (
-            RunState::Managed,
-            def.ports.clone(),
-            managed_healthy(def),
-            true,
-        )
+        // edge-conductor：端口展示同样跟随 config.toml 实际值（配置中心可改）
+        let ports = if def.id == "edge-conductor" {
+            crate::ops::edge_config::effective_ports(
+                std::path::Path::new(&def.install_dir),
+                &def.ports,
+            )
+        } else {
+            def.ports.clone()
+        };
+        (RunState::Managed, ports, managed_healthy(def), true)
     } else {
         detect_external(def, snap)
     };
@@ -193,7 +197,17 @@ fn managed_healthy(def: &ServiceDef) -> bool {
         // 无端口的桌面客户端：是否「健康」直接等同于「在运行」
         true
     } else {
-        def.ports
+        // edge-conductor 的端口可被配置中心修改——健康探测以 config.toml
+        // 实际端口为准，否则改端口后永远显示「不健康」
+        let ports = if def.id == "edge-conductor" {
+            crate::ops::edge_config::effective_ports(
+                std::path::Path::new(&def.install_dir),
+                &def.ports,
+            )
+        } else {
+            def.ports.clone()
+        };
+        ports
             .iter()
             .all(|p| health::check_tcp("127.0.0.1", *p, PROBE_TIMEOUT_MS))
     }

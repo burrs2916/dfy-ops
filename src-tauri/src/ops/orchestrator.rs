@@ -39,8 +39,14 @@ fn wait_ready(
         thread::sleep(Duration::from_millis(500));
         return Ok(());
     }
-    let ports = def
-        .ports
+    // edge-conductor 的端口可被配置中心修改——就绪等待以 config.toml
+    // 实际端口为准（registry 声明值作回退），否则改端口后永远等旧端口超时
+    let probe_ports = if def.id == "edge-conductor" {
+        crate::ops::edge_config::effective_ports(std::path::Path::new(&def.install_dir), &def.ports)
+    } else {
+        def.ports.clone()
+    };
+    let ports = probe_ports
         .iter()
         .map(|p| p.to_string())
         .collect::<Vec<_>>()
@@ -48,8 +54,7 @@ fn wait_ready(
     let start = Instant::now();
     let mut next_progress = READY_PROGRESS_SECS;
     loop {
-        if def
-            .ports
+        if probe_ports
             .iter()
             .all(|p| health::check_tcp("127.0.0.1", *p, 800))
         {

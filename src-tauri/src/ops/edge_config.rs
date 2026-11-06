@@ -42,6 +42,30 @@ pub fn config_path(install_dir: &Path) -> PathBuf {
     install_dir.join("config.toml")
 }
 
+/// edge-conductor 实际监听端口（config.toml 的 http.port + websocket.port）。
+///
+/// 联动关键：平台配置中心可改端口，registry 静态 ports 立刻过时——
+/// 状态展示、健康判定、启动就绪等待都必须以 config.toml 实际值为准，
+/// 否则改端口后平台永远显示「未运行」。读不到/解析失败回退 fallback
+/// （registry 声明值），保证安装前后任何阶段都能探测。
+pub fn effective_ports(install_dir: &Path, fallback: &[u16]) -> Vec<u16> {
+    match read(install_dir) {
+        Ok(Some(cfg)) => {
+            let mut ports: Vec<u16> = Vec::new();
+            if let Ok(p) = cfg.http_port.trim().parse::<u16>() {
+                ports.push(p);
+            }
+            if let Ok(w) = cfg.ws_port.trim().parse::<u16>() {
+                if !ports.contains(&w) {
+                    ports.push(w);
+                }
+            }
+            if ports.is_empty() { fallback.to_vec() } else { ports }
+        }
+        _ => fallback.to_vec(),
+    }
+}
+
 /// (TOML 段, 键, struct 字段)。段名原样匹配（[VerneMQ] 大小写敏感，与
 /// edge-conductor 侧 serde(rename = "VerneMQ") 一致）
 const FIELDS: [(&str, &str, &str); 8] = [
