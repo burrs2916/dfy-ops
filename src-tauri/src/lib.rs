@@ -67,7 +67,7 @@ fn open_console_window(app: tauri::AppHandle, url: String) -> Result<(), String>
         let _ = w.set_focus();
         return Ok(());
     }
-    tauri::webview::WebviewWindowBuilder::new(&app, "edge-console", tauri::WebviewUrl::External(parsed))
+    tauri::webview::WebviewWindowBuilder::new(&app, "edge-console", tauri::WebviewUrl::External(parsed.clone()))
         .title("边缘计算控制台")
         .inner_size(1280.0, 860.0)
         .min_inner_size(960.0, 640.0)
@@ -80,7 +80,24 @@ fn open_console_window(app: tauri::AppHandle, url: String) -> Result<(), String>
         .closable(true)
         .center()
         .build()
-        .map(|_| ())
+        .map(|window| {
+            debug_log::entry("console-window", "info", "open", "created", &url);
+            // Windows 实测：外部 URL 的 WebView2 窗口偶发「整个窗口无响应、点关闭
+            // 无效」——WebView2 优雅关闭流程（等待页面 JS/网络空闲）可能无限挂起。
+            // 兜底：CloseRequested 不走默认 close（等待 webview 优雅退出），
+            // 直接 destroy 强制销毁窗口与 webview 进程，保证永远关得掉。
+            let w = window.clone();
+            window.on_window_event(move |event| match event {
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    debug_log::entry("console-window", "warn", "close", "close-requested-force-destroy", "");
+                    let _ = w.destroy();
+                }
+                tauri::WindowEvent::Destroyed => {
+                    debug_log::entry("console-window", "info", "close", "destroyed", "");
+                }
+                _ => {}
+            });
+        })
         .map_err(|e| format!("打开控制台窗口失败: {e}"))
 }
 
