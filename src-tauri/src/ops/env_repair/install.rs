@@ -852,10 +852,15 @@ async fn run_edge_dir_install(
     }
     // ===== 整合 greptimedb =====
     state.patch(|j| j.stage = "greptimedb".into());
-    let rdir = resource_dir.clone();
-    let idd = install_dir.clone();
+    // 专用克隆喂闭包（Windows-only 分支 mac 编译不到，E0382 只有 CI 能拦）；
+    // rdir/idd 保留在闭包外给后续 web-console 部署继续用
+    let rdir_for_gt = resource_dir.clone();
+    let idd_for_gt = install_dir.clone();
     let gt = tokio::task::spawn_blocking(move || {
-        integrate_greptimedb(Some(std::path::Path::new(&rdir)), std::path::Path::new(&idd))
+        integrate_greptimedb(
+            Some(std::path::Path::new(&rdir_for_gt)),
+            std::path::Path::new(&idd_for_gt),
+        )
     })
     .await;
     match gt {
@@ -871,8 +876,8 @@ async fn run_edge_dir_install(
     }
     // ===== 部署边缘控制台（可选）：资源目录 web-console/ 存在才复制 =====
     if let Some(r) = integrate_web_console(
-        Some(std::path::Path::new(&rdir)),
-        std::path::Path::new(&idd),
+        Some(std::path::Path::new(&resource_dir)),
+        std::path::Path::new(&install_dir),
     ) {
         match r {
             Ok(msg) => state.log(msg),
@@ -1771,9 +1776,11 @@ async fn run_zip_install(
         let zroot = std::path::Path::new(&zip_path)
             .parent()
             .map(|p| p.to_path_buf());
-        let idd = install_dir.clone();
+        // 专用克隆喂闭包（zroot/idd 保留给闭包外 web-console 部署继续用）
+        let zroot_for_gt = zroot.clone();
+        let idd_for_gt = install_dir.clone();
         let gt = tokio::task::spawn_blocking(move || {
-            integrate_greptimedb(zroot.as_deref(), std::path::Path::new(&idd))
+            integrate_greptimedb(zroot_for_gt.as_deref(), std::path::Path::new(&idd_for_gt))
         })
         .await;
         match gt {
@@ -1788,7 +1795,7 @@ async fn run_zip_install(
             }
         }
         // ===== 部署边缘控制台（可选）：资源目录 web-console/ 存在才复制 =====
-        if let Some(r) = integrate_web_console(zroot.as_deref(), std::path::Path::new(&idd)) {
+        if let Some(r) = integrate_web_console(zroot.as_deref(), std::path::Path::new(&install_dir)) {
             match r {
                 Ok(msg) => state.log(msg),
                 Err(e) => state.log(format!(
