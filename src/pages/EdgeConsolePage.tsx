@@ -102,8 +102,8 @@ export default function EdgeConsolePage() {
               边缘计算尚未安装
             </Typography>
             <Typography variant="body2" color="text.secondary" align="center">
-              控制台由边缘计算（edge-conductor）内置托管。先到修复中心安装边缘计算，
-              并在资源目录放置 web-console/（gateway-console 构建产物），安装时自动部署。
+              控制台由边缘计算（edge-conductor）内置托管，前端产物已随平台打包。
+              到修复中心一键安装/重装边缘计算即可自动部署控制台。
             </Typography>
             <Button
               variant="contained"

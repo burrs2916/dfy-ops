@@ -46,7 +46,8 @@
     "shortDescription": "DFY运维平台",
     "longDescription": "统一管理 DFY 系列异构服务的智能运维控制台",
     "resources": [
-      "resource/jre/**/*"
+      "resource/jre/**/*",
+      "resources/web-console/**/*"
     ]
   }
 }

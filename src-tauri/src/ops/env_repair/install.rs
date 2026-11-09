@@ -611,21 +611,37 @@ fn find_greptimedb_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
     None
 }
 
-/// 把资源目录的 web-console（gateway-console 构建产物）复制到 install_dir/web-console，
-/// 供 edge-conductor HTTP 服务在 /console/ 静态托管。可选步骤：资源目录没有
-/// web-console 时返回 None（纯 API 模式，不报错不阻塞安装）；复制失败返回 Err
-/// 但由调用方降级为警告日志——控制台缺席不影响边缘计算本体运行。
+/// 把 gateway-console 构建产物复制到 install_dir/web-console，供 edge-conductor
+/// HTTP 服务在 /console/ 静态托管。来源优先级：
+/// ① 资源目录 web-console/（手动放的新版优先，运维可直接热更控制台）；
+/// ② 平台安装目录内置产物（exe 同级 resources/web-console，Tauri bundle
+///    resources 随平台 NSIS 一起装机）——统一打包、统一安装，无需单独
+///    准备资源目录；
+/// ③ 两处都没有 → None（纯 API 模式，不报错不阻塞安装）。
+/// 复制失败返回 Err 但由调用方降级为警告日志——控制台缺席不影响边缘计算本体。
 /// 已有产物先清空再复制（Angular 产物文件名带 hash，残留旧文件只会越积越多）。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 fn integrate_web_console(
     resource_root: Option<&std::path::Path>,
     install_dir: &std::path::Path,
 ) -> Option<Result<String, String>> {
-    let root = resource_root?;
-    let src = root.join("web-console");
-    if !src.is_dir() || !src.join("index.html").is_file() {
-        return None;
+    // 来源①：资源目录手动放置的版本（含 index.html 才算有效产物）
+    let mut src = resource_root.and_then(|root| {
+        let d = root.join("web-console");
+        (d.is_dir() && d.join("index.html").is_file()).then_some(d)
+    });
+    // 来源②：平台内置产物（NSIS 装机后 exe 同级 resources/web-console）
+    if src.is_none() {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                let bundled = exe_dir.join("resources").join("web-console");
+                if bundled.is_dir() && bundled.join("index.html").is_file() {
+                    src = Some(bundled);
+                }
+            }
+        }
     }
+    let src = src?;
     let dst = install_dir.join("web-console");
     Some((|| {
         if dst.is_dir() {
