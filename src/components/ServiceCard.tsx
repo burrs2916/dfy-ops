@@ -164,13 +164,15 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
                   </Tooltip>
                 ))}
                 <Tooltip title="刷新此服务状态">
-                  <IconButton size="small" onClick={reload} disabled={reloading || busy}>
-                    {reloading ? (
-                      <CircularProgress size={14} />
-                    ) : (
-                      <Refresh fontSize="small" />
-                    )}
-                  </IconButton>
+                  <span>
+                    <IconButton size="small" onClick={reload} disabled={reloading || busy}>
+                      {reloading ? (
+                        <CircularProgress size={14} />
+                      ) : (
+                        <Refresh fontSize="small" />
+                      )}
+                    </IconButton>
+                  </span>
                 </Tooltip>
               </Stack>
             ) : (
@@ -205,13 +207,15 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
                 )}
                 {/* 单服务刷新：只重探本服务，替代全量轮询 */}
                 <Tooltip title="刷新此服务状态">
-                  <IconButton size="small" onClick={reload} disabled={reloading || busy}>
-                    {reloading ? (
-                      <CircularProgress size={14} />
-                    ) : (
-                      <Refresh fontSize="small" />
-                    )}
-                  </IconButton>
+                  <span>
+                    <IconButton size="small" onClick={reload} disabled={reloading || busy}>
+                      {reloading ? (
+                        <CircularProgress size={14} />
+                      ) : (
+                        <Refresh fontSize="small" />
+                      )}
+                    </IconButton>
+                  </span>
                 </Tooltip>
               </Stack>
             )}

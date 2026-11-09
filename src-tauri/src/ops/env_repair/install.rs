@@ -668,6 +668,7 @@ fn integrate_web_console(
 }
 
 /// 把边缘控制台接入 Nginx（与云端前端同通道，80 端口下直接访问）：
+/// - `location = /console`：裸路径 301 重定向到带斜杠版本（否则落到云端 SPA 404）
 /// - `location /console/`：静态托管安装目录的 web-console 产物
 /// - `location /api/`：反代 edge-conductor 8084（控制台同源调 API，免 CORS）
 ///
@@ -700,6 +701,9 @@ fn integrate_nginx_console(install_dir: &std::path::Path) -> Option<Result<Strin
     let block = format!(
         "{BEGIN}\n    \
          # 边缘计算控制台：静态产物 + 网关 API 反代（dfy-ops 自动生成，重装边缘计算自动更新；手动改动会被覆盖）\n    \
+         location = /console {{\n        \
+         return 301 /console/;\n    \
+         }}\n    \
          location /console/ {{\n        \
          alias {console_dir}/;\n        \
          index index.html;\n        \

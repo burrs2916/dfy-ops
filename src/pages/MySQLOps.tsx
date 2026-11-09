@@ -838,9 +838,11 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
                 )}
                 <Box sx={{ flex: 1 }} />
                 <Tooltip title="新建数据库">
-                  <IconButton size="small" color="primary" disabled={!running} onClick={() => setNewDbOpen(true)}>
-                    <AddCircleOutlineIcon fontSize="small" />
-                  </IconButton>
+                  <span>
+                    <IconButton size="small" color="primary" disabled={!running} onClick={() => setNewDbOpen(true)}>
+                      <AddCircleOutlineIcon fontSize="small" />
+                    </IconButton>
+                  </span>
                 </Tooltip>
               </Stack>
               <Typography variant="caption" color="text.secondary">

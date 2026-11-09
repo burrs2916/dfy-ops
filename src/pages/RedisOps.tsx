@@ -547,18 +547,20 @@ export default function RedisOps({
                 endAdornment: (
                   <InputAdornment position="end">
                     <Tooltip title="扫描（回车）">
-                      <IconButton
-                        size="small"
-                        edge="end"
-                        disabled={keysLoading}
-                        onClick={() => void loadKeys(pattern, keyKind)}
-                      >
-                        {keysLoading ? (
-                          <CircularProgress size={13} />
-                        ) : (
-                          <RefreshIcon sx={{ fontSize: 16 }} />
-                        )}
-                      </IconButton>
+                      <span>
+                        <IconButton
+                          size="small"
+                          edge="end"
+                          disabled={keysLoading}
+                          onClick={() => void loadKeys(pattern, keyKind)}
+                        >
+                          {keysLoading ? (
+                            <CircularProgress size={13} />
+                          ) : (
+                            <RefreshIcon sx={{ fontSize: 16 }} />
+                          )}
+                        </IconButton>
+                      </span>
                     </Tooltip>
                   </InputAdornment>
                 ),

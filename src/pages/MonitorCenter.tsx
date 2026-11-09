@@ -655,19 +655,25 @@ export default function MonitorCenter() {
                 刷新
               </Button>
               <Tooltip title="保存当前显示的尾部日志（最多 200 行）">
-                <Button size="small" onClick={downloadLog} disabled={!sel}>
-                  保存尾部
-                </Button>
+                <span>
+                  <Button size="small" onClick={downloadLog} disabled={!sel}>
+                    保存尾部
+                  </Button>
+                </span>
               </Tooltip>
               <Tooltip title="复制一份为 <原名>.bak-时间戳，留一份现场再清理">
-                <Button size="small" startIcon={<BackupOutlined />} onClick={() => void doBackup()} disabled={!sel}>
-                  备份
-                </Button>
+                <span>
+                  <Button size="small" startIcon={<BackupOutlined />} onClick={() => void doBackup()} disabled={!sel}>
+                    备份
+                  </Button>
+                </span>
               </Tooltip>
               <Tooltip title="删除此日志文件；正在写入的服务会自动重建">
-                <Button size="small" color="error" startIcon={<DeleteOutline />} onClick={() => setConfirmDel(true)} disabled={!sel}>
-                  删除
-                </Button>
+                <span>
+                  <Button size="small" color="error" startIcon={<DeleteOutline />} onClick={() => setConfirmDel(true)} disabled={!sel}>
+                    删除
+                  </Button>
+                </span>
               </Tooltip>
               <Button size="small" startIcon={<FolderOpen />} onClick={() => void openLogDir()} disabled={!sel}>
                 打开目录

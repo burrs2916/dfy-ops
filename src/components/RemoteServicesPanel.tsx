@@ -360,25 +360,29 @@ export function RemoteServicesPanel({ onSaved }: RemoteServicesPanelProps) {
                   </Stack>
                   <Stack direction="row" spacing={0.75} justifyContent="flex-end">
                     <Tooltip title="用当前填写的地址和密码实际连接一次（不保存），立即知道配置对不对">
-                      <Button
-                        variant="outlined"
-                        disabled={testing === s.id || saving === s.id}
-                        onClick={() => void test(s.id)}
-                        startIcon={
-                          testing === s.id ? <CircularProgress size={14} color="inherit" /> : <NetworkCheck />
-                        }
-                      >
-                        {testing === s.id ? "测试中…" : "测试"}
-                      </Button>
+                      <span>
+                        <Button
+                          variant="outlined"
+                          disabled={testing === s.id || saving === s.id}
+                          onClick={() => void test(s.id)}
+                          startIcon={
+                            testing === s.id ? <CircularProgress size={14} color="inherit" /> : <NetworkCheck />
+                          }
+                        >
+                          {testing === s.id ? "测试中…" : "测试"}
+                        </Button>
+                      </span>
                     </Tooltip>
                     <Tooltip title="保存并立即持久化，服务状态按新地址检测">
-                      <Button
-                        variant="contained"
-                        disabled={saving === s.id || testing === s.id}
-                        onClick={() => void save(s.id)}
-                      >
-                        {saving === s.id ? "保存中…" : "保存"}
-                      </Button>
+                      <span>
+                        <Button
+                          variant="contained"
+                          disabled={saving === s.id || testing === s.id}
+                          onClick={() => void save(s.id)}
+                        >
+                          {saving === s.id ? "保存中…" : "保存"}
+                        </Button>
+                      </span>
                     </Tooltip>
                   </Stack>
                 </Box>
