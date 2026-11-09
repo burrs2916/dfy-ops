@@ -232,7 +232,7 @@ export default function EdgeConfigPanel({ serviceId }: { serviceId: string }) {
             value={cfg?.upstreamServerUrl ?? ""}
             onChange={set("upstreamServerUrl")}
             error={!!upstreamErr}
-            helperText={upstreamErr ?? "如 http://192.168.1.10:48085——换 IP/端口的主要场景"}
+            helperText={upstreamErr ?? "如 http://127.0.0.1:48085——前后端同机即用本机回环地址"}
           />
         </Grid>
         {/* --- GreptimeDB --- */}

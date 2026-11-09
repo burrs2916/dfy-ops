@@ -38,10 +38,9 @@ max_age = 3600
 # @section 上游服务配置
 # ========================================
 [upstream.external]
-# 生产实际值：云端 DFY 后端地址（本地虚拟机部署即本机 IP 192.168.1.10）。
-# 不能写 localhost——控制台在交付机浏览器里打开时 localhost 指向交付机
-# 自己，云端请求会打空；daemon 上报与控制台 cloudApi 都用这个值。
-upstream_server_url = "http://192.168.1.10:48085"
+# 云端 DFY 后端地址：前后端均在本机运行，统一走 127.0.0.1（比 localhost
+# 更通用——不依赖 hosts/DNS 解析，daemon 上报与控制台 cloudApi 都用它）。
+upstream_server_url = "http://127.0.0.1:48085"
 api_prefix = "/admin-api"
 max_retries = 3
 retry_interval = 1000
