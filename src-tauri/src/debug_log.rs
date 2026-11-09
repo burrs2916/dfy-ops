@@ -99,9 +99,12 @@ pub fn write_line(path: &Path, message: &str) -> std::io::Result<()> {
 pub fn write_to(paths: &DebugLogPaths, message: &str) {
     for path in paths.iter() {
         if let Err(e) = write_line(path, message) {
-            // Windows GUI 子系统下 stderr 无效，eprintln 会 panic——只在 debug 构建打
+            // Windows GUI 子系统下 stderr 无效，eprintln 会 panic——只在 debug 构建打；
+            // release 构建不用 e，加 _ 前缀消 unused 警告（CI 声音要干净）
             #[cfg(debug_assertions)]
             eprintln!("[debug_log] 写入失败 {}: {e}", path.display());
+            #[cfg(not(debug_assertions))]
+            let _ = e;
         }
     }
 }
