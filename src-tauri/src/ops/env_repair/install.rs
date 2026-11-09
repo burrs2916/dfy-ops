@@ -648,11 +648,122 @@ fn integrate_web_console(
             std::fs::remove_dir_all(&dst).map_err(|e| format!("清理旧控制台产物失败：{e}"))?;
         }
         let n = copy_dir_recursive(&src, &dst)?;
+        // 记录入口 chunk 名：排查「部署成功但页面仍旧」时一眼分辨产物新旧
+        let entry = std::fs::read_dir(&dst)
+            .ok()
+            .and_then(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .find(|e| {
+                        e.file_name().to_string_lossy().starts_with("main-")
+                            && e.file_name().to_string_lossy().ends_with(".js")
+                    })
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+            })
+            .unwrap_or_else(|| "?".into());
         Ok(format!(
-            "已部署边缘控制台：{n} 个文件 → {}（/console/ 静态托管，平台「边缘控制台」入口可访问）",
+            "已部署边缘控制台：{n} 个文件 → {}（入口 {entry}；由 edge-conductor /console/ 与 Nginx /console/ 双通道托管）",
             dst.display()
         ))
     })())
+}
+
+/// 把边缘控制台接入 Nginx（与云端前端同通道，80 端口下直接访问）：
+/// - `location /console/`：静态托管安装目录的 web-console 产物
+/// - `location /api/`：反代 edge-conductor 8084（控制台同源调 API，免 CORS）
+/// 幂等（带标记块，重装自动更新）；改前备份 conf，`nginx -t` 校验失败自动回滚，
+/// 绝不让云端前端跟着遭殃。未装 Nginx 时静默跳过。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn integrate_nginx_console(install_dir: &std::path::Path) -> Option<Result<String, String>> {
+    let home = std::path::Path::new("C:/services/nginx");
+    if !home.join("nginx.exe").is_file() {
+        return None; // 未装 Nginx：控制台走 edge-conductor 自托管通道即可
+    }
+    let conf = home.join("conf").join("nginx.conf");
+    let original = match std::fs::read_to_string(&conf) {
+        Ok(s) => s,
+        Err(e) => return Some(Err(format!("读取 {} 失败：{e}", conf.display()))),
+    };
+
+    const BEGIN: &str = "# >>> dfy-ops edge-console (auto) >>>";
+    const END: &str = "# <<< dfy-ops edge-console (auto) <<<";
+    // 幂等：剔除旧标记块（重装更新）
+    let cleaned = match (original.find(BEGIN), original.find(END)) {
+        (Some(b), Some(e)) => {
+            let end = original[e..].find('\n').map(|i| e + i + 1).unwrap_or(e + END.len());
+            format!("{}{}", &original[..b], &original[end..])
+        }
+        _ => original.clone(),
+    };
+
+    let console_dir = install_dir.join("web-console").to_string_lossy().replace('\\', "/");
+    let block = format!(
+        "{BEGIN}\n    \
+         # 边缘计算控制台：静态产物 + 网关 API 反代（dfy-ops 自动生成，重装边缘计算自动更新；手动改动会被覆盖）\n    \
+         location /console/ {{\n        \
+         alias {console_dir}/;\n        \
+         index index.html;\n        \
+         try_files $uri $uri/ /console/index.html;\n    \
+         }}\n    \
+         location /api/ {{\n        \
+         proxy_pass http://127.0.0.1:8084;\n        \
+         proxy_http_version 1.1;\n        \
+         proxy_set_header Host $host;\n        \
+         proxy_set_header X-Real-IP $remote_addr;\n    \
+         }}\n{END}\n"
+    );
+
+    // 插入点：第一个 `location /`（云端前端 fallback，必在 80 端口 server 块内）。
+    // nginx 按「最长前缀优先」匹配，/console/ /api/ 不受插入顺序影响。
+    let anchor = match cleaned.lines().enumerate().find(|(_, l)| {
+        let t = l.trim();
+        t == "location / {" || t == "location /{"
+    }) {
+        Some((i, _)) => i,
+        None => return Some(Err("nginx.conf 中未找到 location / 块，无法定位插入点（请通过配置中心手工接入）".into())),
+    };
+    let indent = cleaned
+        .lines()
+        .nth(anchor)
+        .and_then(|l| Some(l[..l.len() - l.trim_start().len()].to_string()))
+        .unwrap_or_default();
+    // 按锚点行缩进重排块内容
+    let block = block
+        .lines()
+        .map(|l| if l.trim().is_empty() { l.to_string() } else { format!("{indent}{}", l.trim_start()) })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut patched_lines: Vec<String> = cleaned.lines().map(str::to_string).collect();
+    patched_lines.insert(anchor, block);
+
+    // 备份 + 写回 + nginx -t 校验（失败回滚）
+    let bak = home.join("conf").join("nginx.conf.bak-edge-console");
+    let _ = std::fs::write(&bak, &original);
+    let patched = patched_lines.join("\n");
+    if let Err(e) = std::fs::write(&conf, &patched) {
+        return Some(Err(format!("写回 nginx.conf 失败：{e}")));
+    }
+    let prefix = format!("{}/", home.to_string_lossy().replace('\\', "/"));
+    let test_ok = std::process::Command::new(home.join("nginx.exe"))
+        .args(["-p", &prefix, "-c", "conf/nginx.conf", "-t"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !test_ok {
+        let _ = std::fs::write(&conf, &original); // 回滚，云端前端不受影响
+        return Some(Err(
+            "nginx -t 校验未通过，已回滚 nginx.conf（备份在 conf/nginx.conf.bak-edge-console）".into(),
+        ));
+    }
+    // reload 使其生效；nginx 未运行时 reload 失败无碍——下次启动自然加载新配置
+    let reloaded = std::process::Command::new(home.join("nginx.exe"))
+        .args(["-p", &prefix, "-c", "conf/nginx.conf", "-s", "reload"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    Some(Ok(format!(
+        "已把边缘控制台接入 Nginx：http://127.0.0.1/console/（/api/ 反代 8084）{}",
+        if reloaded { "，已热加载生效" } else { "（nginx 未运行，下次启动自动生效）" }
+    )))
 }
 
 /// 把资源目录的 greptimedb 目录整合到 install_dir/greptimedb。
@@ -882,6 +993,13 @@ async fn run_edge_dir_install(
         match r {
             Ok(msg) => state.log(msg),
             Err(e) => state.log(format!("警告：边缘控制台部署失败（不影响边缘计算本体）：{e}")),
+        }
+    }
+    // 控制台接入 Nginx（80 端口同通道，与云端前端一致）；未装 nginx 自动跳过
+    if let Some(r) = integrate_nginx_console(std::path::Path::new(&install_dir)) {
+        match r {
+            Ok(msg) => state.log(msg),
+            Err(e) => state.log(format!("警告：控制台接入 Nginx 失败（edge-conductor 自托管通道不受影响）：{e}")),
         }
     }
     // ===== 验证 =====
@@ -1800,6 +1918,15 @@ async fn run_zip_install(
                 Ok(msg) => state.log(msg),
                 Err(e) => state.log(format!(
                     "警告：边缘控制台部署失败（不影响边缘计算本体）：{e}"
+                )),
+            }
+        }
+        // 控制台接入 Nginx（80 端口同通道，与云端前端一致）；未装 nginx 自动跳过
+        if let Some(r) = integrate_nginx_console(std::path::Path::new(&install_dir)) {
+            match r {
+                Ok(msg) => state.log(msg),
+                Err(e) => state.log(format!(
+                    "警告：控制台接入 Nginx 失败（edge-conductor 自托管通道不受影响）：{e}"
                 )),
             }
         }

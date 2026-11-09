@@ -71,6 +71,13 @@ fn open_console_window(app: tauri::AppHandle, url: String) -> Result<(), String>
         .title("边缘计算控制台")
         .inner_size(1280.0, 860.0)
         .min_inner_size(960.0, 640.0)
+        // 显式声明全部系统装饰与能力：Windows 上动态建窗口偶发按钮/拖拽失效，
+        // 显式设置规避继承主窗口状态导致的交互异常
+        .decorations(true)
+        .resizable(true)
+        .maximizable(true)
+        .minimizable(true)
+        .closable(true)
         .center()
         .build()
         .map(|_| ())
