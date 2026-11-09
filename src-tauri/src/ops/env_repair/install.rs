@@ -611,6 +611,34 @@ fn find_greptimedb_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
     None
 }
 
+/// 把资源目录的 web-console（gateway-console 构建产物）复制到 install_dir/web-console，
+/// 供 edge-conductor HTTP 服务在 /console/ 静态托管。可选步骤：资源目录没有
+/// web-console 时返回 None（纯 API 模式，不报错不阻塞安装）；复制失败返回 Err
+/// 但由调用方降级为警告日志——控制台缺席不影响边缘计算本体运行。
+/// 已有产物先清空再复制（Angular 产物文件名带 hash，残留旧文件只会越积越多）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn integrate_web_console(
+    resource_root: Option<&std::path::Path>,
+    install_dir: &std::path::Path,
+) -> Option<Result<String, String>> {
+    let root = resource_root?;
+    let src = root.join("web-console");
+    if !src.is_dir() || !src.join("index.html").is_file() {
+        return None;
+    }
+    let dst = install_dir.join("web-console");
+    Some((|| {
+        if dst.is_dir() {
+            std::fs::remove_dir_all(&dst).map_err(|e| format!("清理旧控制台产物失败：{e}"))?;
+        }
+        let n = copy_dir_recursive(&src, &dst)?;
+        Ok(format!(
+            "已部署边缘控制台：{n} 个文件 → {}（/console/ 静态托管，平台「边缘控制台」入口可访问）",
+            dst.display()
+        ))
+    })())
+}
+
 /// 把资源目录的 greptimedb 目录整合到 install_dir/greptimedb。
 /// 程序 zip 自带（greptime.exe 已在）时跳过；资源目录没有时明确报错——
 /// edge-conductor 没有时序库起不来，宁可装一半失败也不装个残缺的。
@@ -823,6 +851,16 @@ async fn run_edge_dir_install(
         Err(e) => {
             finish(state, env_cache, false, format!("GreptimeDB 整合任务异常：{e}")).await;
             return;
+        }
+    }
+    // ===== 部署边缘控制台（可选）：资源目录 web-console/ 存在才复制 =====
+    if let Some(r) = integrate_web_console(
+        Some(std::path::Path::new(&rdir)),
+        std::path::Path::new(&idd),
+    ) {
+        match r {
+            Ok(msg) => state.log(msg),
+            Err(e) => state.log(format!("警告：边缘控制台部署失败（不影响边缘计算本体）：{e}")),
         }
     }
     // ===== 验证 =====
@@ -1731,6 +1769,15 @@ async fn run_zip_install(
             Err(e) => {
                 finish(state, env_cache, false, format!("GreptimeDB 整合任务异常：{e}")).await;
                 return;
+            }
+        }
+        // ===== 部署边缘控制台（可选）：资源目录 web-console/ 存在才复制 =====
+        if let Some(r) = integrate_web_console(zroot.as_deref(), std::path::Path::new(&idd)) {
+            match r {
+                Ok(msg) => state.log(msg),
+                Err(e) => state.log(format!(
+                    "警告：边缘控制台部署失败（不影响边缘计算本体）：{e}"
+                )),
             }
         }
     }
