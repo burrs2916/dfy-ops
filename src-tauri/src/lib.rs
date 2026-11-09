@@ -51,6 +51,32 @@ fn uses_custom_titlebar() -> bool {
     cfg!(target_os = "windows")
 }
 
+/// 打开「边缘计算控制台」独立原生窗口：控制台页面（edge-conductor 托管的
+/// /console/ 静态产物）不用挤在平台主窗口的 iframe 里，像独立应用一样有
+/// 自己的任务栏图标。前端传入拼好的完整 URL（含 cloudApi= 查询参数）。
+/// 同 label 窗口已存在则仅前置聚焦，不重复开。
+#[tauri::command]
+fn open_console_window(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    // 安全校验：只允许打开本机回环的 /console/ 页面，防止被拿来开任意远程站点
+    let parsed = tauri::Url::parse(&url).map_err(|e| format!("控制台地址不合法: {e}"))?;
+    if parsed.host_str() != Some("127.0.0.1") || !parsed.path().starts_with("/console/") {
+        return Err("仅支持打开本机边缘控制台".into());
+    }
+    // 已开着 → 前置聚焦即可（不重复开一堆窗口）
+    if let Some(w) = app.get_webview_window("edge-console") {
+        let _ = w.set_focus();
+        return Ok(());
+    }
+    tauri::webview::WebviewWindowBuilder::new(&app, "edge-console", tauri::WebviewUrl::External(parsed))
+        .title("边缘计算控制台")
+        .inner_size(1280.0, 860.0)
+        .min_inner_size(960.0, 640.0)
+        .center()
+        .build()
+        .map(|_| ())
+        .map_err(|e| format!("打开控制台窗口失败: {e}"))
+}
+
 /// 解析 debug.log 写入路径（和 biosphere-terminal-app 的 resolve_debug_log_paths 完全同策略）：
 /// 多路径写入，总有一处能写。
 ///
@@ -189,7 +215,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![uses_custom_titlebar])
+        .invoke_handler(tauri::generate_handler![uses_custom_titlebar, open_console_window])
         .run(tauri::generate_context!())
         .expect("error while running DFY 运维平台");
 }

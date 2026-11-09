@@ -232,6 +232,11 @@ export default function EnvCheck() {
             const label = job.target ? TARGET_LABEL[job.target] ?? job.target : "环境";
             // 任务结束已自动 refreshEnvAll()，如实告知用户结果已刷新
             setRepairNotice(`${label} ${job.op === "uninstall" ? "卸载" : "安装"}完成，环境已自动重新检查`);
+            // 边缘计算装完 → 自动弹出独立原生窗口显示控制台（失败静默，不打扰安装成功的反馈）
+            if (job.op !== "uninstall" && job.target === "edge-conductor") {
+              const err = await api.openEdgeConsoleWindow();
+              if (err) console.info("[EnvCheck] 控制台窗口未打开：", err);
+            }
           } else {
             setRepairError(job.error || "修复未成功，请查看日志或按修复建议手动处理");
           }

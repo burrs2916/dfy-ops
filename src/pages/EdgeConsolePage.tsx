@@ -6,6 +6,7 @@ import {
   CircularProgress,
   Paper,
   Stack,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import HubIcon from "@mui/icons-material/Hub";
@@ -29,6 +30,8 @@ export default function EdgeConsolePage() {
   const [loading, setLoading] = useState(true);
   // iframe key：刷新按钮递增强制重载（控制台后端刚启动完需要手动刷一下的场景）
   const [frameKey, setFrameKey] = useState(0);
+  // 独立窗口打开失败的提示（成功无感知，失败给出原因）
+  const [windowErr, setWindowErr] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -59,7 +62,7 @@ export default function EdgeConsolePage() {
 
   return (
     <Stack spacing={1} sx={{ height: "100%", minHeight: 0, p: 1.5, pt: 1 }}>
-      {/* 顶部条：标题 + 控制台地址 + 刷新 */}
+      {/* 顶部条：标题 + 控制台地址 + 独立窗口 + 刷新 */}
       <Stack direction="row" spacing={1.25} alignItems="center" sx={{ flexShrink: 0 }}>
         <Box
           sx={{
@@ -83,6 +86,19 @@ export default function EdgeConsolePage() {
           </Typography>
         </Box>
         <Box sx={{ flex: 1 }} />
+        <Tooltip title="在独立原生窗口中打开（有自己的任务栏图标，可并排使用）">
+          <Button
+            size="small"
+            startIcon={<OpenInNewIcon />}
+            onClick={async () => {
+              const err = await api.openEdgeConsoleWindow();
+              if (err) setWindowErr(err);
+            }}
+            sx={{ textTransform: "none", flexShrink: 0 }}
+          >
+            独立窗口
+          </Button>
+        </Tooltip>
         <Button
           size="small"
           startIcon={<RefreshIcon />}
@@ -92,6 +108,13 @@ export default function EdgeConsolePage() {
           刷新
         </Button>
       </Stack>
+
+      {/* 独立窗口打开失败提示（成功则弹出独立窗口，无感知） */}
+      {windowErr && (
+        <Alert severity="warning" variant="outlined" onClose={() => setWindowErr(null)} sx={{ flexShrink: 0, py: 0.5 }}>
+          独立窗口打开失败：{windowErr}
+        </Alert>
+      )}
 
       {/* 内容区 */}
       {loading ? (
