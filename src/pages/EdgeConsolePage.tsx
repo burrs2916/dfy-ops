@@ -17,10 +17,14 @@ import type { ExternalConfigResponse } from "../types";
 
 /** 边缘控制台：gateway-console（Angular）由 edge-conductor HTTP 服务
  *  在 /console/ 静态托管，本页 iframe 内嵌。端口取边缘计算 config.toml
- *  的 httpPort（配置中心可改，改完控制台地址自动跟随）。 */
+ *  的 httpPort（配置中心可改，改完控制台地址自动跟随）。
+ *  云端 API 基址通过 ?cloudApi= 注入——控制台登录要先查云端租户、
+ *  业务页调云端 admin-api（走 token 认证），地址从 Nginx 反代配置取
+ *  （backendHost:backendPort = 云端 DFY 后端），部署环境变了自动跟随。 */
 export default function EdgeConsolePage() {
   const navigate = useNavigate();
   const [cfg, setCfg] = useState<ExternalConfigResponse | null>(null);
+  const [nginxCfg, setNginxCfg] = useState<ExternalConfigResponse | null>(null);
   const [loading, setLoading] = useState(true);
   // iframe key：刷新按钮递增强制重载（控制台后端刚启动完需要手动刷一下的场景）
   const [frameKey, setFrameKey] = useState(0);
@@ -28,24 +32,34 @@ export default function EdgeConsolePage() {
   useEffect(() => {
     let alive = true;
     setLoading(true);
-    api
-      .getExternalConfig("edge-conductor")
-      .then((c) => {
-        if (alive) setCfg(c);
-      })
-      .catch(() => {
-        if (alive) setCfg(null);
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
+    // edge-conductor 配置拿控制台端口；Nginx 配置拿云端后端地址（控制台
+    // 的云端业务接口基址），并行拉取
+    Promise.all([
+      api.getExternalConfig("edge-conductor").catch(() => null),
+      api.getExternalConfig("nginx").catch(() => null),
+    ]).then(([e, n]) => {
+      if (!alive) return;
+      setCfg(e);
+      setNginxCfg(n);
+      setLoading(false);
+    });
     return () => {
       alive = false;
     };
   }, [frameKey]);
 
   const httpPort = (cfg?.config as Record<string, string> | undefined)?.httpPort || "8084";
-  const consoleUrl = `http://127.0.0.1:${httpPort}/console/`;
+  // 云端 DFY 后端基址：Nginx proxy_pass 的目标就是它；拿不到就不传参数
+  // （控制台回退 environment 默认——保证纯边缘场景仍可用）
+  const nginx = nginxCfg?.config as
+    | { backendHost?: string; backendPort?: string }
+    | undefined;
+  const cloudApi =
+    nginx?.backendHost && nginx?.backendPort
+      ? `http://${nginx.backendHost}:${nginx.backendPort}`
+      : "";
+  const cloudQuery = cloudApi ? `?cloudApi=${encodeURIComponent(cloudApi)}` : "";
+  const consoleUrl = `http://127.0.0.1:${httpPort}/console/${cloudQuery}`;
 
   return (
     <Stack spacing={1} sx={{ height: "100%", minHeight: 0, p: 1.5, pt: 1 }}>
