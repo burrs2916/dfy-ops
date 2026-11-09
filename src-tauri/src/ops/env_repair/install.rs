@@ -670,6 +670,7 @@ fn integrate_web_console(
 /// 把边缘控制台接入 Nginx（与云端前端同通道，80 端口下直接访问）：
 /// - `location /console/`：静态托管安装目录的 web-console 产物
 /// - `location /api/`：反代 edge-conductor 8084（控制台同源调 API，免 CORS）
+///
 /// 幂等（带标记块，重装自动更新）；改前备份 conf，`nginx -t` 校验失败自动回滚，
 /// 绝不让云端前端跟着遭殃。未装 Nginx 时静默跳过。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -724,7 +725,7 @@ fn integrate_nginx_console(install_dir: &std::path::Path) -> Option<Result<Strin
     let indent = cleaned
         .lines()
         .nth(anchor)
-        .and_then(|l| Some(l[..l.len() - l.trim_start().len()].to_string()))
+        .map(|l| l[..l.len() - l.trim_start().len()].to_string())
         .unwrap_or_default();
     // 按锚点行缩进重排块内容
     let block = block
