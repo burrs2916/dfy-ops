@@ -194,25 +194,30 @@ fn builtin() -> Vec<ServiceDef> {
             name: "Gateway Console (Angular)".into(),
             kind: ServiceKind::AngularSpa,
             java_major: None,
-            install_dir: "C:/services/gateway-console".into(),
-            build_cmd: Some("npm run build:prod".into()),
-            run_cmd: "nginx -p C:/services/gateway-console -c nginx.conf".into(),
-            ports: vec![8081],
+            // 随边缘计算部署：产物装进 edge-conductor/web-console/，由
+            // edge-conductor /console/（8084）与 Nginx /console/（80）双通道托管——
+            // 无独立进程、无独立端口、无独立目录。检测语义与 dfy-ui 同构
+            // （static_site：检测 = 宿主端口 TCP 可达 + 产物就位）。
+            install_dir: "C:/services/edge-conductor".into(),
+            build_cmd: None,
+            run_cmd: String::new(),
+            ports: vec![8084],
             process_names: vec![],
             product_names: vec![],
             health_url: None,
-            // 网关控制台用独立 nginx 实例（-p 指向前缀目录），日志在自己目录下
-            log_paths: vec![
-                "C:/services/gateway-console/logs/access.log".into(),
-                "C:/services/gateway-console/logs/error.log".into(),
-            ],
-            depends_on: vec![],
-            is_daemon: true,
+            log_paths: vec![],
+            depends_on: vec!["edge-conductor".into()],
+            is_daemon: false,
             third_party: false,
             remote_only: false,
-            static_site: false,
-            requires: vec![],
-            description: "Angular 19 网关控制台，静态托管。".into(),
+            static_site: true,
+            requires: vec![RequiresCheck {
+                id: "web-console".into(),
+                label: "控制台产物".into(),
+                path: Some("web-console/index.html".into()),
+                port: None,
+            }],
+            description: "Angular 19 网关控制台，随边缘计算部署，edge-conductor 与 Nginx 双通道静态托管。".into(),
         },
         ServiceDef {
             id: "edge-conductor".into(),

@@ -421,7 +421,10 @@ pub fn check_service_env_with(
         ServiceKind::VueSpa | ServiceKind::AngularSpa => {
             // 前端不预设部署形态：未运行时检查可行运行路径（nginx 或 Node 任一可用）；
             // 运行中则事实已回答，交给依赖检查（如 dfy-ui → dfy-backend）。
-            if !running {
+            // static_site（dfy-ui / gateway-console）无独立运行方式——宿主
+            // （nginx / edge-conductor）要求已由 depends_on 依赖检查表达，
+            // 再提示「安装 nginx/node」只会误导。
+            if !running && !def.static_site {
                 let nginx = probe_cached(cache, "nginx", &["-v"]);
                 let node = probe_cached(cache, "node", &["-v"]);
                 let ok = nginx.is_some() || node.is_some();
@@ -747,14 +750,29 @@ mod tests {
         let st = states(&[
             ("dfy-ui", true, true, &[]),
             ("gateway-console", true, true, &[]),
+            ("edge-conductor", true, true, &[]),
             ("biosphere-spatial", true, true, &[]),
             ("dfy-backend", true, true, &[48085]),
             ("nginx", true, true, &[80]),
             ("mysql", true, true, &[3306]),
             ("redis", true, true, &[6379]),
         ]);
-        // gateway-console / biosphere-spatial 无 requires 也无 depends_on → 依赖齐全即 Pass
-        for id in ["gateway-console", "biosphere-spatial"] {
+        // gateway-console：宿主 edge-conductor 在跑 → 依赖 Pass；
+        // 产物 index.html 在 mac 测试机上不存在 → Warn 可接受（与 dfy-ui 同款）。
+        // biosphere-spatial 无 requires 也无 depends_on → 依赖齐全即 Pass。
+        {
+            let def = def_of("gateway-console");
+            let report = check_service_env_with(&def, &st, None);
+            let dep = report.items.iter().find(|i| i.id == "dep-edge-conductor").unwrap();
+            assert_eq!(dep.status, CheckStatus::Pass, "宿主在跑依赖应 Pass: {dep:?}");
+            assert_eq!(
+                report.overall,
+                CheckStatus::Warn,
+                "产物缺失只应 Warn（路径检查），不应升级 Fail: {:?}",
+                report.items
+            );
+        }
+        for id in ["biosphere-spatial"] {
             let def = def_of(id);
             let report = check_service_env_with(&def, &st, None);
             assert_eq!(
@@ -922,33 +940,25 @@ mod tests {
         assert_eq!(report.overall, CheckStatus::Warn);
     }
 
-    /// 未运行的前端：不预设部署形态 —— nginx 或 Node.js 任一可用即 pass。
-    /// 探测结果通过预填 ProbeCache 注入，与测试机是否真实安装 nginx/node 解耦
-    /// （CI runner 两样都没有，真实探测会让该测试必然失败）。
+    /// 未运行的前端检测语义：
+    /// - gateway-console（static_site，随边缘计算部署）：无「运行方式」检查项——
+    ///   宿主要求由 dep-edge-conductor 依赖检查表达，不再误导用户装 nginx/node；
+    /// - 非 static 前端（未来新增）：仍按 nginx/node 任一可用判定。
+    /// 探测结果通过预填 ProbeCache 注入，与测试机是否真实安装 nginx/node 解耦。
     #[test]
     fn stopped_frontend_env_accepts_node_or_nginx() {
         let def = def_of("gateway-console");
+        assert!(def.static_site, "gateway-console 应为 static_site（随边缘计算部署）");
 
-        // nginx 可用 → 运行方式 Pass（Node 缺失不影响）
-        let cache = ProbeCache::default();
-        cache
-            .map
-            .lock()
-            .unwrap()
-            .insert("nginx?-v".into(), Some("nginx/1.24.0".into()));
-        cache.map.lock().unwrap().insert("node?-v".into(), None);
-        let report = check_service_env_with(&def, &states(&[]), Some(&cache));
-        let runtime = report.items.iter().find(|i| i.id == "runtime-path").unwrap();
-        assert_eq!(runtime.status, CheckStatus::Pass, "nginx 可用即应判定可运行: {runtime:?}");
-
-        // 两者都不可用 → Warn（提示可行的运行方式，非致命）
-        let cache = ProbeCache::default();
-        cache.map.lock().unwrap().insert("nginx?-v".into(), None);
-        cache.map.lock().unwrap().insert("node?-v".into(), None);
-        let report = check_service_env_with(&def, &states(&[]), Some(&cache));
-        let runtime = report.items.iter().find(|i| i.id == "runtime-path").unwrap();
-        assert_eq!(runtime.status, CheckStatus::Warn, "两者均不可用应 Warn 引导安装: {runtime:?}");
-        assert!(runtime.fix_hint.contains("nginx") || runtime.fix_hint.contains("Node"), "Warn 提示应给出运行方式指引: {runtime:?}");
+        // static_site 未运行：不产生「运行方式」检查项（宿主检查交给 depends_on）
+        let report = check_service_env_with(&def, &states(&[]), None);
+        assert!(
+            !report.items.iter().any(|i| i.id == "runtime-path"),
+            "static_site 前端不应出现 runtime-path 检查项: {:?}",
+            report.items
+        );
+        let dep = report.items.iter().find(|i| i.id == "dep-edge-conductor");
+        assert!(dep.is_some(), "gateway-console 应依赖检查 edge-conductor: {:?}", report.items);
     }
 
     /// 回归：GreptimeDB 时序库随安装管线整合到 edge-conductor/greptimedb/，

@@ -19,7 +19,7 @@ use crate::ops::orchestrator;
 use crate::ops::process::ProcSnapshot;
 use crate::ops::registry::{ServiceDef, ServiceKind};
 
-const PROBE_TIMEOUT_MS: u64 = 800;
+const PROBE_TIMEOUT_MS: u64 = 400;
 
 /// 服务运行态（三态，P0-2）。
 ///
