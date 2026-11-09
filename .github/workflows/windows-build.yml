@@ -121,6 +121,15 @@ jobs:
           Copy-Item "$root/*" $dest -Recurse -Force
           Write-Host "resource/jre 顶层内容：" (Get-ChildItem $dest | Select-Object -ExpandProperty Name)
 
+      # NSIS 工具链由 tauri bundler 每次从 GitHub releases 下载（nsis-3.11.zip +
+      # 插件包），遇到 504/网络抖动整个 run 前功尽弃（#150 踩中）。缓存到
+      # %LOCALAPPDATA%\tauri\NSIS，命中后 bundler 直接复用不再下载。
+      - name: Cache NSIS toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/tauri/NSIS
+          key: tauri-nsis-3.11
+
       - name: Build Tauri (NSIS installer)
         run: pnpm tauri build
 
