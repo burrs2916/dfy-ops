@@ -772,13 +772,13 @@ mod tests {
                 report.items
             );
         }
-        for id in ["biosphere-spatial"] {
-            let def = def_of(id);
+        {
+            let def = def_of("biosphere-spatial");
             let report = check_service_env_with(&def, &st, None);
             assert_eq!(
                 report.overall,
                 CheckStatus::Pass,
-                "运行中的 {id}（依赖齐全）环境检查不应告警: {:?}",
+                "运行中的 biosphere-spatial（依赖齐全）环境检查不应告警: {:?}",
                 report.items
             );
         }
@@ -944,6 +944,7 @@ mod tests {
     /// - gateway-console（static_site，随边缘计算部署）：无「运行方式」检查项——
     ///   宿主要求由 dep-edge-conductor 依赖检查表达，不再误导用户装 nginx/node；
     /// - 非 static 前端（未来新增）：仍按 nginx/node 任一可用判定。
+    ///
     /// 探测结果通过预填 ProbeCache 注入，与测试机是否真实安装 nginx/node 解耦。
     #[test]
     fn stopped_frontend_env_accepts_node_or_nginx() {
