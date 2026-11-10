@@ -115,7 +115,7 @@ pub async fn start_generic_repair(
     // - edge-conductor → zip 解压管线（装完整合 greptimedb）；无 zip 时目录/exe 兜底
     // - dfy-backend → jar 拷贝管线（单独分支）
     // - 其他 → msi 静默安装管线
-    let zip_capable = matches!(target, "mysql" | "java" | "nginx" | "dfy-ui" | "edge-conductor");
+    let zip_capable = matches!(target, "mysql" | "java" | "nginx" | "dfy-ui" | "edge-conductor" | "gateway-console");
     let jar_capable = target == "dfy-backend";
 
     let started = if jar_capable && jar.is_some() {
@@ -219,6 +219,9 @@ pub async fn start_generic_repair(
             "action": "install",
             "message": match source {
                 Some("zip") if target == "java" => format!("开始离线安装 {label}（免安装版：解压 → 写 JAVA_HOME → 版本验证，无需管理员权限），进度见下方任务状态"),
+                // gateway-console 免安装解压 + npm 依赖初始化，不注册 Windows 服务
+                // （起停走平台进程管理器），文案与实际管线一致
+                Some("zip") if target == "gateway-console" => format!("开始离线安装 {label}（免安装版：解压 → npm install 依赖 → 就绪验证），进度见下方任务状态"),
                 Some("zip") => format!("开始离线安装 {label}（免安装版：解压 → 初始化 → 注册服务），全程只需一次管理员确认，进度见下方任务状态"),
                 Some("edge-dir") => format!("开始离线安装 {label}（程序 + GreptimeDB 时序库整合：复制 → 整合 → 校验），进度见下方任务状态"),
                 Some("msi") => format!("开始离线安装 {label}（{}）→ 管理员确认 → 验证，进度见下方任务状态", msi.as_ref().map(|f| f.file_name.as_str()).unwrap_or_default()),
@@ -236,7 +239,7 @@ pub async fn start_generic_repair(
 /// + dfy-backend/dfy-ui（无服务注册，停平台进程 + 删目录）
 /// + edge-conductor（无服务注册，停 edgecd-daemon 进程 + 删目录）
 /// + greptime（捆绑时序库：停 greptime.exe 子进程 + 删 greptimedb 目录）。
-pub const UNINSTALLABLE: [&str; 8] = [
+pub const UNINSTALLABLE: [&str; 9] = [
     "mysql",
     "redis",
     "java",
@@ -244,6 +247,7 @@ pub const UNINSTALLABLE: [&str; 8] = [
     "dfy-backend",
     "dfy-ui",
     "edge-conductor",
+    "gateway-console",
     "greptime",
 ];
 
@@ -253,7 +257,7 @@ pub const UNINSTALLABLE: [&str; 8] = [
 /// （「待安装」列表有没有条目全靠这份探测），所以纳入探测列表。
 /// greptime（GreptimeDB）是 edge-conductor 的捆绑子进程组件：安装随边缘计算
 /// 管线整合，卡片上独立显示安装状态、支持单独卸载。
-pub const PROBEABLE: [&str; 8] = [
+pub const PROBEABLE: [&str; 9] = [
     "mysql",
     "redis",
     "java",
@@ -261,6 +265,7 @@ pub const PROBEABLE: [&str; 8] = [
     "dfy-backend",
     "dfy-ui",
     "edge-conductor",
+    "gateway-console",
     "greptime",
 ];
 
@@ -406,8 +411,8 @@ pub(crate) async fn probe_target(state: &AppState, target: &str) -> (bool, bool,
         return (installed, false, false);
     }
     let install_dir = registry_install_dir(state, target);
-    // dfy-backend/dfy-ui/nginx/edge-conductor 都不注册 Windows 服务：按 install_dir + 关键文件判定
-    if matches!(target, "dfy-backend" | "dfy-ui" | "nginx" | "edge-conductor" | "greptime") {
+    // dfy-backend/dfy-ui/nginx/edge-conductor/gateway-console 都不注册 Windows 服务：按 install_dir + 关键文件判定
+    if matches!(target, "dfy-backend" | "dfy-ui" | "nginx" | "edge-conductor" | "greptime" | "gateway-console") {
         let install_dir = install_dir.clone();
         let key_filename: String = match target {
             "nginx" => "nginx.exe".into(),
@@ -416,20 +421,28 @@ pub(crate) async fn probe_target(state: &AppState, target: &str) -> (bool, bool,
             "edge-conductor" => "edgecd-daemon.exe".into(),
             // greptime：捆绑在 edge-conductor/greptimedb 下的时序库二进制
             "greptime" => "greptime.exe".into(),
+            // gateway-console：源码工程——package.json 即「已安装」
+            //（node_modules 缺失由安装链路/npm install 步骤负责，不阻断卡片展示）
+            "gateway-console" => "package.json".into(),
             _ => unreachable!(),
         };
         // 运行态探测口径：dfy-backend 用 48085 端口（image_running("java.exe")
-        // 会把任何 Java 程序误判成后端在跑）；nginx/edge-conductor/greptime
-        // 仍按进程镜像（greptime 是 edgecd-daemon 拉起的子进程，无独立服务）；
+        // 会把任何 Java 程序误判成后端在跑）、gateway-console 用 4200 端口
+        //（ng serve 编译期多进程，无单一镜像可判）；nginx/edge-conductor/
+        // greptime 仍按进程镜像（greptime 是 edgecd-daemon 拉起的子进程）；
         // dfy-ui 无进程
         let proc_image: Option<&'static str> = match target {
             "nginx" => Some("nginx.exe"),
             "edge-conductor" => Some("edgecd-daemon.exe"),
             "greptime" => Some("greptime.exe"),
-            "dfy-backend" | "dfy-ui" => None,
+            "dfy-backend" | "dfy-ui" | "gateway-console" => None,
             _ => unreachable!(),
         };
-        let backend_by_port = target == "dfy-backend";
+        let probe_port: Option<u16> = match target {
+            "dfy-backend" => Some(48085),
+            "gateway-console" => Some(4200),
+            _ => None,
+        };
         let (dir_exists, key_file_exists, proc_running) = blocking(move || {
             let dir = std::path::Path::new(&install_dir);
             let dir_ok = dir.is_dir();
@@ -452,15 +465,14 @@ pub(crate) async fn probe_target(state: &AppState, target: &str) -> (bool, bool,
                     );
                 }
             }
-            let proc = if backend_by_port {
-                port_holder(48085).is_some()
-            } else {
-                proc_image.map(image_running).unwrap_or(false)
+            let proc = match probe_port {
+                Some(p) => port_holder(p).is_some(),
+                None => proc_image.map(image_running).unwrap_or(false),
             };
             (dir_ok, key_ok, proc)
         })
         .await;
-        // service_running 对 nginx/dfy-backend = 进程是否在跑（dfy-ui 静态目录恒 false）
+        // service_running：端口判定的目标看端口，其余看进程镜像（dfy-ui 静态目录恒 false）
         return (dir_exists && key_file_exists, dir_exists, proc_running);
     }
     // mysql/redis：查 Windows 服务 + 目录 + mysql MSI 兜底
@@ -1028,6 +1040,127 @@ pub async fn service_action(
         );
         return Json(serde_json::json!({ "ok": true, "running": running, "message": msg }));
     }
+    // gateway-console：进程管理器通道（registry run_cmd = npm start → ng serve 4200）。
+    // 启动前置检查 Node/npm 与源码完整性（缺失时点名指引，不让进程秒退后从
+    // 「启动失败」里猜）；Angular 首次编译要 10-30s，启动复核改为轮询 4200
+    // 上限 30s——固定短等待会把还在编译的正常启动误报成「启动失败」。
+    if req.target == "gateway-console" {
+        if !matches!(req.action.as_str(), "start" | "stop") {
+            return Json(serde_json::json!({ "ok": false, "error": format!("未知操作：{}", req.action) }));
+        }
+        let running_before = blocking(|| port_holder(4200).is_some()).await;
+        crate::debug_log::entry(
+            crate::ops::process::PROC_SCOPE,
+            "INFO",
+            "service_action",
+            "request",
+            &format!(
+                "target=gateway-console action={} 操作前={}（进程管理器通道，npm start/4200）",
+                req.action,
+                if running_before { "运行中" } else { "已停止" }
+            ),
+        );
+        let verb = req.action.clone();
+        let st = state.clone();
+        let res = blocking(move || {
+            if verb == "start" {
+                let npm_ok = std::process::Command::new("cmd")
+                    .args(["/c", "npm", "--version"])
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if !npm_ok {
+                    return Err::<(), String>(
+                        "未检测到 Node.js（npm 不可用）：请先安装 Node.js 并配置 PATH 后重试".into(),
+                    );
+                }
+                let dir = registry_install_dir(&st, "gateway-console");
+                if !std::path::Path::new(&dir).join("package.json").is_file() {
+                    return Err(format!(
+                        "未安装 Gateway Console（{dir}\\package.json 不存在）：请先到修复中心「待安装」页安装"
+                    ));
+                }
+                let results =
+                    crate::ops::orchestrator::start_with_deps(&st.procs, &st.registry, "gateway-console");
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    "INFO",
+                    "start",
+                    "deps_started",
+                    &results
+                        .iter()
+                        .map(|r| format!("{}:{}", r.id, if r.ok { "ok" } else { "失败" }))
+                        .collect::<Vec<_>>()
+                        .join(" "),
+                );
+                results
+                    .iter()
+                    .find(|r| !r.ok)
+                    .map(|r| Err::<(), String>(r.error.clone().unwrap_or_else(|| "启动失败".into())))
+                    .unwrap_or(Ok(()))
+            } else if let Err(e) = st.procs.stop_deep("gateway-console", &[4200]) {
+                Err(format!("停止指令执行失败：{e}"))
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        if let Err(e) = res {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "ERROR",
+                "service_action",
+                "action_failed",
+                &format!("target=gateway-console action={} 失败：{e}", req.action),
+            );
+            crate::ops_events::record("user", "gateway-console", &req.action, false, &e);
+            return Json(serde_json::json!({ "ok": false, "error": e }));
+        }
+        // 运行态复核：启动轮询 4200（0.5s × 60 ≈ 30s，覆盖 ng serve 冷编译）；
+        // 停止给 1s 收尾再查残留
+        let mut running = false;
+        if req.action == "start" {
+            for _ in 0..60 {
+                if blocking(|| port_holder(4200)).await.is_some() {
+                    running = true;
+                    break;
+                }
+                blocking(|| std::thread::sleep(std::time::Duration::from_millis(500))).await;
+            }
+            if !running {
+                let dir = registry_install_dir(&state, "gateway-console");
+                let tail = blocking(move || spawn_log_tail(&format!("{dir}/logs/platform-spawn.log"))).await;
+                let err = format!(
+                    "Gateway Console 启动后 30 秒内 4200 未就绪（常见原因：Angular 编译报错、4200 被占用）。日志尾部：{tail}"
+                );
+                crate::ops_events::record("user", "gateway-console", "start", false, &err);
+                return Json(serde_json::json!({ "ok": false, "error": err }));
+            }
+        } else {
+            blocking(|| std::thread::sleep(std::time::Duration::from_millis(1000))).await;
+            running = blocking(|| port_holder(4200).is_some()).await;
+            if running {
+                let err = "停止指令已下发，但 4200 仍被占用（ng serve 残留）——再次停止或重启应用".to_string();
+                crate::ops_events::record("user", "gateway-console", "stop", false, &err);
+                return Json(serde_json::json!({ "ok": false, "error": err }));
+            }
+        }
+        let msg = if req.action == "start" {
+            "Gateway Console 已启动（4200）".to_string()
+        } else {
+            "Gateway Console 已停止".to_string()
+        };
+        crate::debug_log::entry(
+            crate::ops::process::PROC_SCOPE,
+            "INFO",
+            "service_action",
+            "ok",
+            &format!("target=gateway-console action={} → {}", req.action, msg),
+        );
+        crate::ops_events::record("user", "gateway-console", &req.action, true, "");
+        return Json(serde_json::json!({ "ok": true, "running": running, "message": msg }));
+    }
+
     // dfy-backend：进程管理器通道（registry run_cmd = {java} -jar dfy-server.jar，
     // start_with_deps 自动带起 MySQL/Redis）。此前没有任何启动入口——装完提示
     // 「到服务运维启动」但该面板没有启停按钮，用户无从下手。
@@ -2155,6 +2288,16 @@ pub async fn uninstall(
             "target=dfy-ui —— 卸载后 Nginx root 指向目录消失，前端页面将 404",
         );
         notices.push("卸载后 Nginx 的 root 指向目录消失，前端页面将返回 404（重新安装后恢复）".into());
+    } else if target == "gateway-console" {
+        debug_log::entry(
+            debug_log::APP_SCOPE,
+            "INFO",
+            "uninstall",
+            "dependency_check",
+            "target=gateway-console —— 卸载后边缘网关控制台 4200 页面不可用，node/ng serve 进程将停止",
+        );
+        notices.push("卸载后边缘网关控制台（4200）页面将不可用（重新安装 + npm install 后恢复）".into());
+        notices.push("将先停止平台拉起的 ng serve 进程再删除目录".into());
     } else if target == "nginx" {
         let backend_port_free = blocking(|| port_holder(48085)).await.is_none();
         let running_before = blocking(|| image_running("nginx.exe")).await;

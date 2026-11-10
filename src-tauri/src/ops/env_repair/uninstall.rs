@@ -172,10 +172,10 @@ pub fn start_uninstall(
     if !matches!(
         target,
         "mysql" | "redis" | "java" | "nginx" | "dfy-backend" | "dfy-ui" | "edge-conductor"
-            | "greptime"
+            | "gateway-console" | "greptime"
     ) {
         return Err(format!(
-            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis/Java/Nginx/DFY 后端/DFY 前端/边缘计算/GreptimeDB 时序库），请使用 AI 方案或控制面板手动卸载",
+            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis/Java/Nginx/DFY 后端/DFY 前端/边缘计算/Gateway Console/GreptimeDB 时序库），请使用 AI 方案或控制面板手动卸载",
             crate::ops::resource::target_label(target)
         ));
     }
@@ -231,16 +231,29 @@ async fn run_flat_dir_uninstall(
     use crate::ops::resource::target_label;
     let label = target_label(target);
     let is_backend = target == "dfy-backend";
+    let is_gateway = target == "gateway-console";
 
     // 前置探测：目录与进程现状（用户在卸载前看清要删什么）
     let dir_exists = std::path::Path::new(&install_dir).is_dir();
-    let backend_up = is_backend
-        && crate::api::handlers_repair::port_holder(48085).is_some();
+    // 运行态探测端口：backend 48085 / gateway 4200（dfy-ui 是纯静态目录，无监听端口）
+    let watch_port: Option<u16> = if is_backend {
+        Some(48085)
+    } else if is_gateway {
+        Some(4200)
+    } else {
+        None
+    };
+    let port_up = watch_port
+        .map(|p| crate::api::handlers_repair::port_holder(p).is_some())
+        .unwrap_or(false);
     state.log(format!("开始卸载 {label}（目录 {install_dir}）"));
     state.log(format!(
-        "当前状态：安装目录 {}，后端 48085 {}",
+        "当前状态：安装目录 {}，{}",
         if dir_exists { "存在" } else { "不存在" },
-        if backend_up { "监听中（将先停止）" } else { "未监听" }
+        match watch_port {
+            Some(p) => format!("端口 {p} {}", if port_up { "监听中（将先停止）" } else { "未监听" }),
+            None => "静态目录（无监听端口）".to_string(),
+        }
     ));
     if !dir_exists {
         finish(
@@ -254,6 +267,8 @@ async fn run_flat_dir_uninstall(
     }
     if is_backend {
         state.log("提示：卸载后 Nginx 反代 /admin-api/ 将返回 502，前端页面不可用（重新安装后恢复）");
+    } else if is_gateway {
+        state.log("提示：卸载后边缘网关控制台（4200）页面将不可用（重新安装后恢复）");
     } else {
         state.log("提示：卸载后 Nginx 的 root 指向目录消失，前端页面将返回 404（重新安装后恢复）");
     }
@@ -262,7 +277,7 @@ async fn run_flat_dir_uninstall(
 
     // dfy-backend 运行中：先停进程树（平台句柄精确杀；停止动作已写 debug.log）
     if is_backend {
-        if backend_up {
+        if port_up {
             state.log("后端运行中 → 先停止平台拉起的 Java 进程…");
             state.patch(|j| j.stage = "stop".into());
             // stop_deep：平台重启过/外部拉起时无句柄，按 48085 兜底强杀，
@@ -274,6 +289,20 @@ async fn run_flat_dir_uninstall(
             }
         } else {
             state.log("后端未在运行，跳过进程停止");
+        }
+    } else if is_gateway {
+        // gateway-console 由平台进程管理器拉起（npm start → ng serve）：
+        // 有句柄精确杀，平台重启过/外部拉起时按 4200 兜底强杀
+        if port_up {
+            state.log("Gateway Console 运行中 → 先停止 ng serve 进程…");
+            state.patch(|j| j.stage = "stop".into());
+            if let Err(e) = procs.stop_deep("gateway-console", &[4200]) {
+                state.log(format!(
+                    "停止指令执行失败：{e}（目录删除后进程自然失去工作目录，复核仍会确认 4200）"
+                ));
+            }
+        } else {
+            state.log("Gateway Console 未在运行，跳过进程停止");
         }
     }
 
@@ -652,7 +681,7 @@ async fn run_uninstall(
     // dfy-backend / dfy-ui：无服务注册、无 MSI 条目——停平台进程 + 删目录即可。
     // dfy-backend 卸载后 nginx 反代 /admin-api/ 会 502；dfy-ui 卸载后 nginx root
     // 指向的目录消失，页面 404——都提示但不阻止（用户主动行为）。
-    if matches!(target, "dfy-backend" | "dfy-ui") {
+    if matches!(target, "dfy-backend" | "dfy-ui" | "gateway-console") {
         run_flat_dir_uninstall(state, target, install_dir, procs, env_cache).await;
         return;
     }

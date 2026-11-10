@@ -1564,6 +1564,36 @@ fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
                     .map_err(|e| format!("生成默认 config.toml 失败（{}）：{e}", cfg.display()))
             }
         }
+        // gateway-console：源码 zip 不带 node_modules——解压后补齐依赖。
+        // npm 是 npm.cmd，必须经 cmd /C 调；未装 Node / 网络不通都给可操作指引
+        "gateway-console" => {
+            let ver = std::process::Command::new("cmd")
+                .args(["/C", "npm", "--version"])
+                .output()
+                .map_err(|e| format!("无法执行 npm（需先安装 Node.js 并配置 PATH）：{e}"))?;
+            if !ver.status.success() {
+                return Err("npm 不可用：请先安装 Node.js（自带 npm）并配置 PATH 后重试".into());
+            }
+            let out = std::process::Command::new("cmd")
+                .current_dir(home)
+                .args(["/C", "npm", "install", "--no-audit", "--no-fund"])
+                .output()
+                .map_err(|e| format!("执行 npm install 失败：{e}"))?;
+            if !out.status.success() {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let tail: String = err
+                    .lines()
+                    .rev()
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                return Err(format!("npm install 失败（检查网络或 npm 源后可手动补装）：{tail}"));
+            }
+            Ok("npm install 完成（node_modules 依赖已就绪）".into())
+        }
         _ => Err("该目标没有配置步骤".into()),
     }
 }
@@ -1651,6 +1681,8 @@ async fn run_zip_install(
         "dfy-ui" => "index.html",
         // edge-conductor：CI 产物 zip（可能带顶层目录），标志二进制
         "edge-conductor" => "edgecd-daemon.exe",
+        // gateway-console：源码工程 zip——package.json 找到即定位到家目录
+        "gateway-console" => "package.json",
         _ => {
             finish(state, env_cache, false, format!("{label} 没有免安装版（zip）安装管线")).await;
             return;
@@ -1690,7 +1722,7 @@ async fn run_zip_install(
     } else {
         None
     };
-    if matches!(target, "nginx" | "dfy-ui" | "edge-conductor") {
+    if matches!(target, "nginx" | "dfy-ui" | "edge-conductor" | "gateway-console") {
         let home_was_root = home == install_dir;
         let idd = install_dir.clone();
         let relocated = tokio::task::spawn_blocking(move || relocate_home_contents(&idd, &home)).await;
@@ -2056,6 +2088,45 @@ async fn run_zip_install(
                         "基准 {install_dir}\\edgecd-daemon.exe；greptimedb=就位；config.toml={}",
                         if missing_cfg.is_empty() { "有" } else { "缺" }
                     ),
+                );
+                finish(state, env_cache, true, String::new()).await;
+            }
+            Ok(Err(e)) => finish(state, env_cache, false, e).await,
+            Err(e) => finish(state, env_cache, false, format!("验证任务异常：{e}")).await,
+        }
+        return;
+    }
+    // gateway-console：验证源码 + 依赖双就绪（npm install 是本管线独有步骤，
+    // node_modules 缺失 = 安装未完成），基准日志与修复中心探测口径一致
+    if target == "gateway-console" {
+        let home_for_verify = home.clone();
+        let v = tokio::task::spawn_blocking(move || {
+            let p = std::path::Path::new(&home_for_verify);
+            let pkg = p.join("package.json");
+            if !pkg.is_file() {
+                return Err(format!("未找到 package.json：{}", pkg.display()));
+            }
+            if !p.join("node_modules").is_dir() {
+                return Err(
+                    "node_modules 缺失（npm install 未成功）——可手动在安装目录执行 npm install 后重试"
+                        .to_string(),
+                );
+            }
+            Ok(())
+        })
+        .await;
+        match v {
+            Ok(Ok(())) => {
+                state.log("验证通过：package.json + node_modules 均就绪");
+                state.log(format!(
+                    "[状态自检] 修复中心探测基准：{install_dir}\\package.json 存在 = 已安装"
+                ));
+                debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "INFO",
+                    "install_verify",
+                    "gateway-console",
+                    &format!("基准 {install_dir}\\package.json；node_modules=就位"),
                 );
                 finish(state, env_cache, true, String::new()).await;
             }

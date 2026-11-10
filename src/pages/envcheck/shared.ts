@@ -52,6 +52,7 @@ export const REPAIR_TARGETS = new Set([
   "dfy-backend",
   "dfy-ui",
   "edge-conductor",
+  "gateway-console",
 ]);
 /** 纯远程部署的软件：不进待安装/已安装列表（本机不安装、无安装包可识别），
  *  集中在「远程部署」区配置地址与访问密码。与后端 ServiceDef.remoteOnly 同口径。
@@ -84,6 +85,7 @@ export const TARGET_LABEL: Record<string, string> = {
   "dfy-backend": "DFY 后端",
   "dfy-ui": "DFY 前端",
   "edge-conductor": "边缘计算 (Edge Conductor)",
+  "gateway-console": "Gateway Console (边缘网关控制台)",
 };
 
 /** 安装与维护卡片的展示顺序：后端三件套在前（nginx 先装），再是中间件 */
@@ -92,6 +94,7 @@ export const SOFTWARE_ORDER = [
   "dfy-backend",
   "dfy-ui",
   "edge-conductor",
+  "gateway-console",
   "mysql",
   "java",
   "redis",
@@ -100,7 +103,7 @@ export const SOFTWARE_ORDER = [
   "greptime",
 ];
 /** 注册了 Windows 服务或走平台进程管理器、可启停的软件（与后端 service_action 口径一致；java 无服务） */
-export const SERVICE_TARGETS = new Set(["mysql", "nginx", "dfy-backend", "edge-conductor"]);
+export const SERVICE_TARGETS = new Set(["mysql", "nginx", "dfy-backend", "edge-conductor", "gateway-console"]);
 /** 一句话说清每个软件是干嘛的（卡片副标题，消灭抽象概念） */
 export const TARGET_DESC: Record<string, string> = {
   mysql: "数据库",
@@ -113,6 +116,7 @@ export const TARGET_DESC: Record<string, string> = {
   "dfy-backend": "Spring Boot · 48085",
   "dfy-ui": "Vue3 管理后台 · 静态托管",
   "edge-conductor": "边缘计算网关 · 8084/8085",
+  "gateway-console": "边缘网关控制台 · 4200",
 };
 /** 约定子目录名（与后端 convention_target 对齐）：无包时引导用户放到哪 */
 export const CONVENTION_DIR: Record<string, string> = {
@@ -126,6 +130,7 @@ export const CONVENTION_DIR: Record<string, string> = {
   "dfy-backend": "dfy-backend",
   "dfy-ui": "dfy-ui",
   "edge-conductor": "edge-conductor",
+  "gateway-console": "gateway-console",
 };
 
 /** 包体积 → 人读文案（KB/MB/GB，1 位小数）。 */
