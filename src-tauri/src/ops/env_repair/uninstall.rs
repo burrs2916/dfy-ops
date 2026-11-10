@@ -225,6 +225,9 @@ async fn run_flat_dir_uninstall(
     state: Arc<RepairState>,
     target: &'static str,
     install_dir: String,
+    // gateway-console 静态托管的 Nginx 安装目录（卸载 = 摘除 nginx.conf 里
+    // 的 4200 托管块，由调用方按带覆盖的注册表算好传入）
+    nginx_dir: String,
     procs: Arc<crate::ops::process::ProcManager>,
     env_cache: EnvCache,
 ) {
@@ -251,7 +254,18 @@ async fn run_flat_dir_uninstall(
         "当前状态：安装目录 {}，{}",
         if dir_exists { "存在" } else { "不存在" },
         match watch_port {
-            Some(p) => format!("端口 {p} {}", if port_up { "监听中（将先停止）" } else { "未监听" }),
+            Some(p) => format!(
+                "端口 {p} {}",
+                if port_up {
+                    if is_gateway {
+                        "监听中（Nginx 托管，将摘除托管配置）"
+                    } else {
+                        "监听中（将先停止）"
+                    }
+                } else {
+                    "未监听"
+                }
+            ),
             None => "静态目录（无监听端口）".to_string(),
         }
     ));
@@ -291,18 +305,22 @@ async fn run_flat_dir_uninstall(
             state.log("后端未在运行，跳过进程停止");
         }
     } else if is_gateway {
-        // gateway-console 由平台进程管理器拉起（npm start → ng serve）：
-        // 有句柄精确杀，平台重启过/外部拉起时按 4200 兜底强杀
-        if port_up {
-            state.log("Gateway Console 运行中 → 先停止 ng serve 进程…");
-            state.patch(|j| j.stage = "stop".into());
-            if let Err(e) = procs.stop_deep("gateway-console", &[4200]) {
-                state.log(format!(
-                    "停止指令执行失败：{e}（目录删除后进程自然失去工作目录，复核仍会确认 4200）"
-                ));
-            }
-        } else {
-            state.log("Gateway Console 未在运行，跳过进程停止");
+        // 静态托管（Nginx :4200）：绝不能按端口 4200 杀进程——那是 nginx worker，
+        // 杀了会连带打断 dfy-ui/后端反代。卸载 = 摘除托管配置并热加载（nginx 继续跑），
+        // 4200 随目录删除一起停止服务；摘除失败不阻断删目录，如实落日志
+        state.log("Gateway Console 为静态托管 → 摘除 Nginx 4200 托管配置（Nginx 本身不停止）…");
+        state.patch(|j| j.stage = "stop".into());
+        let nd = nginx_dir.clone();
+        let r = tokio::task::spawn_blocking(move || {
+            crate::ops::env_repair::install::remove_nginx_gateway_console(&nd)
+        })
+        .await;
+        match r {
+            Ok(Ok(msg)) => state.log(msg),
+            Ok(Err(e)) => state.log(format!(
+                "摘除 Nginx 托管配置失败：{e}（目录照常删除；可手动清理 nginx.conf 中 gateway-console 标记块）"
+            )),
+            Err(e) => state.log(format!("摘除托管配置任务异常：{e}")),
         }
     }
 
@@ -682,7 +700,15 @@ async fn run_uninstall(
     // dfy-backend 卸载后 nginx 反代 /admin-api/ 会 502；dfy-ui 卸载后 nginx root
     // 指向的目录消失，页面 404——都提示但不阻止（用户主动行为）。
     if matches!(target, "dfy-backend" | "dfy-ui" | "gateway-console") {
-        run_flat_dir_uninstall(state, target, install_dir, procs, env_cache).await;
+        // gateway 卸载要按带本机覆盖的注册表定位 Nginx 目录（摘 4200 托管块用）
+        let nginx_dir = crate::ops::registry::services_with_override(std::path::Path::new(
+            &config_dir,
+        ))
+        .into_iter()
+        .find(|d| d.id == "nginx")
+        .map(|d| d.install_dir)
+        .unwrap_or_else(|| "C:/services/nginx".to_string());
+        run_flat_dir_uninstall(state, target, install_dir, nginx_dir, procs, env_cache).await;
         return;
     }
     // edge-conductor：无服务注册、无 MSI 条目——停 edgecd-daemon 进程 + 删目录

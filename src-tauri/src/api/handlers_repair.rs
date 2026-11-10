@@ -249,9 +249,8 @@ pub async fn start_generic_repair(
             "action": "install",
             "message": match source {
                 Some("zip") if target == "java" => format!("开始离线安装 {label}（免安装版：解压 → 写 JAVA_HOME → 版本验证，无需管理员权限），进度见下方任务状态"),
-                // gateway-console 免安装解压 + npm 依赖初始化，不注册 Windows 服务
-                // （起停走平台进程管理器），文案与实际管线一致
-                Some("zip") if target == "gateway-console" => format!("开始离线安装 {label}（免安装版：解压 → npm install 依赖 → 就绪验证），进度见下方任务状态"),
+                // gateway-console 静态托管：解压 + Nginx 4200 接管（无 Node/npm）
+                Some("zip") if target == "gateway-console" => format!("开始离线安装 {label}（免安装版：解压 → 接入 Nginx 托管 4200，无需 Node.js/npm），进度见下方任务状态"),
                 Some("zip") => format!("开始离线安装 {label}（免安装版：解压 → 初始化 → 注册服务），全程只需一次管理员确认，进度见下方任务状态"),
                 Some("edge-dir") => format!("开始离线安装 {label}（程序 + GreptimeDB 时序库整合：复制 → 整合 → 校验），进度见下方任务状态"),
                 Some("msi") => format!("开始离线安装 {label}（{}）→ 管理员确认 → 验证，进度见下方任务状态", msi.as_ref().map(|f| f.file_name.as_str()).unwrap_or_default()),
@@ -451,15 +450,15 @@ pub(crate) async fn probe_target(state: &AppState, target: &str) -> (bool, bool,
             "edge-conductor" => "edgecd-daemon.exe".into(),
             // greptime：捆绑在 edge-conductor/greptimedb 下的时序库二进制
             "greptime" => "greptime.exe".into(),
-            // gateway-console：源码工程——package.json 即「已安装」
-            //（node_modules 缺失由安装链路/npm install 步骤负责，不阻断卡片展示）
+            // gateway-console：源码 + 静态产物——package.json 即「已安装」
+            //（dist 完整性由安装/验证链路负责，不阻断卡片展示）
             "gateway-console" => "package.json".into(),
             _ => unreachable!(),
         };
         // 运行态探测口径：dfy-backend 用 48085 端口（image_running("java.exe")
         // 会把任何 Java 程序误判成后端在跑）、gateway-console 用 4200 端口
-        //（ng serve 编译期多进程，无单一镜像可判）；nginx/edge-conductor/
-        // greptime 仍按进程镜像（greptime 是 edgecd-daemon 拉起的子进程）；
+        //（静态托管：4200 = Nginx 托管通道在服务，无自有进程）；nginx/edge-conductor/
+        // greptime 按进程镜像（greptime 是 edgecd-daemon 拉起的子进程）；
         // dfy-ui 无进程
         let proc_image: Option<&'static str> = match target {
             "nginx" => Some("nginx.exe"),
@@ -1070,10 +1069,11 @@ pub async fn service_action(
         );
         return Json(serde_json::json!({ "ok": true, "running": running, "message": msg }));
     }
-    // gateway-console：进程管理器通道（registry run_cmd = npm start → ng serve 4200）。
-    // 启动前置检查 Node/npm 与源码完整性（缺失时点名指引，不让进程秒退后从
-    // 「启动失败」里猜）；Angular 首次编译要 10-30s，启动复核改为轮询 4200
-    // 上限 30s——固定短等待会把还在编译的正常启动误报成「启动失败」。
+    // gateway-console：静态托管通道（Nginx :4200 直出 dist + /api、/ws 反代；
+    // 2026-11-10 定案取代 ng serve——没有 node/npm 进程可启停）。
+    // 启动 = 托管配置自愈重写（nginx 重装/手工改配置弄丢 4200 通道时点启动即修复）
+    //      + 确保 Nginx 在跑 + 轮询 4200；停止 = 无独立进程，如实拒绝
+    //（绝不能按 4200 杀进程——那是 nginx worker，杀了会连带打断 dfy-ui 反代）。
     if req.target == "gateway-console" {
         if !matches!(req.action.as_str(), "start" | "stop") {
             return Json(serde_json::json!({ "ok": false, "error": format!("未知操作：{}", req.action) }));
@@ -1085,110 +1085,130 @@ pub async fn service_action(
             "service_action",
             "request",
             &format!(
-                "target=gateway-console action={} 操作前={}（进程管理器通道，npm start/4200）",
+                "target=gateway-console action={} 操作前={}（Nginx 静态托管通道，无 node/npm 进程）",
                 req.action,
                 if running_before { "运行中" } else { "已停止" }
             ),
         );
-        let verb = req.action.clone();
-        let st = state.clone();
-        let res = blocking(move || {
-            if verb == "start" {
-                let npm_ok = std::process::Command::new("cmd")
-                    .args(["/c", "npm", "--version"])
-                    .output()
-                    .map(|o| o.status.success())
-                    .unwrap_or(false);
-                if !npm_ok {
-                    return Err::<(), String>(
-                        "未检测到 Node.js（npm 不可用）：请先安装 Node.js 并配置 PATH 后重试".into(),
-                    );
-                }
-                let dir = registry_install_dir(&st, "gateway-console");
-                if !std::path::Path::new(&dir).join("package.json").is_file() {
-                    return Err(format!(
-                        "未安装 Gateway Console（{dir}\\package.json 不存在）：请先到修复中心「待安装」页安装"
-                    ));
-                }
-                let results =
-                    crate::ops::orchestrator::start_with_deps(&st.procs, &st.registry, "gateway-console");
+
+        if req.action == "stop" {
+            let err =
+                "Gateway Console 为静态托管（Nginx :4200 直出），无独立进程可停止；如需下线请到修复中心卸载"
+                    .to_string();
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "INFO",
+                "service_action",
+                "action_refused",
+                &format!("target=gateway-console stop 拒绝执行：{err}"),
+            );
+            return Json(serde_json::json!({ "ok": false, "error": err }));
+        }
+
+        // ---- start：先验安装痕迹（静态产物 dist），再自愈写托管配置 ----
+        let gw_dir = registry_install_dir(&state, "gateway-console");
+        if !std::path::Path::new(&gw_dir)
+            .join("dist")
+            .join("index.html")
+            .is_file()
+        {
+            let err = format!(
+                "未安装 Gateway Console 或静态产物缺失（{gw_dir}\\dist\\index.html 不存在）：请先到修复中心「待安装」安装带 dist 的安装包"
+            );
+            crate::ops_events::record("user", "gateway-console", "start", false, &err);
+            return Json(serde_json::json!({ "ok": false, "error": err }));
+        }
+        let nginx_dir = state
+            .registry
+            .iter()
+            .find(|d| d.id == "nginx")
+            .map(|d| d.install_dir.clone())
+            .unwrap_or_else(|| "C:/services/nginx".to_string());
+        let (nd, gd) = (nginx_dir, gw_dir.clone());
+        let wired = blocking(move || {
+            crate::ops::env_repair::install::integrate_nginx_gateway_console(&nd, &gd)
+        })
+        .await;
+        match wired {
+            Ok(wmsg) => {
                 crate::debug_log::entry(
                     crate::ops::process::PROC_SCOPE,
                     "INFO",
                     "start",
-                    "deps_started",
-                    &results
-                        .iter()
-                        .map(|r| format!("{}:{}", r.id, if r.ok { "ok" } else { "失败" }))
-                        .collect::<Vec<_>>()
-                        .join(" "),
+                    "nginx_wired",
+                    &format!("gateway-console 托管配置自愈复核：{wmsg}"),
                 );
-                results
-                    .iter()
-                    .find(|r| !r.ok)
-                    .map(|r| Err::<(), String>(r.error.clone().unwrap_or_else(|| "启动失败".into())))
-                    .unwrap_or(Ok(()))
-            } else if let Err(e) = st.procs.stop_deep("gateway-console", &[4200]) {
-                Err(format!("停止指令执行失败：{e}"))
-            } else {
-                Ok(())
             }
-        })
-        .await;
-        if let Err(e) = res {
+            Err(e) => {
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    "ERROR",
+                    "start",
+                    "nginx_wired",
+                    &format!("gateway-console 托管配置写入失败：{e}"),
+                );
+                crate::ops_events::record("user", "gateway-console", "start", false, &e);
+                return Json(serde_json::json!({ "ok": false, "error": e }));
+            }
+        }
+
+        // Nginx 没跑就拉起（已在跑则 start_with_deps 内部跳过）
+        let mut nginx_up = blocking(|| image_running("nginx.exe")).await;
+        if !nginx_up {
+            let st = state.clone();
+            let results = blocking(move || {
+                crate::ops::orchestrator::start_with_deps(&st.procs, &st.registry, "nginx")
+            })
+            .await;
             crate::debug_log::entry(
                 crate::ops::process::PROC_SCOPE,
-                "ERROR",
-                "service_action",
-                "action_failed",
-                &format!("target=gateway-console action={} 失败：{e}", req.action),
+                "INFO",
+                "start",
+                "deps_started",
+                &results
+                    .iter()
+                    .map(|r| format!("{}:{}", r.id, if r.ok { "ok" } else { "失败" }))
+                    .collect::<Vec<_>>()
+                    .join(" "),
             );
-            crate::ops_events::record("user", "gateway-console", &req.action, false, &e);
-            return Json(serde_json::json!({ "ok": false, "error": e }));
-        }
-        // 运行态复核：启动轮询 4200（0.5s × 60 ≈ 30s，覆盖 ng serve 冷编译）；
-        // 停止给 1s 收尾再查残留
-        let mut running = false;
-        if req.action == "start" {
-            for _ in 0..60 {
-                if blocking(|| port_holder(4200)).await.is_some() {
-                    running = true;
-                    break;
-                }
-                blocking(|| std::thread::sleep(std::time::Duration::from_millis(500))).await;
-            }
-            if !running {
-                let dir = registry_install_dir(&state, "gateway-console");
-                let tail = blocking(move || spawn_log_tail(&format!("{dir}/logs/platform-spawn.log"))).await;
+            if let Some(r) = results.iter().find(|r| !r.ok) {
                 let err = format!(
-                    "Gateway Console 启动后 30 秒内 4200 未就绪（常见原因：Angular 编译报错、4200 被占用）。日志尾部：{tail}"
+                    "Nginx 启动失败：{}（Gateway Console 由 Nginx 托管，Nginx 起不来则无法访问）",
+                    r.error.clone().unwrap_or_else(|| "未知错误".into())
                 );
                 crate::ops_events::record("user", "gateway-console", "start", false, &err);
                 return Json(serde_json::json!({ "ok": false, "error": err }));
             }
-        } else {
-            blocking(|| std::thread::sleep(std::time::Duration::from_millis(1000))).await;
-            running = blocking(|| port_holder(4200).is_some()).await;
-            if running {
-                let err = "停止指令已下发，但 4200 仍被占用（ng serve 残留）——再次停止或重启应用".to_string();
-                crate::ops_events::record("user", "gateway-console", "stop", false, &err);
-                return Json(serde_json::json!({ "ok": false, "error": err }));
-            }
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+            nginx_up = blocking(|| image_running("nginx.exe")).await;
         }
-        let msg = if req.action == "start" {
-            "Gateway Console 已启动（4200）".to_string()
-        } else {
-            "Gateway Console 已停止".to_string()
-        };
+
+        // 4200 就绪轮询（0.5s × 30 ≈ 15s，覆盖 worker 拉起时间）
+        let mut running = false;
+        for _ in 0..30 {
+            if blocking(|| port_holder(4200).is_some()).await {
+                running = true;
+                break;
+            }
+            blocking(|| std::thread::sleep(std::time::Duration::from_millis(500))).await;
+        }
+        if !running {
+            let err = format!(
+                "托管配置已写入但 http://127.0.0.1:4200 未响应（Nginx 进程探测：{nginx_up}）——请稍后重试，或到「服务运维」查看 Nginx 状态"
+            );
+            crate::ops_events::record("user", "gateway-console", "start", false, &err);
+            return Json(serde_json::json!({ "ok": false, "error": err }));
+        }
+        let msg = "Gateway Console 已就绪：http://127.0.0.1:4200/（Nginx 静态托管）".to_string();
         crate::debug_log::entry(
             crate::ops::process::PROC_SCOPE,
             "INFO",
             "service_action",
             "ok",
-            &format!("target=gateway-console action={} → {}", req.action, msg),
+            &format!("target=gateway-console action=start → {msg}"),
         );
-        crate::ops_events::record("user", "gateway-console", &req.action, true, "");
-        return Json(serde_json::json!({ "ok": true, "running": running, "message": msg }));
+        crate::ops_events::record("user", "gateway-console", "start", true, "");
+        return Json(serde_json::json!({ "ok": true, "running": true, "message": msg }));
     }
 
     // dfy-backend：进程管理器通道（registry run_cmd = {java} -jar dfy-server.jar，
@@ -2324,10 +2344,10 @@ pub async fn uninstall(
             "INFO",
             "uninstall",
             "dependency_check",
-            "target=gateway-console —— 卸载后边缘网关控制台 4200 页面不可用，node/ng serve 进程将停止",
+            "target=gateway-console —— 静态托管（Nginx :4200），卸载后 4200 页面不可用；将摘除托管配置，Nginx 与其他站点不受影响",
         );
-        notices.push("卸载后边缘网关控制台（4200）页面将不可用（重新安装 + npm install 后恢复）".into());
-        notices.push("将先停止平台拉起的 ng serve 进程再删除目录".into());
+        notices.push("卸载后边缘网关控制台（http://127.0.0.1:4200）将不可用（重新安装后恢复）".into());
+        notices.push("将从 Nginx 摘除 4200 托管配置并热加载（Nginx 本身不停止，其他站点不受影响），再删除目录".into());
     } else if target == "nginx" {
         let backend_port_free = blocking(|| port_holder(48085)).await.is_none();
         let running_before = blocking(|| image_running("nginx.exe")).await;

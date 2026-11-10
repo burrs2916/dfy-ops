@@ -496,11 +496,13 @@ export default function RepairCenter({
           {isSvc && !st.serviceRunning && (
             <Tooltip
               title={
-                t === "nginx"
-                  ? "Nginx 是常驻服务：安装完成时已自动启动；此按钮用于因端口占用等原因启动失败后的重试。"
-                  : t === "dfy-backend"
-                    ? "启动 DFY 后端（Spring Boot，首次约 10~30 秒就绪）；会自动先带起 MySQL / Redis 依赖。"
-                    : "启动平台托管的服务"
+                t === "gateway-console"
+                  ? "静态托管（Nginx :4200 直出，无需 Node.js/npm）：启动 = 确保 Nginx 运行并恢复托管配置。"
+                  : t === "nginx"
+                    ? "Nginx 是常驻服务：安装完成时已自动启动；此按钮用于因端口占用等原因启动失败后的重试。"
+                    : t === "dfy-backend"
+                      ? "启动 DFY 后端（Spring Boot，首次约 10~30 秒就绪）；会自动先带起 MySQL / Redis 依赖。"
+                      : "启动平台托管的服务"
               }
             >
               <Button
@@ -515,7 +517,9 @@ export default function RepairCenter({
               </Button>
             </Tooltip>
           )}
-          {isSvc && st.serviceRunning && (
+          {/* gateway-console 无停止按钮：静态托管由 Nginx 提供（4200 与 dfy-ui
+              共用同一 Nginx），没有可单独停止的进程——停止语义只剩「卸载」 */}
+          {isSvc && st.serviceRunning && t !== "gateway-console" && (
             <Tooltip
               title={
                 t === "nginx"

@@ -491,6 +491,217 @@ http {{
     )
 }
 
+// ===== Gateway Console 静态托管：Nginx 4200 通道 =====
+// 平台约定：nginx.conf 末尾（http 块内）追加一个 listen 4200 的独立 server 块，
+// 直出 gateway-console/dist，并把 /api、/admin-api、/ws 反代到 edge-conductor
+// (8084/8085) 与 dfy-backend (48085)（与源码工程的 proxy.conf.json 同口径）。
+// 2026-11-10 定案：彻底取代 ng serve 方案——解压 + 接管即装完，无 Node/npm。
+const GW_CONSOLE_BLOCK_START: &str = "# >>> dfy-ops gateway-console (auto) >>>";
+const GW_CONSOLE_BLOCK_END: &str = "# <<< dfy-ops gateway-console (auto) <<<";
+
+/// 摘除 marker 包裹的整块（含 marker 行，块后补进的换行一并吃掉）；不存在则原样返回。
+fn strip_marked_block(text: &str, start: &str, end: &str) -> String {
+    let (Some(s), Some(e)) = (text.find(start), text.find(end)) else {
+        return text.to_string();
+    };
+    if e < s {
+        return text.to_string();
+    }
+    let mut out = String::with_capacity(text.len());
+    out.push_str(&text[..s]);
+    let mut tail = &text[e + end.len()..];
+    if let Some(rest) = tail.strip_prefix('\n') {
+        tail = rest;
+    }
+    out.push_str(tail);
+    out
+}
+
+/// gateway-console 托管 server 块（{{ROOT}} 占位 = 安装根；块内 root = 根/dist）。
+/// 用占位替换而非 format!：nginx 配置里全是花括号，format! 会跟 Rust 语法打架。
+fn gateway_console_server_block(home: &str) -> String {
+    let root = home.replace('\\', "/");
+    let tpl = r#"
+# >>> dfy-ops gateway-console (auto) >>> 静态托管，勿手动编辑
+server {
+    listen 4200;
+    server_name localhost;
+
+    root "{{ROOT}}/dist";
+    index index.html;
+
+    # SPA 路由兜底
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    # 控制台 API → edge-conductor
+    location /api/ {
+        proxy_pass http://127.0.0.1:8084;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # 管理端 API → dfy-backend
+    location /admin-api/ {
+        proxy_pass http://127.0.0.1:48085;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
+    # WebSocket → edge-conductor 8085
+    location /ws {
+        proxy_pass http://127.0.0.1:8085;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_read_timeout 3600s;
+    }
+}
+# <<< dfy-ops gateway-console (auto) <<<
+"#;
+    tpl.replace("{{ROOT}}", &root)
+}
+
+/// 写入 conf 之后的校验与热加载（两处写入方共用）：
+/// nginx.exe 在则 `nginx -t`——不过就还原 original 并 Err；
+/// master 在跑则 `-s reload`——失败只落日志不阻断（重启后生效）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn validate_and_reload(
+    nginx_dir: &str,
+    conf_path: &str,
+    original: &str,
+    conf: &std::path::Path,
+) -> Result<(), String> {
+    let exe = format!("{nginx_dir}/nginx.exe");
+    if !std::path::Path::new(&exe).is_file() {
+        crate::debug_log::entry(
+            crate::debug_log::APP_SCOPE,
+            "WARN",
+            "install",
+            "nginx_conf_write",
+            &format!("nginx.exe 不存在（{exe}）：conf 已写入，待 Nginx 安装/启动后生效，跳过 -t 校验"),
+        );
+        return Ok(());
+    }
+    let prefix = format!("{nginx_dir}/");
+    let test = std::process::Command::new(&exe)
+        .args(["-t", "-p", &prefix, "-c", conf_path])
+        .current_dir(nginx_dir)
+        .output();
+    let test_ok = matches!(&test, Ok(o) if o.status.success());
+    if !test_ok {
+        let detail = match &test {
+            Ok(o) => {
+                let mut d = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                if d.is_empty() {
+                    d = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                }
+                d
+            }
+            Err(e) => e.to_string(),
+        };
+        let _ = std::fs::write(conf, original);
+        return Err(format!("nginx -t 校验失败，已回滚原配置：{detail}"));
+    }
+    if crate::api::handlers_repair::image_running("nginx.exe") {
+        let reload = std::process::Command::new(&exe)
+            .args(["-s", "reload", "-p", &prefix, "-c", conf_path])
+            .current_dir(nginx_dir)
+            .output();
+        let re_ok = matches!(&reload, Ok(o) if o.status.success());
+        crate::debug_log::entry(
+            crate::debug_log::APP_SCOPE,
+            if re_ok { "INFO" } else { "WARN" },
+            "install",
+            "nginx_conf_reload",
+            &format!(
+                "Nginx 热加载（{conf_path}）：{}",
+                if re_ok {
+                    "成功".to_string()
+                } else {
+                    format!(
+                        "未成功——重启 Nginx 后生效：{}",
+                        reload
+                            .as_ref()
+                            .map(|o| String::from_utf8_lossy(&o.stderr).trim().to_string())
+                            .unwrap_or_else(|e| e.to_string())
+                    )
+                }
+            ),
+        );
+    }
+    Ok(())
+}
+
+/// 写入/刷新 gateway-console 的 Nginx 4200 托管块（幂等：内容一致不落盘不热加载）。
+/// conf 不存在 = Nginx 未装 → Err 并给出可执行指引——没有托管通道装完也打不开，
+/// 宁可安装失败并把原因写清楚（错误会原样进 debug.log 的 dispatch_rejected / 任务失败）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn integrate_nginx_gateway_console(nginx_dir: &str, home: &str) -> Result<String, String> {
+    let nginx_dir = nginx_dir.replace('\\', "/");
+    let conf_path = format!("{nginx_dir}/conf/nginx.conf");
+    let conf = std::path::Path::new(&conf_path);
+    if !conf.is_file() {
+        return Err(format!(
+            "未找到 Nginx 配置（{conf_path}）：Gateway Console 由 Nginx 托管，请先在修复中心安装 Nginx"
+        ));
+    }
+    let original =
+        std::fs::read_to_string(conf).map_err(|e| format!("读取 nginx.conf 失败：{e}"))?;
+    let stripped = strip_marked_block(&original, GW_CONSOLE_BLOCK_START, GW_CONSOLE_BLOCK_END);
+    let idx = stripped
+        .rfind('}')
+        .ok_or_else(|| "nginx.conf 结构异常：找不到 http 块的闭合括号".to_string())?;
+    let mut updated = String::with_capacity(stripped.len() + 1200);
+    updated.push_str(&stripped[..idx]);
+    // 块自带行尾换行，不再补 \n——摘除时按 marker 精确还原，留一个多余换行
+    // 都会让「写入 → 摘除」往返后 nginx.conf 跟原文件对不上
+    updated.push_str(gateway_console_server_block(home).trim_start_matches('\n'));
+    updated.push_str(&stripped[idx..]);
+    if updated == original {
+        return Ok("Nginx 托管配置已就绪（listen 4200，无需变更）".to_string());
+    }
+    let backup = format!("{conf_path}.bak");
+    let _ = std::fs::copy(conf, &backup);
+    if let Err(e) = std::fs::write(conf, &updated) {
+        return Err(format!("写入 nginx.conf 失败：{e}（原配置未变动）"));
+    }
+    validate_and_reload(&nginx_dir, &conf_path, &original, conf)?;
+    Ok(format!(
+        "已接入 Nginx 托管：http://127.0.0.1:4200/ → {home}/dist（/api→8084、/admin-api→48085、/ws→8085 反代）"
+    ))
+}
+
+/// 卸载时摘除 gateway-console 托管块（其余站点不受影响）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn remove_nginx_gateway_console(nginx_dir: &str) -> Result<String, String> {
+    let nginx_dir = nginx_dir.replace('\\', "/");
+    let conf_path = format!("{nginx_dir}/conf/nginx.conf");
+    let conf = std::path::Path::new(&conf_path);
+    if !conf.is_file() {
+        return Ok("Nginx 配置不存在，无需移除托管配置".to_string());
+    }
+    let original =
+        std::fs::read_to_string(conf).map_err(|e| format!("读取 nginx.conf 失败：{e}"))?;
+    let updated = strip_marked_block(&original, GW_CONSOLE_BLOCK_START, GW_CONSOLE_BLOCK_END);
+    if updated == original {
+        return Ok("无 Gateway Console 托管配置（无需移除）".to_string());
+    }
+    let backup = format!("{conf_path}.bak");
+    let _ = std::fs::copy(conf, &backup);
+    if let Err(e) = std::fs::write(conf, &updated) {
+        return Err(format!("写入 nginx.conf 失败：{e}（原配置未变动）"));
+    }
+    validate_and_reload(&nginx_dir, &conf_path, &original, conf)?;
+    Ok("已从 Nginx 摘除 4200 托管配置并热加载（Nginx 继续运行，不影响其他站点）".to_string())
+}
+
 /// 通用修复任务：ZIP 免安装版离线安装（mysql/redis/java）——
 /// mysql/redis = 解压 → 配置 → 注册服务（一次 UAC，
 /// MySQL 官方 msi 多为 Installer 束静默装不上 Server，zip 才能完全离线装好）；
@@ -1565,35 +1776,21 @@ fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
                     .map_err(|e| format!("生成默认 config.toml 失败（{}）：{e}", cfg.display()))
             }
         }
-        // gateway-console：源码 zip 不带 node_modules——解压后补齐依赖。
-        // npm 是 npm.cmd，必须经 cmd /C 调；未装 Node / 网络不通都给可操作指引
+        // gateway-console：静态托管管线——zip 内置预构建 dist（ng build 产物），
+        // 解压 + Nginx 接管即装完；本管线没有 npm install，目标机无需 Node.js
         "gateway-console" => {
-            let ver = std::process::Command::new("cmd")
-                .args(["/C", "npm", "--version"])
-                .output()
-                .map_err(|e| format!("无法执行 npm（需先安装 Node.js 并配置 PATH）：{e}"))?;
-            if !ver.status.success() {
-                return Err("npm 不可用：请先安装 Node.js（自带 npm）并配置 PATH 后重试".into());
+            let dist = std::path::Path::new(home).join("dist").join("index.html");
+            if dist.is_file() {
+                Ok(format!(
+                    "检测到预构建静态产物 {}（Nginx 托管方案，无需 Node.js/npm）",
+                    dist.display()
+                ))
+            } else {
+                Err(format!(
+                    "安装包缺少预构建产物 {}——静态托管版 gateway-console.zip 需内置 dist/（打包机执行 npm run build:prod 生成后重新打包），目标机无需安装 Node.js",
+                    dist.display()
+                ))
             }
-            let out = std::process::Command::new("cmd")
-                .current_dir(home)
-                .args(["/C", "npm", "install", "--no-audit", "--no-fund"])
-                .output()
-                .map_err(|e| format!("执行 npm install 失败：{e}"))?;
-            if !out.status.success() {
-                let err = String::from_utf8_lossy(&out.stderr);
-                let tail: String = err
-                    .lines()
-                    .rev()
-                    .take(4)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect::<Vec<_>>()
-                    .join(" | ");
-                return Err(format!("npm install 失败（检查网络或 npm 源后可手动补装）：{tail}"));
-            }
-            Ok("npm install 完成（node_modules 依赖已就绪）".into())
         }
         _ => Err("该目标没有配置步骤".into()),
     }
@@ -1818,6 +2015,49 @@ async fn run_zip_install(
                     "conf_preserve_failed",
                     &format!("target=nginx 恢复用户配置失败：{e}（已回退默认配置）"),
                 );
+            }
+        }
+    }
+
+    // ===== gateway-console：接入 Nginx 4200 托管（静态托管方案，无 Node/npm） =====
+    // 配置阶段已确认 dist 就绪；这里把托管 server 块写进 nginx.conf 并热加载，
+    // 失败（Nginx 未装 / 配置校验不过）= 安装失败并给出可执行指引
+    if target == "gateway-console" {
+        let nginx_dir = registry
+            .iter()
+            .find(|d| d.id == "nginx")
+            .map(|d| d.install_dir.clone())
+            .unwrap_or_else(|| "C:/services/nginx".to_string());
+        let idd = install_dir.clone();
+        let wired = tokio::task::spawn_blocking(move || {
+            integrate_nginx_gateway_console(&nginx_dir, &idd)
+        })
+        .await;
+        match wired {
+            Ok(Ok(msg)) => {
+                state.log(msg);
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "INFO",
+                    "install",
+                    "gateway_console_nginx",
+                    &format!("gateway-console 静态托管接入完成：install_dir={install_dir}"),
+                );
+            }
+            Ok(Err(e)) => {
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "ERROR",
+                    "install",
+                    "gateway_console_nginx",
+                    &format!("gateway-console 静态托管接入失败：{e}"),
+                );
+                finish(state, env_cache, false, e).await;
+                return;
+            }
+            Err(e) => {
+                finish(state, env_cache, false, format!("Nginx 托管接入任务异常：{e}")).await;
+                return;
             }
         }
     }
@@ -2097,37 +2337,101 @@ async fn run_zip_install(
         }
         return;
     }
-    // gateway-console：验证源码 + 依赖双就绪（npm install 是本管线独有步骤，
-    // node_modules 缺失 = 安装未完成），基准日志与修复中心探测口径一致
+    // gateway-console：静态托管验证——package.json（源码标记）+ dist（静态产物）
+    // 双就绪，托管通道（nginx 4200）幂等复核；基准日志与修复中心探测口径一致
     if target == "gateway-console" {
         let home_for_verify = home.clone();
+        let nginx_dir_for_verify = registry
+            .iter()
+            .find(|d| d.id == "nginx")
+            .map(|d| d.install_dir.clone())
+            .unwrap_or_else(|| "C:/services/nginx".to_string());
         let v = tokio::task::spawn_blocking(move || {
             let p = std::path::Path::new(&home_for_verify);
-            let pkg = p.join("package.json");
-            if !pkg.is_file() {
-                return Err(format!("未找到 package.json：{}", pkg.display()));
+            if !p.join("package.json").is_file() {
+                return Err(format!("未找到 package.json：{}", p.display()));
             }
-            if !p.join("node_modules").is_dir() {
-                return Err(
-                    "node_modules 缺失（npm install 未成功）——可手动在安装目录执行 npm install 后重试"
-                        .to_string(),
-                );
+            let idx = p.join("dist").join("index.html");
+            if !idx.is_file() {
+                return Err(format!(
+                    "未找到 dist/index.html：{}（zip 未带预构建静态产物）",
+                    idx.display()
+                ));
             }
-            Ok(())
+            // dist 规模一并落日志：识别「空包/半包」
+            fn count(d: &std::path::Path, n: &mut u64, bytes: &mut u64, depth: u32) {
+                if depth > 6 {
+                    return;
+                }
+                if let Ok(rd) = std::fs::read_dir(d) {
+                    for e in rd.flatten() {
+                        let p = e.path();
+                        if p.is_dir() {
+                            count(&p, n, bytes, depth + 1);
+                        } else if let Ok(m) = e.metadata() {
+                            *n += 1;
+                            *bytes += m.len();
+                        }
+                    }
+                }
+            }
+            let mut n = 0u64;
+            let mut bytes = 0u64;
+            count(&p.join("dist"), &mut n, &mut bytes, 0);
+            if n == 0 {
+                return Err(format!("dist 目录为空：{}（zip 内静态产物缺失）", p.join("dist").display()));
+            }
+            // 托管通道复核（幂等自愈）：configure 之后若 nginx.conf 被覆盖/回滚，
+            // verify 阶段再补一次——错误信息进任务失败日志，可直接定位
+            integrate_nginx_gateway_console(&nginx_dir_for_verify, &home_for_verify)?;
+            Ok((n, bytes))
         })
         .await;
         match v {
-            Ok(Ok(())) => {
-                state.log("验证通过：package.json + node_modules 均就绪");
+            Ok(Ok((files, bytes))) => {
                 state.log(format!(
-                    "[状态自检] 修复中心探测基准：{install_dir}\\package.json 存在 = 已安装"
+                    "验证通过：静态产物就绪（dist {files} 个文件 / {bytes} 字节），Nginx 4200 托管通道已接入"
                 ));
-                debug_log::entry(
-                    crate::debug_log::APP_SCOPE,
-                    "INFO",
-                    "install_verify",
+                state.log(format!(
+                    "[状态自检] 修复中心探测基准：{install_dir}\\package.json + dist\\index.html 存在 = 已安装"
+                ));
+                // ===== 装完立刻可达：托管通道已写入，Nginx 未跑时拉起
+                //（已在跑则 start_with_deps skip_running 跳过），与 dfy-ui 同理念
+                state.log("正在确保 Nginx 运行（Gateway Console 由 Nginx 托管在 4200）…");
+                let results = crate::ops::orchestrator::start_with_deps(&procs, &registry, "nginx");
+                let nginx_ok = results.iter().all(|r| r.ok);
+                if !nginx_ok {
+                    for r in &results {
+                        if !r.ok {
+                            state.log(format!(
+                                "Nginx 启动失败：{}（http://127.0.0.1:4200 暂时打不开——请先解决 Nginx）",
+                                r.error.clone().unwrap_or_default()
+                            ));
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+                let up = crate::api::handlers_repair::image_running("nginx.exe");
+                if nginx_ok && up {
+                    state.log("Nginx 运行中：Gateway Console 已可访问 http://127.0.0.1:4200/");
+                } else if nginx_ok {
+                    state.log("Nginx 启动命令已下发（1.5s 内未探到进程，请稍后刷新状态确认）");
+                }
+                crate::ops_events::record(
+                    "installer",
                     "gateway-console",
-                    &format!("基准 {install_dir}\\package.json；node_modules=就位"),
+                    "autostart",
+                    nginx_ok,
+                    &format!("安装完成确保 Nginx 托管 4200（nginx.exe 进程探测：{up}）"),
+                );
+                debug_log::entry(
+                    debug_log::APP_SCOPE,
+                    if nginx_ok { "INFO" } else { "WARN" },
+                    "install_autostart",
+                    "gateway-console",
+                    &format!(
+                        "确保 Nginx 运行：deps_ok={nginx_ok} nginx.exe 进程={up}（4200 可达的前置条件）"
+                    ),
                 );
                 finish(state, env_cache, true, String::new()).await;
             }
@@ -2233,6 +2537,59 @@ mod tests {
             "root 必须指向 dfy-ui 安装根（dist 内容已搬平）: {conf}"
         );
         assert!(!conf.contains("/dist"), "root 不应再带 /dist 后缀: {conf}");
+    }
+
+    /// gateway-console 静态托管：nginx.conf 4200 托管块的写入 → 幂等 → 摘除往返。
+    /// 关键回归点：写入/摘除必须字节级还原原配置（多一个空行都算破坏用户配置）；
+    /// 路径含 dist 直出、/api、/admin-api、/ws 三路反代（与 proxy.conf.json 同口径）。
+    /// 测试机无 nginx.exe → validate_and_reload 自动跳过 -t/热加载，可安全跨平台跑。
+    #[test]
+    fn gateway_console_nginx_block_roundtrip() {
+        let base = std::env::temp_dir().join(format!("dfy-ops-gw-nginx-{}", std::process::id()));
+        let conf_dir = base.join("conf");
+        std::fs::create_dir_all(&conf_dir).unwrap();
+        let conf = conf_dir.join("nginx.conf");
+        let original = "http {\n    server {\n        listen 80;\n    }\n}\n";
+        std::fs::write(&conf, original).unwrap();
+        let nginx_dir = base.to_str().unwrap();
+        let home = "C:/services/gateway-console";
+
+        // 写入：4200 server 块 + 直出 dist + 三路反代
+        let msg = integrate_nginx_gateway_console(nginx_dir, home).unwrap();
+        assert!(msg.contains("4200"), "接入消息应给出 4200 入口: {msg}");
+        let now = std::fs::read_to_string(&conf).unwrap();
+        assert!(now.contains("listen 4200;"), "必须有 4200 监听: {now}");
+        assert!(
+            now.contains("C:/services/gateway-console/dist"),
+            "root 必须指向安装根/dist: {now}"
+        );
+        assert!(now.contains("proxy_pass http://127.0.0.1:8084;"), "/api 反代 8084: {now}");
+        assert!(now.contains("proxy_pass http://127.0.0.1:48085;"), "/admin-api 反代 48085: {now}");
+        assert!(now.contains("proxy_pass http://127.0.0.1:8085;"), "/ws 反代 8085: {now}");
+        assert!(now.contains("try_files $uri $uri/ /index.html;"), "SPA 路由兜底: {now}");
+        assert!(now.contains("listen 80;"), "原有 80 站点必须保留: {now}");
+
+        // 幂等：内容未变则不重写（updated == original 快路径）
+        integrate_nginx_gateway_console(nginx_dir, home).unwrap();
+        let again = std::fs::read_to_string(&conf).unwrap();
+        assert_eq!(now, again, "重复接入必须幂等");
+
+        // 摘除：字节级还原原配置
+        let rmsg = remove_nginx_gateway_console(nginx_dir).unwrap();
+        assert!(rmsg.contains("移除") || rmsg.contains("摘除"), "{rmsg}");
+        let restored = std::fs::read_to_string(&conf).unwrap();
+        assert_eq!(restored, original, "摘除后必须还原原配置（不多空行/不丢内容）");
+
+        // 再摘一次：无配置时是幂等 Ok
+        let again2 = remove_nginx_gateway_console(nginx_dir).unwrap();
+        assert!(again2.contains("无需移除"), "{again2}");
+
+        // conf 不存在 → Err 并指引先装 Nginx（不是静默成功）
+        let missing = base.join("no-such");
+        let err = integrate_nginx_gateway_console(missing.to_str().unwrap(), home).unwrap_err();
+        assert!(err.contains("先在修复中心安装 Nginx"), "错误必须可执行: {err}");
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// relocate_home_contents：版本子目录内容搬平到安装根（nginx/dfy-ui 状态探测的关键前提）。

@@ -195,24 +195,26 @@ fn builtin() -> Vec<ServiceDef> {
             kind: ServiceKind::AngularSpa,
             java_major: None,
             install_dir: "C:/services/gateway-console".into(),
-            // 平台托管启动 = ng serve（4200）：源码目录直接起，免构建等待；
-            // proxy.conf.json 把 /api→8084、/admin-api→48085、/ws→8085 转到
-            // edge-conductor 与后端。生产要固化产物时再切 build:prod 静态托管。
+            // 静态托管（2026-11-10 定案）：zip 内带预构建 dist，由 Nginx 直出
+            // （listen 4200，/api→8084、/admin-api→48085、/ws→8085 反代到
+            // edge-conductor 与后端）——全程无需 Node/npm，离线机器也能装。
+            // build_cmd 仅作源码维护时手动重建产物用（需要本机 Node）。
             build_cmd: Some("npm run build:prod".into()),
-            run_cmd: "npm start".into(),
+            run_cmd: String::new(),
             ports: vec![4200],
             process_names: vec![],
             product_names: vec![],
             health_url: None,
             log_paths: vec![],
-            // 代理目标是两个后端服务：edge-conductor(8084/8085)、dfy-backend(48085)
-            depends_on: vec!["edge-conductor".into(), "dfy-backend".into()],
+            // 代理目标是两个后端服务：edge-conductor(8084/8085)、dfy-backend(48085)；
+            // nginx 是静态托管宿主（env check 未运行时靠它提示「启动 Nginx」）
+            depends_on: vec!["edge-conductor".into(), "dfy-backend".into(), "nginx".into()],
             is_daemon: true,
             third_party: false,
             remote_only: false,
-            static_site: false,
-            // 「装没装」= 源码目录在（package.json 与代理配置齐备）；
-            // 「跑没跑」= 4200 端口可达。
+            static_site: true,
+            // 「装没装」= 源码标记（package.json）+ 静态产物（dist/index.html）齐备；
+            // 「跑没跑」= 4200 端口可达（Nginx 托管通道在跑）。
             requires: vec![
                 RequiresCheck {
                     id: "src".into(),
@@ -221,13 +223,13 @@ fn builtin() -> Vec<ServiceDef> {
                     port: None,
                 },
                 RequiresCheck {
-                    id: "proxy".into(),
-                    label: "代理配置 proxy.conf.json".into(),
-                    path: Some("proxy.conf.json".into()),
+                    id: "dist".into(),
+                    label: "前端构建产物 dist/index.html".into(),
+                    path: Some("dist/index.html".into()),
                     port: None,
                 },
             ],
-            description: "边缘网关控制台（Angular 19）：npm start 起 ng serve 4200，经代理接入 edge-conductor(8084)、云端后端(48085) 与 WS(8085)。".into(),
+            description: "边缘网关控制台（Angular 19）：静态产物由 Nginx 托管在 4200（/api、/ws 反代 edge-conductor 8084/8085，/admin-api 反代后端 48085），无需 Node.js。".into(),
         },
         ServiceDef {
             id: "edge-conductor".into(),

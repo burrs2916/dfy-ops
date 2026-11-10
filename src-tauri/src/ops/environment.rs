@@ -947,6 +947,30 @@ mod tests {
         assert!(dep.is_some(), "dfy-ui 应依赖检查 dfy-backend: {:?}", report.items);
     }
 
+    /// 2026-11-10 定案：gateway-console 改静态托管（Nginx :4200 直出 dist，
+    /// 无 node/npm 进程）——与 dfy-ui 同口径：不得出现「运行方式（装 nginx/node）」
+    /// 检查项；宿主 nginx 经 depends_on 表达；静态产物 dist 是必备检查项。
+    #[test]
+    fn static_gateway_console_env_skips_node_and_requires_dist() {
+        let def = def_of("gateway-console");
+        assert!(def.static_site, "gateway-console 应为 static_site（静态托管）");
+        assert!(def.run_cmd.is_empty(), "静态托管无运行命令");
+        assert!(def.depends_on.iter().any(|d| d == "nginx"), "应依赖宿主 nginx");
+        assert!(def.requires.iter().any(|r| r.check_id() == "dist"), "必须声明 dist 静态产物检查");
+
+        let report = check_service_env_with(&def, &states(&[]), None);
+        assert!(
+            !report.items.iter().any(|i| i.id == "runtime-path"),
+            "static_site 前端不应出现 runtime-path 检查项: {:?}",
+            report.items
+        );
+        assert!(
+            report.items.iter().any(|i| i.id == "dist"),
+            "环境检查必须包含 dist 静态产物项: {:?}",
+            report.items
+        );
+    }
+
     /// 回归：GreptimeDB 时序库随安装管线整合到 edge-conductor/greptimedb/，
     /// 由 edgecd-daemon 自己拉起——环境检查必须有「greptimedb/greptime 就位」
     /// 路径检查项（安装完就有）；VerneMQ/MinIO 仍为远程部署，不得出现本地
