@@ -97,6 +97,8 @@ pub async fn start_generic_repair(
     // 而 dir 已被移进下面的阻塞闭包，先克隆一份（dir 为空时同样传空，兜底分支自己报错）
     let dir = state.app_settings.lock().unwrap().resource_dir.clone();
     let dir_for_edge = dir.clone();
+    // 调度日志展示用（dir 随后移进阻塞闭包）
+    let dir_display = if dir.is_empty() { "(未配置)".to_string() } else { dir.clone() };
     let (zip, msi, jar) = if dir.is_empty() {
         (None, None, None)
     } else {
@@ -212,6 +214,34 @@ pub async fn start_generic_repair(
         Some("msi")
     } else {
         None
+    };
+    // 安装调度留痕（查日志的第一现场）：识别到哪些包、选了哪条管线——
+    // 「识别到安装包装不上」类问题必须能在 debug.log 里看到分流依据
+    debug_log::entry(
+        debug_log::APP_SCOPE,
+        "INFO",
+        "repair_install",
+        "dispatch",
+        &format!(
+            "{label} 调度：resource_dir={dir_display}；zip={} msi={} jar={}；管线={}",
+            zip.as_ref().map(|f| f.file_name.as_str()).unwrap_or("-"),
+            msi.as_ref().map(|f| f.file_name.as_str()).unwrap_or("-"),
+            jar.as_ref().map(|f| f.file_name.as_str()).unwrap_or("-"),
+            source.unwrap_or("无"),
+        ),
+    );
+    let started = match started {
+        Ok(msg) => Ok(msg),
+        Err(e) => {
+            debug_log::entry(
+                debug_log::APP_SCOPE,
+                "ERROR",
+                "repair_install",
+                "dispatch_rejected",
+                &format!("{label} 安装启动被拒绝：{e}"),
+            );
+            Err(e)
+        }
     };
     match started {
         Ok(()) => Json(serde_json::json!({

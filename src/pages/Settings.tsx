@@ -147,7 +147,7 @@ export default function Settings() {
           </Typography>
         ) : scan.files.length === 0 ? (
           <Typography variant="body2" color="text.secondary">
-            目录存在，但未识别到安装包（支持 MySQL / Redis / VerneMQ / JDK / MinIO / GreptimeDB 的 msi/exe/zip）
+            目录存在，但未识别到安装包（支持 MySQL / Redis / VerneMQ / JDK / MinIO / GreptimeDB / Nginx / DFY 后端 / DFY 前端 / 边缘计算 / Gateway Console 的 msi/exe/zip/jar）
           </Typography>
         ) : (
           <>

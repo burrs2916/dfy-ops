@@ -545,7 +545,7 @@ mod tests {
             assert!(d.third_party, "{id} 应标记为 thirdParty");
             assert!(d.build_cmd.is_none() && d.run_cmd.is_empty(), "{id} 平台不托管启停");
         }
-        for id in ["dfy-backend", "dfy-ui", "edge-conductor"] {
+        for id in ["dfy-backend", "dfy-ui", "edge-conductor", "gateway-console"] {
             let d = defs.iter().find(|d| d.id == id).unwrap();
             assert!(!d.third_party, "{id} 是自研服务");
             assert!(!d.remote_only, "{id} 不是纯远程服务");

@@ -1848,9 +1848,11 @@ pub async fn platform_open(State(state): State<Arc<AppState>>) -> Json<serde_jso
 /// 版本、各服务安装/运行态、关键端口占用、最近 20 条运维事件。
 /// 用户点「复制诊断」粘给维护方（或 AI），不用再手动翻 debug.log。
 pub async fn diagnostics_snapshot(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    // 各服务判定：复用修复中心的探测口径（install_dir + 关键文件 + 运行态）
+    // 各服务判定：复用修复中心的探测口径（install_dir + 关键文件 + 运行态）。
+    // 清单一律引用 PROBEABLE（单一事实源），不在此硬编码——诊断快照曾漏
+    // gateway-console/greptime，与修复中心口径漂移即为隐患。
     let mut services = serde_json::Map::new();
-    for id in ["mysql", "redis", "java", "nginx", "dfy-backend", "dfy-ui", "edge-conductor"] {
+    for id in crate::api::handlers_repair::PROBEABLE {
         let (installed, dir_ok, running) =
             crate::api::handlers_repair::probe_target(&state, id).await;
         services.insert(
