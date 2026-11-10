@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   Alert,
   Box,
@@ -16,55 +16,61 @@ import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import type { ExternalConfigResponse } from "../types";
 
-/** 边缘控制台：gateway-console（Angular）由 edge-conductor HTTP 服务
- *  在 /console/ 静态托管，本页 iframe 内嵌。端口取边缘计算 config.toml
- *  的 httpPort（配置中心可改，改完控制台地址自动跟随）。
- *  云端 API 基址通过 ?cloudApi= 注入——控制台登录要先查云端租户、
- *  业务页调云端 admin-api（走 token 认证）。地址直接用边缘计算配置的
- *  「上游 DFY 后端地址」（upstreamServerUrl）：daemon 上报云端用的
- *  就是它，配置中心改一处，上报与控制台同时跟随——与运维访问云端
- *  后端的 IP:48085 同源，不是 Nginx 机内地址。 */
+/** 边缘控制台：gateway-console（Angular）打包产物由 Nginx 托管在 80 端口
+ *  /console/（安装管线自动部署产物并接入 Nginx，与云端前端同一发布方式），
+ *  本页不内嵌 iframe——直接用 Tauri 原生 WebView 窗口（Windows 上是
+ *  WebView2/Chromium 内核）打开控制台首页，控制台自己的路由守卫
+ *  （InitializationGuard/AuthGuard）负责初始化与登录流转。
+ *  云端 API 基址经 ?cloudApi= 注入：取边缘计算配置的「上游 DFY 后端地址」
+ *  （upstreamServerUrl），daemon 上报与控制台共用同一配置，配置中心改一处
+ *  两边同时跟随。 */
+
 export default function EdgeConsolePage() {
   const navigate = useNavigate();
   const [cfg, setCfg] = useState<ExternalConfigResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  // iframe key：刷新按钮递增强制重载（控制台后端刚启动完需要手动刷一下的场景）
-  const [frameKey, setFrameKey] = useState(0);
-  // 独立窗口打开失败的提示（成功无感知，失败给出原因）
+  // 自动开窗只做一次；手动「打开控制台」可重复（已开窗口 = 前置聚焦）
+  const autoOpenedRef = useRef(false);
+  const [opening, setOpening] = useState(false);
   const [windowErr, setWindowErr] = useState<string | null>(null);
 
-  useEffect(() => {
-    let alive = true;
+  const refreshConfig = () => {
     setLoading(true);
     api
       .getExternalConfig("edge-conductor")
-      .then((c) => {
-        if (alive) setCfg(c);
-      })
-      .catch(() => {
-        if (alive) setCfg(null);
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [frameKey]);
+      .then((c) => setCfg(c))
+      .catch(() => setCfg(null))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    refreshConfig();
+  }, []);
 
   const edge = cfg?.config as Record<string, string> | undefined;
-  // 云端 DFY 后端基址：边缘计算配置的上游地址（含 http:// 前缀）。
-  // 拿不到就不传参数——控制台回退 environment 默认，纯边缘场景仍可用。
   const cloudApi = edge?.upstreamServerUrl?.trim() || "";
   const cloudQuery = cloudApi ? `?cloudApi=${encodeURIComponent(cloudApi)}` : "";
-  // 控制台走 Nginx 80 通道：装边缘计算时 install 管线已在 nginx.conf 自动接入
-  // 「/console/ → web-console 产物、/api/ → 8084 反代」。edge-conductor 的 8084
-  // 只有 /api 与 /ws 路由、不托管静态页，8084/console/ 是 404（页面空白的根因）。
   const consoleUrl = `http://127.0.0.1/console/${cloudQuery}`;
+
+  const openConsole = async () => {
+    setOpening(true);
+    const err = await api.openEdgeConsoleWindow();
+    setOpening(false);
+    // 成功无感知（窗口已存在则前置聚焦）；失败给出原因
+    setWindowErr(err);
+  };
+
+  // 配置就绪且边缘计算已安装 → 进入本页自动弹出原生控制台窗口（每次进入一次）
+  useEffect(() => {
+    if (loading || !cfg?.exists || autoOpenedRef.current) return;
+    autoOpenedRef.current = true;
+    openConsole();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, cfg]);
 
   return (
     <Stack spacing={1} sx={{ height: "100%", minHeight: 0, p: 1.5, pt: 1 }}>
-      {/* 顶部条：标题 + 控制台地址 + 独立窗口 + 刷新 */}
+      {/* 顶部条：标题 + 控制台地址 + 打开窗口 + 刷新配置 */}
       <Stack direction="row" spacing={1.25} alignItems="center" sx={{ flexShrink: 0 }}>
         <Box
           sx={{
@@ -88,33 +94,36 @@ export default function EdgeConsolePage() {
           </Typography>
         </Box>
         <Box sx={{ flex: 1 }} />
-        <Tooltip title="在独立原生窗口中打开（有自己的任务栏图标，可并排使用）">
+        <Tooltip title="用 Tauri 原生 WebView 窗口打开控制台（独立任务栏图标，可并排使用；窗口已开时前置聚焦）">
           <Button
             size="small"
-            startIcon={<OpenInNewIcon />}
-            onClick={async () => {
-              const err = await api.openEdgeConsoleWindow();
-              if (err) setWindowErr(err);
+            startIcon={opening ? <CircularProgress size={14} /> : <OpenInNewIcon />}
+            disabled={opening}
+            onClick={openConsole}
+            sx={{ textTransform: "none", flexShrink: 0 }}
+          >
+            打开控制台
+          </Button>
+        </Tooltip>
+        <Tooltip title="重读边缘计算配置并再次自动开窗">
+          <Button
+            size="small"
+            startIcon={<RefreshIcon />}
+            onClick={() => {
+              autoOpenedRef.current = false;
+              refreshConfig();
             }}
             sx={{ textTransform: "none", flexShrink: 0 }}
           >
-            独立窗口
+            刷新
           </Button>
         </Tooltip>
-        <Button
-          size="small"
-          startIcon={<RefreshIcon />}
-          onClick={() => setFrameKey((k) => k + 1)}
-          sx={{ textTransform: "none", flexShrink: 0 }}
-        >
-          刷新
-        </Button>
       </Stack>
 
-      {/* 独立窗口打开失败提示（成功则弹出独立窗口，无感知） */}
+      {/* 开窗失败原因 */}
       {windowErr && (
         <Alert severity="warning" variant="outlined" onClose={() => setWindowErr(null)} sx={{ flexShrink: 0, py: 0.5 }}>
-          独立窗口打开失败：{windowErr}
+          控制台窗口打开失败：{windowErr}
         </Alert>
       )}
 
@@ -137,8 +146,8 @@ export default function EdgeConsolePage() {
               边缘计算尚未安装
             </Typography>
             <Typography variant="body2" color="text.secondary" align="center">
-              控制台由边缘计算（edge-conductor）内置托管，前端产物已随平台打包。
-              到修复中心一键安装/重装边缘计算即可自动部署控制台。
+              控制台打包产物随边缘计算安装自动部署到 Nginx 托管目录
+              （与云端前端同一发布方式）。到修复中心一键安装/重装边缘计算即可。
             </Typography>
             <Button
               variant="contained"
@@ -152,30 +161,55 @@ export default function EdgeConsolePage() {
           </Stack>
         </Paper>
       ) : (
-        <>
-          <Paper
-            variant="outlined"
-            sx={{ flex: 1, minHeight: 0, overflow: "hidden", bgcolor: "#fff" }}
-          >
-            <Box
-              key={frameKey}
-              component="iframe"
-              src={consoleUrl}
-              title="边缘控制台"
-              sx={{
-                width: "100%",
-                height: "100%",
-                border: "none",
-                display: "block",
-              }}
-            />
-          </Paper>
-          <Alert severity="info" variant="outlined" sx={{ flexShrink: 0, py: 0.5 }}>
-            若页面空白：确认 Nginx 已安装且边缘计算已完成安装/重装（安装时自动把
-            /console/ 与 /api/ 接入 Nginx）。控制台经 Nginx 80 通道访问，
-            安装目录的 web-console/ 为控制台产物。
-          </Alert>
-        </>
+        <Paper
+          variant="outlined"
+          sx={{
+            flex: 1,
+            minHeight: 0,
+            display: "grid",
+            placeItems: "center",
+            bgcolor: "#fafafa",
+          }}
+        >
+          <Stack spacing={2} alignItems="center" sx={{ maxWidth: 520, px: 3, py: 2 }}>
+            <HubIcon sx={{ fontSize: 48, color: "primary.main" }} />
+            <Typography variant="h6" sx={{ fontWeight: 700 }}>
+              控制台已在原生窗口中打开
+            </Typography>
+            <Typography variant="body2" color="text.secondary" align="center">
+              边缘控制台运行在独立原生窗口（Tauri WebView / Chromium 内核），
+              不再内嵌 iframe。窗口未出现时点右上角「打开控制台」；
+              已打开时点击会前置聚焦。
+            </Typography>
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              align="center"
+              sx={{ fontFamily: "monospace", wordBreak: "break-all" }}
+            >
+              {consoleUrl}
+            </Typography>
+            <Stack direction="row" spacing={1}>
+              <Button variant="contained" size="small" startIcon={<OpenInNewIcon />} onClick={openConsole}>
+                打开控制台
+              </Button>
+              <Button
+                variant="outlined"
+                size="small"
+                onClick={() => {
+                  autoOpenedRef.current = false;
+                  refreshConfig();
+                }}
+              >
+                重载配置
+              </Button>
+            </Stack>
+            <Alert severity="info" variant="outlined" sx={{ width: "100%", py: 0.5 }}>
+              打不开时看 debug.log 的 console_diag 段：产物部署、Nginx 接入、
+              进程、HTTP 探测逐项都有结论，无需人工排查。
+            </Alert>
+          </Stack>
+        </Paper>
       )}
     </Stack>
   );
