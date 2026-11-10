@@ -10,6 +10,7 @@ import {
   Terminal,
   WebAsset,
   Hub,
+  Dashboard,
 } from "@mui/icons-material";
 
 /** 软件图标：卡片视觉锚点（圆润底色块 + 白色图形，专业感） */
@@ -24,4 +25,5 @@ export const TARGET_ICON: Record<string, React.ReactNode> = {
   "dfy-backend": <Terminal />,
   "dfy-ui": <WebAsset />,
   "edge-conductor": <Hub />,
+  "gateway-console": <Dashboard />,
 };

@@ -834,18 +834,19 @@ export default function RepairCenter({
           </Box>
 
           {(() => {
-            // 纯远程软件（FIXED_REMOTE）不进待安装/已安装——本机不安装、无安装包可识别；
-            // 用户声明的远程部署（remoteSet）仍可与固定远程共存展示。
-            // 例外：greptime 已捆绑本地化（随边缘计算安装），无论历史声明与否都强制本地，
-            // 免得旧设置残留把它藏进远程页签导致「待安装看不到 GreptimeDB」。
-            const local = (t: string) =>
-              t === "greptime" || (!remoteSet.has(t) && !FIXED_REMOTE.has(t));
+            // 纯远程软件（FIXED_REMOTE：redis/vernemq/minio）不进待安装/已安装——
+            // 本机不安装、无安装包可识别。
+            // 本机件一律强制本地展示（三件套/边缘计算/Gateway Console/MySQL/JDK/GreptimeDB）：
+            // 历史 remoteSet 残留（哪怕手改配置写入）不得把任何本机件藏进远程页签，
+            // 从渲染根上杜绝「待安装看不到边缘计算」这类被隐藏问题。
+            const local = (t: string) => !FIXED_REMOTE.has(t);
             const toInstall = SOFTWARE_ORDER.filter(
               (t) => local(t) && !installedOf(t)?.serviceInstalled,
             );
             const installedList = SOFTWARE_ORDER.filter(
               (t) => local(t) && installedOf(t)?.serviceInstalled,
             );
+            // 远程页签：固定远程 + 历史声明（仅作展示与「改回本地」入口，不影响本机件可见性）
             const remoteList = SOFTWARE_ORDER.filter(
               (t) => t !== "greptime" && (remoteSet.has(t) || FIXED_REMOTE.has(t)),
             );
