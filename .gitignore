@@ -27,3 +27,4 @@ Thumbs.db
 
 # TypeScript 增量构建缓存（tsc -b 产物，随构建变化，不入库）
 *.tsbuildinfo
+/gateway-console.zip

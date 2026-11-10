@@ -62,12 +62,12 @@ name = "Gateway Console (Angular)"
 kind = "angular_spa"
 installDir = "C:/services/gateway-console"
 buildCmd = "npm run build:prod"
-runCmd = "nginx -p C:/services/gateway-console -c nginx.conf"
-ports = [8081]
+runCmd = "npm start"
+ports = [4200]
 logPaths = []
-dependsOn = []
+dependsOn = ["edge-conductor", "dfy-backend"]
 isDaemon = true
-description = "Angular 19 网关控制台，静态托管。dev 机可用 ng serve（4200，绑定 [::1]），探测已兼容 IPv6 回环。"
+description = "边缘网关控制台（Angular 19）：ng serve 4200 + 代理 /api→8084、/admin-api→48085、/ws→8085。"
 
 [[services]]
 id = "edge-conductor"

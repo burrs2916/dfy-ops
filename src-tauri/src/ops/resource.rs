@@ -14,9 +14,9 @@
 use serde::Serialize;
 
 /// 资源目录可修复的目标软件（与环境检查项 id 对应，见 repair_target）。
-pub const TARGETS: [&str; 10] = [
+pub const TARGETS: [&str; 11] = [
     "java", "mysql", "redis", "vernemq", "minio", "greptime", "nginx", "dfy-backend", "dfy-ui",
-    "edge-conductor",
+    "edge-conductor", "gateway-console",
 ];
 
 /// 资源目录里的一个文件（识别不出的也列出，target=None 交 AI 判断）。
@@ -73,6 +73,8 @@ fn match_target(name_lower: &str) -> Option<&'static str> {
         Some("dfy-backend")
     } else if name_lower.contains("dfy-ui") {
         Some("dfy-ui")
+    } else if name_lower.contains("gateway-console") {
+        Some("gateway-console")
     }
     // 边缘计算守护进程：CI 产物 edgecd-daemon.exe / edge-conductor-windows.zip
     // （不用裸 "edge" 泛词——误伤面太大，只认 edge-conductor / edgecd）
@@ -126,6 +128,8 @@ fn convention_target(dir_name_lower: &str) -> Option<&'static str> {
         // 自研云端三件套：目录名 = service id
         "dfy-backend" => Some("dfy-backend"),
         "dfy-ui" => Some("dfy-ui"),
+        // 边缘网关控制台：约定目录 gateway-console/（源码 zip 解压即部署）
+        "gateway-console" => Some("gateway-console"),
         // 边缘计算：约定目录 edge-conductor/（放 edgecd-daemon.exe + config.toml 等）
         "edge-conductor" => Some("edge-conductor"),
         _ => None,
@@ -347,6 +351,7 @@ pub fn target_label(target: &str) -> &'static str {
         "nginx" => "Nginx 反向代理",
         "dfy-backend" => "DFY 后端服务 (dfy-boot-base)",
         "dfy-ui" => "DFY 前端 (Vue3)",
+        "gateway-console" => "Gateway Console (Angular)",
         _ => "未知目标",
     }
 }
@@ -366,6 +371,7 @@ mod tests {
         assert_eq!(classify("minio.exe"), Some("minio"));
         assert_eq!(classify("OpenJDK17U-jre_x64_windows_hotspot_17.0.15_6.msi"), Some("java"));
         assert_eq!(classify("greptime-windows-amd64.zip"), Some("greptime"));
+        assert_eq!(classify("gateway-console-20261110.zip"), Some("gateway-console"));
         assert_eq!(classify("jdk-17_windows-x64_binaries.msi"), Some("java"));
         // 未识别 / 非安装包
         assert_eq!(classify("readme.pdf"), None);

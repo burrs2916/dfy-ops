@@ -190,6 +190,46 @@ fn builtin() -> Vec<ServiceDef> {
             description: "Vue3 管理后台，静态目录由独立的 nginx 服务统一托管反代。".into(),
         },
         ServiceDef {
+            id: "gateway-console".into(),
+            name: "Gateway Console (Angular)".into(),
+            kind: ServiceKind::AngularSpa,
+            java_major: None,
+            install_dir: "C:/services/gateway-console".into(),
+            // 平台托管启动 = ng serve（4200）：源码目录直接起，免构建等待；
+            // proxy.conf.json 把 /api→8084、/admin-api→48085、/ws→8085 转到
+            // edge-conductor 与后端。生产要固化产物时再切 build:prod 静态托管。
+            build_cmd: Some("npm run build:prod".into()),
+            run_cmd: "npm start".into(),
+            ports: vec![4200],
+            process_names: vec![],
+            product_names: vec![],
+            health_url: None,
+            log_paths: vec![],
+            // 代理目标是两个后端服务：edge-conductor(8084/8085)、dfy-backend(48085)
+            depends_on: vec!["edge-conductor".into(), "dfy-backend".into()],
+            is_daemon: true,
+            third_party: false,
+            remote_only: false,
+            static_site: false,
+            // 「装没装」= 源码目录在（package.json 与代理配置齐备）；
+            // 「跑没跑」= 4200 端口可达。
+            requires: vec![
+                RequiresCheck {
+                    id: "src".into(),
+                    label: "源码目录 package.json".into(),
+                    path: Some("package.json".into()),
+                    port: None,
+                },
+                RequiresCheck {
+                    id: "proxy".into(),
+                    label: "代理配置 proxy.conf.json".into(),
+                    path: Some("proxy.conf.json".into()),
+                    port: None,
+                },
+            ],
+            description: "边缘网关控制台（Angular 19）：npm start 起 ng serve 4200，经代理接入 edge-conductor(8084)、云端后端(48085) 与 WS(8085)。".into(),
+        },
+        ServiceDef {
             id: "edge-conductor".into(),
             name: "Edge Conductor (Rust Axum)".into(),
             kind: ServiceKind::RustBin,

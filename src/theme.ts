@@ -14,7 +14,7 @@ const MONO_STACK =
 export const BRAND_GRADIENT =
   "linear-gradient(90deg, #17334f 0%, #1e3f66 42%, #1e3f66 58%, #24466e 100%)";
 
-// 品牌深海军蓝（与 gateway-console 系统主题保持一致：#1e3f66 体系）。
+// 品牌深海军蓝。
 // success 也用品牌色：全项目不允许出现绿色系（用户明确要求），
 // 「成功」语义统一品牌蓝呈现。
 export const NAVY = {
