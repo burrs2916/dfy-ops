@@ -163,52 +163,20 @@ export default function EdgeConsolePage() {
       ) : (
         <Paper
           variant="outlined"
-          sx={{
-            flex: 1,
-            minHeight: 0,
-            display: "grid",
-            placeItems: "center",
-            bgcolor: "#fafafa",
-          }}
+          sx={{ flex: 1, minHeight: 0, display: "grid", placeItems: "center", bgcolor: "#fafafa" }}
         >
-          <Stack spacing={2} alignItems="center" sx={{ maxWidth: 520, px: 3, py: 2 }}>
-            <HubIcon sx={{ fontSize: 48, color: "primary.main" }} />
-            <Typography variant="h6" sx={{ fontWeight: 700 }}>
-              控制台已在原生窗口中打开
-            </Typography>
-            <Typography variant="body2" color="text.secondary" align="center">
-              边缘控制台运行在独立原生窗口（Tauri WebView / Chromium 内核），
-              不再内嵌 iframe。窗口未出现时点右上角「打开控制台」；
-              已打开时点击会前置聚焦。
-            </Typography>
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              align="center"
-              sx={{ fontFamily: "monospace", wordBreak: "break-all" }}
-            >
-              {consoleUrl}
-            </Typography>
-            <Stack direction="row" spacing={1}>
-              <Button variant="contained" size="small" startIcon={<OpenInNewIcon />} onClick={openConsole}>
-                打开控制台
-              </Button>
-              <Button
-                variant="outlined"
-                size="small"
-                onClick={() => {
-                  autoOpenedRef.current = false;
-                  refreshConfig();
-                }}
-              >
-                重载配置
-              </Button>
+          {opening ? (
+            <Stack spacing={2} alignItems="center">
+              <CircularProgress size={32} />
+              <Typography variant="body2" color="text.secondary">
+                正在打开边缘控制台窗口…
+              </Typography>
             </Stack>
-            <Alert severity="info" variant="outlined" sx={{ width: "100%", py: 0.5 }}>
-              打不开时看 debug.log 的 console_diag 段：产物部署、Nginx 接入、
-              进程、HTTP 探测逐项都有结论，无需人工排查。
-            </Alert>
-          </Stack>
+          ) : (
+            <Button variant="contained" startIcon={<OpenInNewIcon />} onClick={openConsole}>
+              打开控制台
+            </Button>
+          )}
         </Paper>
       )}
     </Stack>
