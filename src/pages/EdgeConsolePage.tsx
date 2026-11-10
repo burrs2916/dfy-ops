@@ -53,12 +53,14 @@ export default function EdgeConsolePage() {
   }, [frameKey]);
 
   const edge = cfg?.config as Record<string, string> | undefined;
-  const httpPort = edge?.httpPort || "8084";
   // 云端 DFY 后端基址：边缘计算配置的上游地址（含 http:// 前缀）。
   // 拿不到就不传参数——控制台回退 environment 默认，纯边缘场景仍可用。
   const cloudApi = edge?.upstreamServerUrl?.trim() || "";
   const cloudQuery = cloudApi ? `?cloudApi=${encodeURIComponent(cloudApi)}` : "";
-  const consoleUrl = `http://127.0.0.1:${httpPort}/console/${cloudQuery}`;
+  // 控制台走 Nginx 80 通道：装边缘计算时 install 管线已在 nginx.conf 自动接入
+  // 「/console/ → web-console 产物、/api/ → 8084 反代」。edge-conductor 的 8084
+  // 只有 /api 与 /ws 路由、不托管静态页，8084/console/ 是 404（页面空白的根因）。
+  const consoleUrl = `http://127.0.0.1/console/${cloudQuery}`;
 
   return (
     <Stack spacing={1} sx={{ height: "100%", minHeight: 0, p: 1.5, pt: 1 }}>
@@ -169,8 +171,9 @@ export default function EdgeConsolePage() {
             />
           </Paper>
           <Alert severity="info" variant="outlined" sx={{ flexShrink: 0, py: 0.5 }}>
-            若页面空白：确认边缘计算已启动、且安装时资源目录包含 web-console/
-            （控制台构建产物）。端口在配置中心「边缘计算」卡可调整。
+            若页面空白：确认 Nginx 已安装且边缘计算已完成安装/重装（安装时自动把
+            /console/ 与 /api/ 接入 Nginx）。控制台经 Nginx 80 通道访问，
+            安装目录的 web-console/ 为控制台产物。
           </Alert>
         </>
       )}

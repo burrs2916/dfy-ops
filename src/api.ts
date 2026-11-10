@@ -73,20 +73,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
-  /** 在独立 Tauri 原生窗口里打开边缘控制台（edge-conductor 托管的 /console/）。
-   *  拉边缘计算配置拿端口与云端 API 基址，拼好 URL 交给后端 command 开窗。
+  /** 在独立 Tauri 原生窗口里打开边缘控制台（Nginx 80 通道托管的 /console/）。
+   *  拉边缘计算配置拿云端 API 基址，拼好 URL 交给后端 command 开窗。
    *  返回错误信息（不抛异常）——调用方决定是否提示（自动弹窗失败不打扰用户）。 */
   openEdgeConsoleWindow: async (): Promise<string | null> => {
     try {
       const cfg = await api.getExternalConfig("edge-conductor");
-      const edge = cfg?.config as Record<string, string> | undefined;
       if (!cfg?.exists) return "边缘计算尚未安装，控制台不可用";
-      const port = edge?.httpPort || "8084";
-      const cloudApi = edge?.upstreamServerUrl?.trim() || "";
+      const cloudApi =
+        (cfg?.config as Record<string, string> | undefined)?.upstreamServerUrl?.trim() || "";
       const query = cloudApi ? `?cloudApi=${encodeURIComponent(cloudApi)}` : "";
       const { invoke } = await import("@tauri-apps/api/core");
+      // Nginx 80 通道：/console/ 静态托管 + /api/ 反代 8084（安装时自动接入）；
+      // 8084 只有 /api 与 /ws，不托管静态页
       await invoke("open_console_window", {
-        url: `http://127.0.0.1:${port}/console/${query}`,
+        url: `http://127.0.0.1/console/${query}`,
       });
       return null;
     } catch (e) {
