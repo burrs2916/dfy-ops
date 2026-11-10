@@ -80,6 +80,16 @@ fn open_console_window(
             _ => crate::ops::console_diag::diagnose(&diag_dir, "8084", ""),
         }
     });
+    // 开窗前置探测：80 通道无服务（Nginx 未装/未启动，典型如 macOS 开发机）
+    // 就不开白窗口——直接在「边缘控制台」页给出明确原因，不让用户对着
+    // 一个连接失败的白窗猜。诊断日志照常后台写（probe_80_console 有详情）。
+    if !crate::ops::health::check_tcp("127.0.0.1", 80, 800) {
+        return Err(
+            "127.0.0.1:80 无服务监听（Nginx 未安装或未启动）——边缘控制台走 Nginx 托管通道，\
+             请先在安装了边缘计算的机器上启动 Nginx；macOS 开发机无交付栈，属预期"
+                .into(),
+        );
+    }
     // 安全校验：只允许打开本机回环的 /console/ 页面，防止被拿来开任意远程站点
     let parsed = tauri::Url::parse(&url).map_err(|e| format!("控制台地址不合法: {e}"))?;
     if parsed.host_str() != Some("127.0.0.1") || !parsed.path().starts_with("/console/") {
