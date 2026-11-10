@@ -648,6 +648,42 @@ fn integrate_web_console(
             std::fs::remove_dir_all(&dst).map_err(|e| format!("清理旧控制台产物失败：{e}"))?;
         }
         let n = copy_dir_recursive(&src, &dst)?;
+        // 防呆：产物 <base href> 必须是 /console/（Nginx 托管前缀）。
+        // 资源目录里的产物可能是运维本地 `ng build` 出的（base="/"）——那种产物
+        // 装上后脚本/样式全部 404，控制台白屏。统一强制改写，来源配置问题不再致命。
+        let index = dst.join("index.html");
+        if let Ok(html) = std::fs::read_to_string(&index) {
+            if let Some(start) = html.find("<base href=\"") {
+                let rest = &html[start + "<base href=\"".len()..];
+                let end = rest.find('"').map(|i| start + "<base href=\"".len() + i);
+                if let Some(end) = end {
+                    let current = &html[start + "<base href=\"".len()..end];
+                    if current != "/console/" {
+                        let fixed = format!(
+                            "{}<base href=\"/console/\">{}",
+                            &html[..start],
+                            &html[end + 1..]
+                        );
+                        match std::fs::write(&index, fixed) {
+                            Ok(()) => crate::debug_log::entry(
+                                crate::debug_log::APP_SCOPE,
+                                "WARN",
+                                "install",
+                                "console_base_fixed",
+                                &format!("控制台产物 base href 是 {current:?}（正确为 /console/，产物构建时缺 --base-href /console/），已自动改写——不改写会白屏"),
+                            ),
+                            Err(e) => crate::debug_log::entry(
+                                crate::debug_log::APP_SCOPE,
+                                "ERROR",
+                                "install",
+                                "console_base_fix_failed",
+                                &format!("base href 改写失败：{e}（该产物在 /console/ 下会白屏）"),
+                            ),
+                        }
+                    }
+                }
+            }
+        }
         // 记录入口 chunk 名：排查「部署成功但页面仍旧」时一眼分辨产物新旧
         let entry = std::fs::read_dir(&dst)
             .ok()
