@@ -1217,12 +1217,42 @@ fn dep_states_for(
         .collect()
 }
 
+/// 单份环境报告的中文结论标签。
+fn overall_label(s: &environment::CheckStatus) -> &'static str {
+    match s {
+        environment::CheckStatus::Pass => "通过",
+        environment::CheckStatus::Warn => "警告",
+        environment::CheckStatus::Fail => "失败",
+    }
+}
+
+/// 单份环境报告的日志级别（整体结论定级）。
+fn overall_level(s: &environment::CheckStatus) -> &'static str {
+    match s {
+        environment::CheckStatus::Pass => "INFO",
+        environment::CheckStatus::Warn => "WARN",
+        environment::CheckStatus::Fail => "ERROR",
+    }
+}
+
+/// 单份环境报告的非 Pass 检查项明细（name:actual，分号连接）。
+fn non_pass_detail(report: &environment::ServiceEnvReport) -> String {
+    report
+        .items
+        .iter()
+        .filter(|i| i.status != environment::CheckStatus::Pass)
+        .map(|i| format!("{}:{}", i.name, i.actual))
+        .collect::<Vec<_>>()
+        .join("；")
+}
+
 /// 检查单个服务的运行环境（运行时依赖 + requires 声明 + dependsOn 依赖）。
 pub async fn env_check(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Json<environment::ServiceEnvReport>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?.clone();
+    let t0 = Instant::now();
     let st = state.clone();
     let report = blocking(move || {
         let snap = ProcSnapshot::capture();
@@ -1234,6 +1264,26 @@ pub async fn env_check(
         environment::check_service_env_with(&def, &deps, None)
     })
     .await;
+    // 单服务检测结论留痕：耗时 + 整体结论 + 非 Pass 项明细
+    let detail = non_pass_detail(&report);
+    crate::debug_log::entry(
+        crate::debug_log::APP_SCOPE,
+        overall_level(&report.overall),
+        "env_check",
+        "single",
+        &format!(
+            "id={} 耗时={:?} 结论={} 检查项={}（手动刷新）{}",
+            report.id,
+            t0.elapsed(),
+            overall_label(&report.overall),
+            report.items.len(),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" 未过项：{detail}")
+            }
+        ),
+    );
     // 单服务刷新结果同步进全量缓存对应项：「刷新此服务」后，缓存未过期的
     // 全量视图立即与最新探测一致，不会出现单服务/全量两份数据打架。
     if let Some((_, reports)) = state.env_cache.lock().unwrap().as_mut() {
@@ -1875,6 +1925,19 @@ pub async fn env_check_all(
     if !q.force {
         if let Some((at, reports)) = state.env_cache.lock().unwrap().as_ref() {
             if at.elapsed() < ENV_CACHE_TTL {
+                // 缓存命中也留痕：用户说「状态不对」时，能区分「没探（缓存）」和「探了但结果如此」
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "INFO",
+                    "env_check",
+                    "cache_hit",
+                    &format!(
+                        "force={} 缓存年龄={}s 服务数={}",
+                        q.force,
+                        at.elapsed().as_secs(),
+                        reports.len()
+                    ),
+                );
                 return Json(reports.clone());
             }
         }
@@ -1885,10 +1948,33 @@ pub async fn env_check_all(
     if !q.force {
         if let Some((at, reports)) = state.env_cache.lock().unwrap().as_ref() {
             if at.elapsed() < ENV_CACHE_TTL {
+                crate::debug_log::entry(
+                    crate::debug_log::APP_SCOPE,
+                    "INFO",
+                    "env_check",
+                    "cache_hit",
+                    &format!(
+                        "force={} single-flight 等锁后命中新缓存（年龄={}s）服务数={}",
+                        q.force,
+                        at.elapsed().as_secs(),
+                        reports.len()
+                    ),
+                );
                 return Json(reports.clone());
             }
         }
     }
+    crate::debug_log::entry(
+        crate::debug_log::APP_SCOPE,
+        "INFO",
+        "env_check",
+        "rebuild",
+        &format!(
+            "force={} 缓存过期/不存在，开始全量重探（子进程探测，耗时数秒）",
+            q.force
+        ),
+    );
+    let t0 = Instant::now();
     let st = state.clone();
     let reports = blocking(move || {
         let snap = ProcSnapshot::capture();
@@ -1914,6 +2000,58 @@ pub async fn env_check_all(
         })
     })
     .await;
+    // 检测结论全量留痕：耗时 + 通过/警告/失败计数 + 非 Pass 服务的逐项明细。
+    // 「环境检查明明是绿的为什么起不来」「明明装了为什么报红」都靠这一行还原现场。
+    let (warn_ids, fail_ids): (Vec<String>, Vec<String>) = reports.iter().fold(
+        (Vec::new(), Vec::new()),
+        |(mut w, mut f), r| match r.overall {
+            environment::CheckStatus::Warn => {
+                w.push(r.id.clone());
+                (w, f)
+            }
+            environment::CheckStatus::Fail => {
+                f.push(r.id.clone());
+                (w, f)
+            }
+            environment::CheckStatus::Pass => (w, f),
+        },
+    );
+    let detail = reports
+        .iter()
+        .filter(|r| r.overall != environment::CheckStatus::Pass)
+        .map(|r| {
+            let bad: Vec<String> = r
+                .items
+                .iter()
+                .filter(|i| i.status != environment::CheckStatus::Pass)
+                .map(|i| format!("{}:{}", i.name, i.actual))
+                .collect();
+            format!("{}[{}]", r.id, bad.join("；"))
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    crate::debug_log::entry(
+        crate::debug_log::APP_SCOPE,
+        if fail_ids.is_empty() { "INFO" } else { "ERROR" },
+        "env_check",
+        "rebuild_done",
+        &format!(
+            "force={} 耗时={:?} 服务={} 通过={} 警告[{}]={} 失败[{}]={}{}",
+            q.force,
+            t0.elapsed(),
+            reports.len(),
+            reports.len() - warn_ids.len() - fail_ids.len(),
+            warn_ids.len(),
+            warn_ids.join(","),
+            fail_ids.len(),
+            fail_ids.join(","),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" 明细：{detail}")
+            }
+        ),
+    );
     *state.env_cache.lock().unwrap() = Some((Instant::now(), reports.clone()));
     Json(reports)
 }
@@ -1928,6 +2066,7 @@ pub async fn service_refresh(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let def = find_def(&state, &id).ok_or(StatusCode::NOT_FOUND)?.clone();
+    let t0 = Instant::now();
     let st = state.clone();
     let (status, report) = blocking(move || {
         let snap = ProcSnapshot::capture();
@@ -1940,6 +2079,28 @@ pub async fn service_refresh(
         (status, report)
     })
     .await;
+    // 组合刷新结论留痕：运行态 + 健康态 + 环境结论一并列出
+    let detail = non_pass_detail(&report);
+    crate::debug_log::entry(
+        crate::debug_log::APP_SCOPE,
+        overall_level(&report.overall),
+        "env_check",
+        "refresh",
+        &format!(
+            "id={} 耗时={:?} 运行={} 健康={} 装态={} 结论={}{}",
+            report.id,
+            t0.elapsed(),
+            status.running,
+            status.healthy,
+            status.installed,
+            overall_label(&report.overall),
+            if detail.is_empty() {
+                String::new()
+            } else {
+                format!(" 未过项：{detail}")
+            }
+        ),
+    );
     // 同步进全量缓存对应项（与 env_check 相同口径，保持单服务/全量视图一致）
     if let Some((_, reports)) = state.env_cache.lock().unwrap().as_mut() {
         if let Some(slot) = reports.iter_mut().find(|r| r.id == report.id) {

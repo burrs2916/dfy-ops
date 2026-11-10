@@ -2279,14 +2279,38 @@ async fn run_zip_install(
         return;
     };
     state.log(format!("等待 {label} 在端口 {port} 监听…（首次启动较慢）"));
+    crate::debug_log::entry(
+        crate::debug_log::APP_SCOPE,
+        "INFO",
+        "install_verify",
+        "port_wait",
+        &format!("target={target} 开始等待服务端口 {port} 监听（上限 45 轮 × 1s）"),
+    );
     let mut ok = false;
+    let mut tries: u32 = 0;
     for _ in 0..45 {
+        tries += 1;
         if crate::ops::health::check_tcp("127.0.0.1", port, 800) {
             ok = true;
             break;
         }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
+    crate::debug_log::entry(
+        crate::debug_log::APP_SCOPE,
+        if ok { "INFO" } else { "ERROR" },
+        "install_verify",
+        "port_wait_result",
+        &format!(
+            "target={target} 端口 {port} {}（探测 {tries} 轮）——{}",
+            if ok { "已监听" } else { "45s 内未监听" },
+            if ok {
+                "服务就绪".to_string()
+            } else {
+                format!("检查 Windows 服务 {svc} 状态与 datadir 内 *.err 错误日志")
+            }
+        ),
+    );
     if ok {
         state.log(format!("验证通过：端口 {port} 正在监听"));
         finish(state, env_cache, true, String::new()).await;

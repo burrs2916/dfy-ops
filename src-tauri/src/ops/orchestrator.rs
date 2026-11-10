@@ -8,6 +8,18 @@ use crate::ops::health;
 use crate::ops::process::ProcManager;
 use crate::ops::registry::ServiceDef;
 
+/// 单个编排动作结果的统一留痕：scope=进程、phase=调用方链路、evt=服务 id。
+/// 启停编排的每一步（谁、成败、为什么）在 debug.log 里逐行可回放。
+fn log_action(phase: &str, r: &ActionResult) {
+    crate::debug_log::entry(
+        crate::ops::process::PROC_SCOPE,
+        if r.ok { "INFO" } else { "ERROR" },
+        phase,
+        &r.id,
+        r.error.as_deref().unwrap_or("成功"),
+    );
+}
+
 /// 单次动作的结果。
 #[derive(Debug, Clone, Serialize)]
 pub struct ActionResult {
@@ -52,12 +64,28 @@ fn wait_ready(
         .collect::<Vec<_>>()
         .join("/");
     let start = Instant::now();
+    // 就绪等待开始留痕：探测目标端口 + 超时预算——「启动后卡了多久、在等谁」
+    // 从这一行就能对出来
+    crate::debug_log::entry(
+        crate::ops::process::PROC_SCOPE,
+        "INFO",
+        "wait_ready",
+        "enter",
+        &format!("id={id} 端口={ports} 超时={timeout_secs}s"),
+    );
     let mut next_progress = READY_PROGRESS_SECS;
     loop {
         if probe_ports
             .iter()
             .all(|p| health::check_tcp("127.0.0.1", *p, 800))
         {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "INFO",
+                "wait_ready",
+                "ready",
+                &format!("id={id} 端口 {ports} 已就绪，等待耗时={:?}", start.elapsed()),
+            );
             return Ok(());
         }
         let elapsed = start.elapsed().as_secs();
@@ -71,12 +99,26 @@ fn wait_ready(
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "未知".into());
                 let tail = ProcManager::spawn_log_tail(&def.install_dir, 40).join(" | ");
+                crate::debug_log::entry(
+                    crate::ops::process::PROC_SCOPE,
+                    "ERROR",
+                    "wait_ready",
+                    "process_exited",
+                    &format!("id={id} 等待 {:?} 后进程已退出 exit={code}，端口 {ports} 未监听；输出尾部：{tail}", start.elapsed()),
+                );
                 return Err(format!(
                     "启动失败：进程已退出（exit={code}），端口 {ports} 未监听。进程输出尾部：{tail}（完整输出见 {}\\logs\\platform-spawn.log）",
                     def.install_dir
                 ));
             }
             let tail = ProcManager::spawn_log_tail(&def.install_dir, 24).join(" | ");
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "ERROR",
+                "wait_ready",
+                "timeout",
+                &format!("id={id} 进程仍在运行但端口 {ports} 超时 {timeout_secs}s 未监听；输出尾部：{tail}"),
+            );
             return Err(format!(
                 "启动后未在超时内就绪：进程仍在运行但端口 {ports} 未监听（已等待 {timeout_secs}s）。进程输出尾部：{tail}"
             ));
@@ -155,6 +197,7 @@ fn act_all(
     order: Vec<String>,
     start: bool,
 ) -> Vec<ActionResult> {
+    let phase = if start { "start" } else { "stop" };
     order
         .into_iter()
         .filter_map(|id| {
@@ -175,11 +218,13 @@ fn act_all(
                 // stop_deep：全部停止时对「外部拉起/句柄丢失」的服务按端口兜底强杀
                 procs.stop_deep(&id, &def.ports)
             };
-            Some(ActionResult {
+            let result = ActionResult {
                 id,
                 ok: r.is_ok(),
                 error: r.err().map(|e| e.to_string()),
-            })
+            };
+            log_action(phase, &result);
+            Some(result)
         })
         .collect()
 }
@@ -199,46 +244,100 @@ pub fn start_all(procs: &ProcManager, defs: &[ServiceDef]) -> Vec<ActionResult> 
         .map(|d| d.id.as_str())
         .collect();
     match start_order(defs) {
-        Ok(order) => order
-            .into_iter()
-            .filter(|id| daemon_ids.contains(id.as_str()))
-            .filter_map(|id| {
-                let def = defs.iter().find(|d| d.id == id)?;
-                if !procs.is_running(&id) {
-                    prepare_start(def);
-                    if let Err(e) = procs.start(&id, &def.install_dir, &def.run_cmd) {
-                        return Some(ActionResult {
+        Ok(order) => {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "INFO",
+                "start_all",
+                "order",
+                &format!("启动顺序：{}", order.join(" → ")),
+            );
+            order
+                .into_iter()
+                .filter(|id| daemon_ids.contains(id.as_str()))
+                .filter_map(|id| {
+                    let def = defs.iter().find(|d| d.id == id)?;
+                    let result = if !procs.is_running(&id) {
+                        prepare_start(def);
+                        if let Err(e) = procs.start(&id, &def.install_dir, &def.run_cmd) {
+                            ActionResult {
+                                id,
+                                ok: false,
+                                error: Some(e.to_string()),
+                            }
+                        } else {
+                            let res = wait_ready(procs, &id, def, READY_TIMEOUT_SECS);
+                            ActionResult {
+                                id,
+                                ok: res.is_ok(),
+                                error: res.err(),
+                            }
+                        }
+                    } else {
+                        // 已在运行：跳过启动但照样等就绪（端口可能还没监听）
+                        let res = wait_ready(procs, &id, def, READY_TIMEOUT_SECS);
+                        crate::debug_log::entry(
+                            crate::ops::process::PROC_SCOPE,
+                            "INFO",
+                            "start_all",
+                            &id,
+                            "已在运行，跳过 spawn，直接等端口就绪",
+                        );
+                        ActionResult {
                             id,
-                            ok: false,
-                            error: Some(e.to_string()),
-                        });
-                    }
-                }
-                let res = wait_ready(procs, &id, def, READY_TIMEOUT_SECS);
-                Some(ActionResult {
-                    id,
-                    ok: res.is_ok(),
-                    error: res.err(),
+                            ok: res.is_ok(),
+                            error: res.err(),
+                        }
+                    };
+                    log_action("start_all", &result);
+                    Some(result)
                 })
-            })
-            .collect(),
-        Err(e) => vec![ActionResult {
-            id: "*".into(),
-            ok: false,
-            error: Some(e),
-        }],
+                .collect()
+        }
+        Err(e) => {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "ERROR",
+                "start_all",
+                "order_failed",
+                &e,
+            );
+            vec![ActionResult {
+                id: "*".into(),
+                ok: false,
+                error: Some(e),
+            }]
+        }
     }
 }
 
 /// 按逆依赖顺序停止全部服务。
 pub fn stop_all(procs: &ProcManager, defs: &[ServiceDef]) -> Vec<ActionResult> {
     match stop_order(defs) {
-        Ok(order) => act_all(procs, defs, order, false),
-        Err(e) => vec![ActionResult {
-            id: "*".into(),
-            ok: false,
-            error: Some(e),
-        }],
+        Ok(order) => {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "INFO",
+                "stop_all",
+                "order",
+                &format!("停止顺序：{}", order.join(" → ")),
+            );
+            act_all(procs, defs, order, false)
+        }
+        Err(e) => {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "ERROR",
+                "stop_all",
+                "order_failed",
+                &e,
+            );
+            vec![ActionResult {
+                id: "*".into(),
+                ok: false,
+                error: Some(e),
+            }]
+        }
     }
 }
 
@@ -264,38 +363,73 @@ pub fn start_with_deps(procs: &ProcManager, defs: &[ServiceDef], id: &str) -> Ve
         .filter_map(|n| defs.iter().find(|d| d.id == *n).cloned())
         .collect();
     match start_order(&sub) {
-        Ok(order) => order
-            .into_iter()
-            .filter_map(|sid| {
-                let def = defs.iter().find(|d| d.id == sid)?;
-                // 第三方依赖（如 edge-conductor 依赖的 vernemq/minio）：不托管，
-                // 跳过启动但不算失败——其运行由系统服务/容器运行时负责。
-                if def.third_party {
-                    return None;
-                }
-                if !procs.is_running(&sid) {
-                    prepare_start(def);
-                    if let Err(e) = procs.start(&sid, &def.install_dir, &def.run_cmd) {
-                        return Some(ActionResult {
-                            id: sid,
-                            ok: false,
-                            error: Some(e.to_string()),
-                        });
+        Ok(order) => {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "INFO",
+                "start_with_deps",
+                "order",
+                &format!("target={id} 启动链：{}", order.join(" → ")),
+            );
+            order
+                .into_iter()
+                .filter_map(|sid| {
+                    let def = defs.iter().find(|d| d.id == sid)?;
+                    // 第三方依赖（如 edge-conductor 依赖的 vernemq/minio）：不托管，
+                    // 跳过启动但不算失败——其运行由系统服务/容器运行时负责。
+                    if def.third_party {
+                        return None;
                     }
-                }
-                let res = wait_ready(procs, &sid, def, READY_TIMEOUT_SECS);
-                Some(ActionResult {
-                    id: sid,
-                    ok: res.is_ok(),
-                    error: res.err(),
+                    let result = if !procs.is_running(&sid) {
+                        prepare_start(def);
+                        if let Err(e) = procs.start(&sid, &def.install_dir, &def.run_cmd) {
+                            ActionResult {
+                                id: sid,
+                                ok: false,
+                                error: Some(e.to_string()),
+                            }
+                        } else {
+                            let res = wait_ready(procs, &sid, def, READY_TIMEOUT_SECS);
+                            ActionResult {
+                                id: sid,
+                                ok: res.is_ok(),
+                                error: res.err(),
+                            }
+                        }
+                    } else {
+                        let res = wait_ready(procs, &sid, def, READY_TIMEOUT_SECS);
+                        crate::debug_log::entry(
+                            crate::ops::process::PROC_SCOPE,
+                            "INFO",
+                            "start_with_deps",
+                            &sid,
+                            "已在运行，跳过 spawn，直接等端口就绪",
+                        );
+                        ActionResult {
+                            id: sid,
+                            ok: res.is_ok(),
+                            error: res.err(),
+                        }
+                    };
+                    log_action("start_with_deps", &result);
+                    Some(result)
                 })
-            })
-            .collect(),
-        Err(e) => vec![ActionResult {
-            id: id.into(),
-            ok: false,
-            error: Some(e),
-        }],
+                .collect()
+        }
+        Err(e) => {
+            crate::debug_log::entry(
+                crate::ops::process::PROC_SCOPE,
+                "ERROR",
+                "start_with_deps",
+                "order_failed",
+                &format!("target={id} {e}"),
+            );
+            vec![ActionResult {
+                id: id.into(),
+                ok: false,
+                error: Some(e),
+            }]
+        }
     }
 }
 

@@ -2479,6 +2479,14 @@ pub async fn repair_exec(
     Json(input): Json<ExecInput>,
 ) -> Json<ExecResult> {
     if let Err(e) = resource::validate_command(&input.command) {
+        // 白名单拦截留痕：AI 生成的命令被拒，审计时间轴上「拦了什么、为什么」可回溯
+        debug_log::entry(
+            debug_log::APP_SCOPE,
+            "WARN",
+            "repair_exec",
+            "rejected",
+            &format!("命令未过白名单校验：{e}；命令：{}", input.command),
+        );
         return Json(ExecResult {
             ok: false,
             error: Some(e),
@@ -2495,6 +2503,16 @@ pub async fn repair_exec(
     #[cfg(target_os = "windows")]
     {
         let cmd = input.command.trim().to_string();
+        // 代执行请求留痕：执行了什么命令（用户在 UAC 里确认过 = 授权动作），
+        // 出问题时能对上「到底跑过哪条命令」
+        debug_log::entry(
+            debug_log::APP_SCOPE,
+            "INFO",
+            "repair_exec",
+            "dispatch",
+            &format!("代执行命令：{cmd}（UAC 提权，10 分钟硬超时）"),
+        );
+        let t0 = std::time::Instant::now();
         // 拆首 token（支持带引号的 "msiexec.exe"）与剩余参数（保留原始引号）
         let (exe, rest) = if let Some(stripped) = cmd.strip_prefix('"') {
             match stripped.find('"') {
@@ -2531,10 +2549,19 @@ pub async fn repair_exec(
         )
         .await;
         match run {
-            Ok(Ok(out)) if out.status.success() => Json(ExecResult {
-                ok: true,
-                error: None,
-            }),
+            Ok(Ok(out)) if out.status.success() => {
+                debug_log::entry(
+                    debug_log::APP_SCOPE,
+                    "INFO",
+                    "repair_exec",
+                    "done",
+                    &format!("命令执行成功：{cmd}（耗时={:?}）", t0.elapsed()),
+                );
+                Json(ExecResult {
+                    ok: true,
+                    error: None,
+                })
+            }
             Ok(Ok(out)) => {
                 let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
                 let msg = if stderr.is_empty() {
@@ -2542,19 +2569,49 @@ pub async fn repair_exec(
                 } else {
                     format!("命令执行失败：{stderr}")
                 };
+                debug_log::entry(
+                    debug_log::APP_SCOPE,
+                    "ERROR",
+                    "repair_exec",
+                    "failed",
+                    &format!(
+                        "命令：{cmd} 退出码={:?} 耗时={:?} stderr={}",
+                        out.status.code(),
+                        t0.elapsed(),
+                        stderr.chars().take(300).collect::<String>()
+                    ),
+                );
                 Json(ExecResult {
                     ok: false,
                     error: Some(msg),
                 })
             }
-            Ok(Err(e)) => Json(ExecResult {
-                ok: false,
-                error: Some(format!("无法启动命令：{e}")),
-            }),
-            Err(_) => Json(ExecResult {
-                ok: false,
-                error: Some("命令执行超时（10 分钟），请检查目标安装器是否在等待界面输入".into()),
-            }),
+            Ok(Err(e)) => {
+                debug_log::entry(
+                    debug_log::APP_SCOPE,
+                    "ERROR",
+                    "repair_exec",
+                    "spawn_failed",
+                    &format!("命令：{cmd} 无法启动：{e}"),
+                );
+                Json(ExecResult {
+                    ok: false,
+                    error: Some(format!("无法启动命令：{e}")),
+                })
+            }
+            Err(_) => {
+                debug_log::entry(
+                    debug_log::APP_SCOPE,
+                    "ERROR",
+                    "repair_exec",
+                    "timeout",
+                    &format!("命令：{cmd} 执行超时（10 分钟硬超时触发，耗时={:?}）", t0.elapsed()),
+                );
+                Json(ExecResult {
+                    ok: false,
+                    error: Some("命令执行超时（10 分钟），请检查目标安装器是否在等待界面输入".into()),
+                })
+            }
         }
     }
 }
