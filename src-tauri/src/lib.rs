@@ -56,7 +56,30 @@ fn uses_custom_titlebar() -> bool {
 /// 自己的任务栏图标。前端传入拼好的完整 URL（含 cloudApi= 查询参数）。
 /// 同 label 窗口已存在则仅前置聚焦，不重复开。
 #[tauri::command]
-fn open_console_window(app: tauri::AppHandle, url: String) -> Result<(), String> {
+fn open_console_window(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Arc<AppState>>,
+    url: String,
+) -> Result<(), String> {
+    // 打开独立窗口 = 又一次控制台链路自检机会：全量诊断后台跑（产物/Nginx
+    // 接入/进程/HTTP 探测逐项写 debug.log），iframe 空白类问题日志自解释。
+    let diag_dir = state
+        .registry
+        .iter()
+        .find(|d| d.id == "edge-conductor")
+        .map(|d| d.install_dir.clone())
+        .unwrap_or_else(|| "C:/services/edge-conductor".into());
+    std::thread::spawn(move || {
+        let cfg = crate::ops::edge_config::read(std::path::Path::new(&diag_dir));
+        match cfg {
+            Ok(Some(c)) => crate::ops::console_diag::diagnose(
+                &diag_dir,
+                &c.http_port,
+                &c.upstream_server_url,
+            ),
+            _ => crate::ops::console_diag::diagnose(&diag_dir, "8084", ""),
+        }
+    });
     // 安全校验：只允许打开本机回环的 /console/ 页面，防止被拿来开任意远程站点
     let parsed = tauri::Url::parse(&url).map_err(|e| format!("控制台地址不合法: {e}"))?;
     if parsed.host_str() != Some("127.0.0.1") || !parsed.path().starts_with("/console/") {
@@ -204,6 +227,9 @@ pub fn run() {
                 env_rebuild: Arc::new(tokio::sync::Mutex::new(())),
                 repair: Arc::new(ops::env_repair::RepairState::default()),
             });
+            // 独立窗口 command（open_console_window）要读 registry 取边缘计算
+            // 安装目录做控制台链路诊断——AppState 挂进 Tauri managed state
+            app.manage(state.clone());
 
             // P2-f 保活看门狗：平台拉起过的常驻服务崩了自动重新拉起
             // （用户显式 stop 的会被抑制；重启间隔 30s 冷却防 crash-loop）。

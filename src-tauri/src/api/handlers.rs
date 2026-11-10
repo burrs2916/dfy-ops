@@ -1348,13 +1348,27 @@ pub async fn external_config_get(
         let install_dir = def.install_dir.clone();
         let cfg = blocking(move || crate::ops::edge_config::read(std::path::Path::new(&install_dir))).await;
         let path = crate::ops::edge_config::config_path(std::path::Path::new(&def.install_dir));
-        return Ok(Json(match cfg {
-            Ok(Some(c)) => serde_json::json!({
-                "ok": true,
-                "exists": true,
-                "configPath": path.display().to_string(),
-                "config": c,
-            }),
+        let res = match cfg {
+            Ok(Some(c)) => {
+                // 前端拿这份配置拼控制台 iframe 地址——顺手做全量控制台链路诊断
+                // （产物/Nginx 接入/进程/HTTP 探测逐项写 debug.log，空白问题自解释）。
+                // 后台跑，不拖慢本响应。
+                let diag_dir = def.install_dir.clone();
+                let diag_port = c.http_port.clone();
+                let diag_cloud = c.upstream_server_url.clone();
+                tokio::spawn(async move {
+                    let _ = tokio::task::spawn_blocking(move || {
+                        crate::ops::console_diag::diagnose(&diag_dir, &diag_port, &diag_cloud)
+                    })
+                    .await;
+                });
+                serde_json::json!({
+                    "ok": true,
+                    "exists": true,
+                    "configPath": path.display().to_string(),
+                    "config": c,
+                })
+            }
             Ok(None) => serde_json::json!({
                 "ok": true,
                 "exists": false,
@@ -1371,7 +1385,8 @@ pub async fn external_config_get(
                 );
                 serde_json::json!({ "ok": false, "error": e })
             }
-        }));
+        };
+        return Ok(Json(res));
     }
     let install_dir = backend_install_dir(&state, def);
     let path = crate::ops::external_config::config_path(&install_dir);
