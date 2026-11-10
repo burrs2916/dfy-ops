@@ -8,7 +8,6 @@ import {
   BuildCircleRounded,
   DashboardRounded,
   DnsOutlined,
-  HubRounded,
   MonitorHeart,
   Settings as SettingsIcon,
   SettingsOutlined,
@@ -36,7 +35,6 @@ const NAV_GROUPS: { title: string; items: { to: string; label: string; icon: Rea
     items: [
       { to: "/", label: "服务总览", icon: <DashboardRounded fontSize="small" />, end: true },
       { to: "/monitor", label: "监控中心", icon: <MonitorHeart fontSize="small" /> },
-      { to: "/edge-console", label: "边缘控制台", icon: <HubRounded fontSize="small" /> },
       { to: "/topology", label: "依赖拓扑", icon: <AccountTree fontSize="small" /> },
     ],
   },

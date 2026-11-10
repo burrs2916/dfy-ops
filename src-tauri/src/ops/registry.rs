@@ -190,36 +190,6 @@ fn builtin() -> Vec<ServiceDef> {
             description: "Vue3 管理后台，静态目录由独立的 nginx 服务统一托管反代。".into(),
         },
         ServiceDef {
-            id: "gateway-console".into(),
-            name: "Gateway Console (Angular)".into(),
-            kind: ServiceKind::AngularSpa,
-            java_major: None,
-            // 随边缘计算部署：产物装进 edge-conductor/web-console/，由
-            // edge-conductor /console/（8084）与 Nginx /console/（80）双通道托管——
-            // 无独立进程、无独立端口、无独立目录。检测语义与 dfy-ui 同构
-            // （static_site：检测 = 宿主端口 TCP 可达 + 产物就位）。
-            install_dir: "C:/services/edge-conductor".into(),
-            build_cmd: None,
-            run_cmd: String::new(),
-            ports: vec![8084],
-            process_names: vec![],
-            product_names: vec![],
-            health_url: None,
-            log_paths: vec![],
-            depends_on: vec!["edge-conductor".into()],
-            is_daemon: false,
-            third_party: false,
-            remote_only: false,
-            static_site: true,
-            requires: vec![RequiresCheck {
-                id: "web-console".into(),
-                label: "控制台产物".into(),
-                path: Some("web-console/index.html".into()),
-                port: None,
-            }],
-            description: "Angular 19 网关控制台，随边缘计算部署，edge-conductor 与 Nginx 双通道静态托管。".into(),
-        },
-        ServiceDef {
             id: "edge-conductor".into(),
             name: "Edge Conductor (Rust Axum)".into(),
             kind: ServiceKind::RustBin,
@@ -535,7 +505,7 @@ mod tests {
             assert!(d.third_party, "{id} 应标记为 thirdParty");
             assert!(d.build_cmd.is_none() && d.run_cmd.is_empty(), "{id} 平台不托管启停");
         }
-        for id in ["dfy-backend", "dfy-ui", "gateway-console", "edge-conductor"] {
+        for id in ["dfy-backend", "dfy-ui", "edge-conductor"] {
             let d = defs.iter().find(|d| d.id == id).unwrap();
             assert!(!d.third_party, "{id} 是自研服务");
             assert!(!d.remote_only, "{id} 不是纯远程服务");

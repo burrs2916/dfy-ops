@@ -12,7 +12,6 @@ import DeployPage from "./pages/DeployPage";
 import Settings from "./pages/Settings";
 import AiAssistant from "./pages/AiAssistant";
 import Topology from "./pages/Topology";
-import EdgeConsolePage from "./pages/EdgeConsolePage";
 import { useAppSettingsStore, useOpsStore } from "./store";
 
 /** 旧「运维中心 /ops?tab=x」链接兼容：v0.2.46 起各子页签已是独立路由 */
@@ -45,7 +44,6 @@ export default function App() {
         <Route path="deploy" element={<DeployPage />} />
         <Route path="ops" element={<OpsRedirect />} />
         <Route path="topology" element={<Topology />} />
-        <Route path="edge-console" element={<EdgeConsolePage />} />
         <Route path="ai" element={<AiAssistant />} />
         <Route path="settings" element={<Settings />} />
         <Route path="service/:id" element={<ServiceDetail />} />

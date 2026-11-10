@@ -51,89 +51,6 @@ fn uses_custom_titlebar() -> bool {
     cfg!(target_os = "windows")
 }
 
-/// 打开「边缘计算控制台」独立原生窗口：控制台页面（edge-conductor 托管的
-/// /console/ 静态产物）不用挤在平台主窗口的 iframe 里，像独立应用一样有
-/// 自己的任务栏图标。前端传入拼好的完整 URL（含 cloudApi= 查询参数）。
-/// 同 label 窗口已存在则仅前置聚焦，不重复开。
-#[tauri::command]
-fn open_console_window(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, Arc<AppState>>,
-    url: String,
-) -> Result<(), String> {
-    // 打开独立窗口 = 又一次控制台链路自检机会：全量诊断后台跑（产物/Nginx
-    // 接入/进程/HTTP 探测逐项写 debug.log），iframe 空白类问题日志自解释。
-    let diag_dir = state
-        .registry
-        .iter()
-        .find(|d| d.id == "edge-conductor")
-        .map(|d| d.install_dir.clone())
-        .unwrap_or_else(|| "C:/services/edge-conductor".into());
-    std::thread::spawn(move || {
-        let cfg = crate::ops::edge_config::read(std::path::Path::new(&diag_dir));
-        match cfg {
-            Ok(Some(c)) => crate::ops::console_diag::diagnose(
-                &diag_dir,
-                &c.http_port,
-                &c.upstream_server_url,
-            ),
-            _ => crate::ops::console_diag::diagnose(&diag_dir, "8084", ""),
-        }
-    });
-    // 开窗前置探测：80 通道无服务（Nginx 未装/未启动，典型如 macOS 开发机）
-    // 就不开白窗口——直接在「边缘控制台」页给出明确原因，不让用户对着
-    // 一个连接失败的白窗猜。诊断日志照常后台写（probe_80_console 有详情）。
-    if !crate::ops::health::check_tcp("127.0.0.1", 80, 800) {
-        return Err(
-            "127.0.0.1:80 无服务监听（Nginx 未安装或未启动）——边缘控制台走 Nginx 托管通道，\
-             请先在安装了边缘计算的机器上启动 Nginx；macOS 开发机无交付栈，属预期"
-                .into(),
-        );
-    }
-    // 安全校验：只允许打开本机回环的 /console/ 页面，防止被拿来开任意远程站点
-    let parsed = tauri::Url::parse(&url).map_err(|e| format!("控制台地址不合法: {e}"))?;
-    if parsed.host_str() != Some("127.0.0.1") || !parsed.path().starts_with("/console/") {
-        return Err("仅支持打开本机边缘控制台".into());
-    }
-    // 已开着 → 前置聚焦即可（不重复开一堆窗口）
-    if let Some(w) = app.get_webview_window("edge-console") {
-        let _ = w.set_focus();
-        return Ok(());
-    }
-    tauri::webview::WebviewWindowBuilder::new(&app, "edge-console", tauri::WebviewUrl::External(parsed.clone()))
-        .title("边缘计算控制台")
-        .inner_size(1280.0, 860.0)
-        .min_inner_size(960.0, 640.0)
-        // 显式声明全部系统装饰与能力：Windows 上动态建窗口偶发按钮/拖拽失效，
-        // 显式设置规避继承主窗口状态导致的交互异常
-        .decorations(true)
-        .resizable(true)
-        .maximizable(true)
-        .minimizable(true)
-        .closable(true)
-        .center()
-        .build()
-        .map(|window| {
-            debug_log::entry("console-window", "info", "open", "created", &url);
-            // Windows 实测：外部 URL 的 WebView2 窗口偶发「整个窗口无响应、点关闭
-            // 无效」——WebView2 优雅关闭流程（等待页面 JS/网络空闲）可能无限挂起。
-            // 兜底：CloseRequested 不走默认 close（等待 webview 优雅退出），
-            // 直接 destroy 强制销毁窗口与 webview 进程，保证永远关得掉。
-            let w = window.clone();
-            window.on_window_event(move |event| match event {
-                tauri::WindowEvent::CloseRequested { .. } => {
-                    debug_log::entry("console-window", "warn", "close", "close-requested-force-destroy", "");
-                    let _ = w.destroy();
-                }
-                tauri::WindowEvent::Destroyed => {
-                    debug_log::entry("console-window", "info", "close", "destroyed", "");
-                }
-                _ => {}
-            });
-        })
-        .map_err(|e| format!("打开控制台窗口失败: {e}"))
-}
-
 /// 解析 debug.log 写入路径（和 biosphere-terminal-app 的 resolve_debug_log_paths 完全同策略）：
 /// 多路径写入，总有一处能写。
 ///
@@ -237,9 +154,6 @@ pub fn run() {
                 env_rebuild: Arc::new(tokio::sync::Mutex::new(())),
                 repair: Arc::new(ops::env_repair::RepairState::default()),
             });
-            // 独立窗口 command（open_console_window）要读 registry 取边缘计算
-            // 安装目录做控制台链路诊断——AppState 挂进 Tauri managed state
-            app.manage(state.clone());
 
             // P2-f 保活看门狗：平台拉起过的常驻服务崩了自动重新拉起
             // （用户显式 stop 的会被抑制；重启间隔 30s 冷却防 crash-loop）。
@@ -275,7 +189,7 @@ pub fn run() {
             });
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![uses_custom_titlebar, open_console_window])
+        .invoke_handler(tauri::generate_handler![uses_custom_titlebar])
         .run(tauri::generate_context!())
         .expect("error while running DFY 运维平台");
 }

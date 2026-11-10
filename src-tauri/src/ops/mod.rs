@@ -1,5 +1,4 @@
 pub mod appdetect;
-pub mod console_diag;
 pub mod registry;
 pub mod process;
 pub mod health;

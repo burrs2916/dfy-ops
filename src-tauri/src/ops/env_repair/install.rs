@@ -611,202 +611,6 @@ fn find_greptimedb_dir(root: &std::path::Path) -> Option<std::path::PathBuf> {
     None
 }
 
-/// 把 gateway-console 构建产物复制到 install_dir/web-console，供 edge-conductor
-/// HTTP 服务在 /console/ 静态托管。来源优先级：
-/// ① 资源目录 web-console/（手动放的新版优先，运维可直接热更控制台）；
-/// ② 平台安装目录内置产物（exe 同级 resources/web-console，Tauri bundle
-///    resources 随平台 NSIS 一起装机）——统一打包、统一安装，无需单独
-///    准备资源目录；
-/// ③ 两处都没有 → None（纯 API 模式，不报错不阻塞安装）。
-/// 复制失败返回 Err 但由调用方降级为警告日志——控制台缺席不影响边缘计算本体。
-/// 已有产物先清空再复制（Angular 产物文件名带 hash，残留旧文件只会越积越多）。
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn integrate_web_console(
-    resource_root: Option<&std::path::Path>,
-    install_dir: &std::path::Path,
-) -> Option<Result<String, String>> {
-    // 来源①：资源目录手动放置的版本（含 index.html 才算有效产物）
-    let mut src = resource_root.and_then(|root| {
-        let d = root.join("web-console");
-        (d.is_dir() && d.join("index.html").is_file()).then_some(d)
-    });
-    // 来源②：平台内置产物（NSIS 装机后 exe 同级 resources/web-console）
-    if src.is_none() {
-        if let Ok(exe) = std::env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                let bundled = exe_dir.join("resources").join("web-console");
-                if bundled.is_dir() && bundled.join("index.html").is_file() {
-                    src = Some(bundled);
-                }
-            }
-        }
-    }
-    let src = src?;
-    let dst = install_dir.join("web-console");
-    Some((|| {
-        if dst.is_dir() {
-            std::fs::remove_dir_all(&dst).map_err(|e| format!("清理旧控制台产物失败：{e}"))?;
-        }
-        let n = copy_dir_recursive(&src, &dst)?;
-        // 防呆：产物 <base href> 必须是 /console/（Nginx 托管前缀）。
-        // 资源目录里的产物可能是运维本地 `ng build` 出的（base="/"）——那种产物
-        // 装上后脚本/样式全部 404，控制台白屏。统一强制改写，来源配置问题不再致命。
-        let index = dst.join("index.html");
-        if let Ok(html) = std::fs::read_to_string(&index) {
-            if let Some(start) = html.find("<base href=\"") {
-                let rest = &html[start + "<base href=\"".len()..];
-                let end = rest.find('"').map(|i| start + "<base href=\"".len() + i);
-                if let Some(end) = end {
-                    let current = &html[start + "<base href=\"".len()..end];
-                    if current != "/console/" {
-                        let fixed = format!(
-                            "{}<base href=\"/console/\">{}",
-                            &html[..start],
-                            &html[end + 1..]
-                        );
-                        match std::fs::write(&index, fixed) {
-                            Ok(()) => crate::debug_log::entry(
-                                crate::debug_log::APP_SCOPE,
-                                "WARN",
-                                "install",
-                                "console_base_fixed",
-                                &format!("控制台产物 base href 是 {current:?}（正确为 /console/，产物构建时缺 --base-href /console/），已自动改写——不改写会白屏"),
-                            ),
-                            Err(e) => crate::debug_log::entry(
-                                crate::debug_log::APP_SCOPE,
-                                "ERROR",
-                                "install",
-                                "console_base_fix_failed",
-                                &format!("base href 改写失败：{e}（该产物在 /console/ 下会白屏）"),
-                            ),
-                        }
-                    }
-                }
-            }
-        }
-        // 记录入口 chunk 名：排查「部署成功但页面仍旧」时一眼分辨产物新旧
-        let entry = std::fs::read_dir(&dst)
-            .ok()
-            .and_then(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .find(|e| {
-                        e.file_name().to_string_lossy().starts_with("main-")
-                            && e.file_name().to_string_lossy().ends_with(".js")
-                    })
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-            })
-            .unwrap_or_else(|| "?".into());
-        Ok(format!(
-            "已部署边缘控制台：{n} 个文件 → {}（入口 {entry}；由 edge-conductor /console/ 与 Nginx /console/ 双通道托管）",
-            dst.display()
-        ))
-    })())
-}
-
-/// 把边缘控制台接入 Nginx（与云端前端同通道，80 端口下直接访问）：
-/// - `location = /console`：裸路径 301 重定向到带斜杠版本（否则落到云端 SPA 404）
-/// - `location /console/`：静态托管安装目录的 web-console 产物
-/// - `location /api/`：反代 edge-conductor 8084（控制台同源调 API，免 CORS）
-///
-/// 幂等（带标记块，重装自动更新）；改前备份 conf，`nginx -t` 校验失败自动回滚，
-/// 绝不让云端前端跟着遭殃。未装 Nginx 时静默跳过。
-#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
-fn integrate_nginx_console(install_dir: &std::path::Path) -> Option<Result<String, String>> {
-    let home = std::path::Path::new("C:/services/nginx");
-    if !home.join("nginx.exe").is_file() {
-        return None; // 未装 Nginx：控制台走 edge-conductor 自托管通道即可
-    }
-    let conf = home.join("conf").join("nginx.conf");
-    let original = match std::fs::read_to_string(&conf) {
-        Ok(s) => s,
-        Err(e) => return Some(Err(format!("读取 {} 失败：{e}", conf.display()))),
-    };
-
-    const BEGIN: &str = "# >>> dfy-ops edge-console (auto) >>>";
-    const END: &str = "# <<< dfy-ops edge-console (auto) <<<";
-    // 幂等：剔除旧标记块（重装更新）
-    let cleaned = match (original.find(BEGIN), original.find(END)) {
-        (Some(b), Some(e)) => {
-            let end = original[e..].find('\n').map(|i| e + i + 1).unwrap_or(e + END.len());
-            format!("{}{}", &original[..b], &original[end..])
-        }
-        _ => original.clone(),
-    };
-
-    let console_dir = install_dir.join("web-console").to_string_lossy().replace('\\', "/");
-    let block = format!(
-        "{BEGIN}\n    \
-         # 边缘计算控制台：静态产物 + 网关 API 反代（dfy-ops 自动生成，重装边缘计算自动更新；手动改动会被覆盖）\n    \
-         location = /console {{\n        \
-         return 301 /console/;\n    \
-         }}\n    \
-         location /console/ {{\n        \
-         alias {console_dir}/;\n        \
-         index index.html;\n        \
-         try_files $uri $uri/ /console/index.html;\n    \
-         }}\n    \
-         location /api/ {{\n        \
-         proxy_pass http://127.0.0.1:8084;\n        \
-         proxy_http_version 1.1;\n        \
-         proxy_set_header Host $host;\n        \
-         proxy_set_header X-Real-IP $remote_addr;\n    \
-         }}\n{END}\n"
-    );
-
-    // 插入点：第一个 `location /`（云端前端 fallback，必在 80 端口 server 块内）。
-    // nginx 按「最长前缀优先」匹配，/console/ /api/ 不受插入顺序影响。
-    let anchor = match cleaned.lines().enumerate().find(|(_, l)| {
-        let t = l.trim();
-        t == "location / {" || t == "location /{"
-    }) {
-        Some((i, _)) => i,
-        None => return Some(Err("nginx.conf 中未找到 location / 块，无法定位插入点（请通过配置中心手工接入）".into())),
-    };
-    let indent = cleaned
-        .lines()
-        .nth(anchor)
-        .map(|l| l[..l.len() - l.trim_start().len()].to_string())
-        .unwrap_or_default();
-    // 按锚点行缩进重排块内容
-    let block = block
-        .lines()
-        .map(|l| if l.trim().is_empty() { l.to_string() } else { format!("{indent}{}", l.trim_start()) })
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut patched_lines: Vec<String> = cleaned.lines().map(str::to_string).collect();
-    patched_lines.insert(anchor, block);
-
-    // 备份 + 写回 + nginx -t 校验（失败回滚）
-    let bak = home.join("conf").join("nginx.conf.bak-edge-console");
-    let _ = std::fs::write(&bak, &original);
-    let patched = patched_lines.join("\n");
-    if let Err(e) = std::fs::write(&conf, &patched) {
-        return Some(Err(format!("写回 nginx.conf 失败：{e}")));
-    }
-    let prefix = format!("{}/", home.to_string_lossy().replace('\\', "/"));
-    let test_ok = std::process::Command::new(home.join("nginx.exe"))
-        .args(["-p", &prefix, "-c", "conf/nginx.conf", "-t"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if !test_ok {
-        let _ = std::fs::write(&conf, &original); // 回滚，云端前端不受影响
-        return Some(Err(
-            "nginx -t 校验未通过，已回滚 nginx.conf（备份在 conf/nginx.conf.bak-edge-console）".into(),
-        ));
-    }
-    // reload 使其生效；nginx 未运行时 reload 失败无碍——下次启动自然加载新配置
-    let reloaded = std::process::Command::new(home.join("nginx.exe"))
-        .args(["-p", &prefix, "-c", "conf/nginx.conf", "-s", "reload"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    Some(Ok(format!(
-        "已把边缘控制台接入 Nginx：http://127.0.0.1/console/（/api/ 反代 8084）{}",
-        if reloaded { "，已热加载生效" } else { "（nginx 未运行，下次启动自动生效）" }
-    )))
-}
-
 /// 把资源目录的 greptimedb 目录整合到 install_dir/greptimedb。
 /// 程序 zip 自带（greptime.exe 已在）时跳过；资源目录没有时明确报错——
 /// edge-conductor 没有时序库起不来，宁可装一半失败也不装个残缺的。
@@ -1004,8 +808,7 @@ async fn run_edge_dir_install(
     }
     // ===== 整合 greptimedb =====
     state.patch(|j| j.stage = "greptimedb".into());
-    // 专用克隆喂闭包（Windows-only 分支 mac 编译不到，E0382 只有 CI 能拦）；
-    // rdir/idd 保留在闭包外给后续 web-console 部署继续用
+    // 专用克隆喂闭包（Windows-only 分支 mac 编译不到，E0382 只有 CI 能拦）
     let rdir_for_gt = resource_dir.clone();
     let idd_for_gt = install_dir.clone();
     let gt = tokio::task::spawn_blocking(move || {
@@ -1024,23 +827,6 @@ async fn run_edge_dir_install(
         Err(e) => {
             finish(state, env_cache, false, format!("GreptimeDB 整合任务异常：{e}")).await;
             return;
-        }
-    }
-    // ===== 部署边缘控制台（可选）：资源目录 web-console/ 存在才复制 =====
-    if let Some(r) = integrate_web_console(
-        Some(std::path::Path::new(&resource_dir)),
-        std::path::Path::new(&install_dir),
-    ) {
-        match r {
-            Ok(msg) => state.log(msg),
-            Err(e) => state.log(format!("警告：边缘控制台部署失败（不影响边缘计算本体）：{e}")),
-        }
-    }
-    // 控制台接入 Nginx（80 端口同通道，与云端前端一致）；未装 nginx 自动跳过
-    if let Some(r) = integrate_nginx_console(std::path::Path::new(&install_dir)) {
-        match r {
-            Ok(msg) => state.log(msg),
-            Err(e) => state.log(format!("警告：控制台接入 Nginx 失败（edge-conductor 自托管通道不受影响）：{e}")),
         }
     }
     // ===== 验证 =====
@@ -1935,7 +1721,7 @@ async fn run_zip_install(
         let zroot = std::path::Path::new(&zip_path)
             .parent()
             .map(|p| p.to_path_buf());
-        // 专用克隆喂闭包（zroot/idd 保留给闭包外 web-console 部署继续用）
+        // 专用克隆喂闭包（Windows-only 分支 mac 编译不到，E0382 只有 CI 能拦）
         let zroot_for_gt = zroot.clone();
         let idd_for_gt = install_dir.clone();
         let gt = tokio::task::spawn_blocking(move || {
@@ -1951,24 +1737,6 @@ async fn run_zip_install(
             Err(e) => {
                 finish(state, env_cache, false, format!("GreptimeDB 整合任务异常：{e}")).await;
                 return;
-            }
-        }
-        // ===== 部署边缘控制台（可选）：资源目录 web-console/ 存在才复制 =====
-        if let Some(r) = integrate_web_console(zroot.as_deref(), std::path::Path::new(&install_dir)) {
-            match r {
-                Ok(msg) => state.log(msg),
-                Err(e) => state.log(format!(
-                    "警告：边缘控制台部署失败（不影响边缘计算本体）：{e}"
-                )),
-            }
-        }
-        // 控制台接入 Nginx（80 端口同通道，与云端前端一致）；未装 nginx 自动跳过
-        if let Some(r) = integrate_nginx_console(std::path::Path::new(&install_dir)) {
-            match r {
-                Ok(msg) => state.log(msg),
-                Err(e) => state.log(format!(
-                    "警告：控制台接入 Nginx 失败（edge-conductor 自托管通道不受影响）：{e}"
-                )),
             }
         }
     }
