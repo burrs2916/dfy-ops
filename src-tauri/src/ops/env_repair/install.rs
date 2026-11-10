@@ -511,6 +511,7 @@ pub fn start_zip_install(
         && target != "java"
         && target != "dfy-ui"
         && target != "edge-conductor"
+        && target != "gateway-console"
     {
         return Err(format!(
             "{} 没有免安装版（zip）安装管线，请使用 MSI 安装包或 AI 方案",
