@@ -66,7 +66,7 @@ export const theme = createTheme({
     MuiButton: {
       defaultProps: { disableElevation: true },
       styleOverrides: {
-        root: { borderRadius: 8, paddingInline: 14 },
+        root: { borderRadius: 8, paddingInline: 14, whiteSpace: "nowrap" },
         sizeSmall: { paddingInline: 10, fontSize: "0.78rem" },
         containedPrimary: {
           boxShadow: "none",

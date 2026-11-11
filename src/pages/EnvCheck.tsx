@@ -347,16 +347,23 @@ export default function EnvCheck() {
   return (
     <Stack spacing={2}>
       {/* 头部 */}
-      <Stack direction="row" justifyContent="space-between" alignItems="flex-start">
-        <Box>
+      <Stack
+        direction="row"
+        justifyContent="space-between"
+        alignItems="flex-start"
+        flexWrap="wrap"
+        useFlexGap
+        spacing={1.5}
+      >
+        <Box sx={{ minWidth: 0 }}>
           <Typography variant="h5" sx={{ fontWeight: 700 }}>
             修复中心
           </Typography>
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25 }}>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.25, maxWidth: { sm: 560, lg: 720 } }}>
             仅检测运行时依赖（不含构建工具）· 部署产物已预置，此处验证各服务"能否跑起来"
           </Typography>
         </Box>
-        <Stack direction="row" spacing={1} alignItems="center">
+        <Stack direction="row" spacing={1} alignItems="center" sx={{ flexShrink: 0 }}>
           <Button
             variant="outlined"
             color={pollingActive ? "success" : "inherit"}
@@ -470,18 +477,21 @@ export default function EnvCheck() {
                   <Divider orientation="vertical" flexItem sx={{ mx: 0.5 }} />
                   <Stat value={ackedCount} label="已知悉" />
                   <Box sx={{ flexGrow: 1 }} />
-                  <FormControlLabel
-                    control={
-                      <Switch size="small" checked={onlyProblems} onChange={(e) => setOnlyProblems(e.target.checked)} />
-                    }
-                    label="仅看问题项"
-                  />
-                  <FormControlLabel
-                    control={
-                      <Switch size="small" checked={hideAcked} onChange={(e) => setHideAcked(e.target.checked)} />
-                    }
-                    label="隐藏已知悉"
-                  />
+                  {/* 两个过滤开关成组：同进同退，窄宽度下不会一个在行内一个掉行 */}
+                  <Stack direction="row" spacing={1.5} alignItems="center" sx={{ flexShrink: 0 }}>
+                    <FormControlLabel
+                      control={
+                        <Switch size="small" checked={onlyProblems} onChange={(e) => setOnlyProblems(e.target.checked)} />
+                      }
+                      label="仅看问题项"
+                    />
+                    <FormControlLabel
+                      control={
+                        <Switch size="small" checked={hideAcked} onChange={(e) => setHideAcked(e.target.checked)} />
+                      }
+                      label="隐藏已知悉"
+                    />
+                  </Stack>
                 </Stack>
               </Paper>
 

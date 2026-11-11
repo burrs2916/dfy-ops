@@ -258,7 +258,7 @@ export default function Dashboard() {
     <Stack spacing={3}>
       <PageHeader
         title="服务总览"
-        description="全部服务的运行状态、环境健康与部署就绪度一屏总览；异常项有直达修复入口"
+        description="运行状态、环境健康与部署就绪度一屏总览，异常项直达修复"
         actions={
           <>
             <Button variant="text" startIcon={<Refresh />} onClick={manualRefresh}>

@@ -36,13 +36,21 @@ export function PageHeader({
           </Typography>
         </Stack>
         {description && (
-          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: 720 }}>
+          <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5, maxWidth: { sm: 560, lg: 720 } }}>
             {description}
           </Typography>
         )}
       </Box>
       {actions && (
-        <Stack direction="row" spacing={1.25} alignItems="center" sx={{ flexShrink: 0 }}>
+        <Stack
+          direction="row"
+          spacing={1.25}
+          alignItems="center"
+          justifyContent="flex-end"
+          flexWrap="wrap"
+          useFlexGap
+          sx={{ flexShrink: 0 }}
+        >
           {actions}
         </Stack>
       )}
