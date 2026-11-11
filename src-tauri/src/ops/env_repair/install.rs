@@ -1013,8 +1013,25 @@ async fn run_edge_dir_install(
     };
     // edge-conductor：部署即全新安装（2026-11-11 定案）——复制前清空旧安装目录
     //（旧程序、旧数据、旧配置一并清除），杜绝旧 config.toml 幸存带旧地址跑
+    // 护源防护：源就在安装目录内（资源目录与安装目录配成同一处的极端配置）时
+    // 跳过清空——否则安装源连同旧数据一起被销毁，复制必然失败且用户资源丢失
+    let src_inside_install = match &src {
+        EdgeSource::Dir(d) => {
+            let d = d.canonicalize().ok();
+            let t = std::path::Path::new(&install_dir).canonicalize().ok();
+            matches!((d, t), (Some(d), Some(t)) if d == t || d.starts_with(&t))
+        }
+        EdgeSource::Exe(p) => p
+            .canonicalize()
+            .ok()
+            .zip(std::path::Path::new(&install_dir).canonicalize().ok())
+            .map(|(p, t)| p.starts_with(&t))
+            .unwrap_or(false),
+    };
     let old_dir = std::path::Path::new(&install_dir);
-    if old_dir.is_dir() && std::fs::read_dir(old_dir).map(|d| d.count()).unwrap_or(0) > 0 {
+    if src_inside_install {
+        state.log("安装源位于安装目录内，跳过清空（防止销毁安装源），按覆盖更新处理");
+    } else if old_dir.is_dir() && std::fs::read_dir(old_dir).map(|d| d.count()).unwrap_or(0) > 0 {
         state.log(format!(
             "检测到旧版 {label} 安装目录，先清空（部署即全新安装：旧程序/旧数据/旧配置一并清除）"
         ));
@@ -1924,7 +1941,17 @@ async fn run_zip_install(
     // 命中「已就位」跳过写入，新版本永远带着旧地址跑（VerneMQ 127.0.0.1 连接被拒事故）
     if target == "edge-conductor" {
         let old = std::path::Path::new(&install_dir);
-        if old.is_dir() && std::fs::read_dir(old).map(|d| d.count()).unwrap_or(0) > 0 {
+        // 护源防护：安装包本身在安装目录内时跳过清空（极端配置下清空会销毁 zip，
+        // 解压必然失败——与其失败丢源，不如跳过清空按覆盖更新走，只留痕说明）
+        let zip_inside_install = std::path::Path::new(&zip_path)
+            .canonicalize()
+            .ok()
+            .zip(std::path::Path::new(&install_dir).canonicalize().ok())
+            .map(|(z, t)| z.starts_with(&t))
+            .unwrap_or(false);
+        if zip_inside_install {
+            state.log("安装包位于安装目录内，跳过清空（防止销毁安装源），按覆盖更新处理");
+        } else if old.is_dir() && std::fs::read_dir(old).map(|d| d.count()).unwrap_or(0) > 0 {
             state.log(format!(
                 "检测到旧版 {label} 安装目录，先清空（部署即全新安装：旧程序/旧数据/旧配置一并清除）"
             ));
