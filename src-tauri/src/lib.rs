@@ -238,6 +238,7 @@ pub fn run() {
                 config_dir,
                 env_cache: Arc::new(Mutex::new(None)),
                 env_rebuild: Arc::new(tokio::sync::Mutex::new(())),
+                probes: ops::environment::ProbeCache::default(),
                 repair: Arc::new(ops::env_repair::RepairState::default()),
             });
 

@@ -124,29 +124,43 @@ fn probe(cmd: &str, args: &[&str]) -> Option<String> {
         .map(|l| l.trim().to_string())
 }
 
-/// 一次全量检查会话内共享的探测缓存：同一命令（java -version / nginx -v / node -v）
-/// 只真正执行一次子进程调用，其余服务复用结果。
+/// 探测条目的缓存有效期：与全量环境报告缓存（handlers 的 ENV_CACHE_TTL=60s）
+/// 同窗长——报告到期重探时探测条目恰好也到期，两者不会互相供给超期数据。
+const PROBE_TTL: Duration = Duration::from_secs(60);
+
+/// 跨请求共享的探测缓存：同一命令（java -version / nginx -v / node -v）
+/// 在 TTL 内只真正执行一次子进程调用，全量/单服务检查复用结果。
 ///
 /// 全量检查并行化后，多个 Vertx 服务会同时要 `java -version`——不共享就是
 /// N 次 JVM 冷启动（每次 0.3-1s）。锁内查、锁外探，并发重复探测天然收敛为一次。
+/// AppState 持有全局实例（单服务检查不再每次冷启 java）；force 全量重检入口
+/// 调用 clear()——「重新检查」语义 = 彻底新探，装完 JDK 后的复检不允许
+/// 被 60s 内的旧探测结果（「未安装」）污染。
 #[derive(Default)]
 pub struct ProbeCache {
-    map: Mutex<HashMap<String, Option<String>>>,
+    map: Mutex<HashMap<String, (Instant, Option<String>)>>,
 }
 
 impl ProbeCache {
     fn probe(&self, cmd: &str, args: &[&str]) -> Option<String> {
         let key = format!("{cmd}?{}", args.join(" "));
-        if let Some(v) = self.map.lock().unwrap().get(&key) {
-            return v.clone();
+        if let Some((at, v)) = self.map.lock().unwrap().get(&key) {
+            if at.elapsed() < PROBE_TTL {
+                return v.clone();
+            }
         }
         let v = probe(cmd, args);
-        self.map.lock().unwrap().insert(key, v.clone());
+        self.map.lock().unwrap().insert(key, (Instant::now(), v.clone()));
         v
+    }
+
+    /// 清空全部探测缓存（force 全量重检时调用：立即重探，不受剩余 TTL 影响）。
+    pub fn clear(&self) {
+        self.map.lock().unwrap().clear();
     }
 }
 
-/// 会话缓存的探测入口：cache=None 时直接探测（单服务检查量小，无需共享）。
+/// 会话缓存的探测入口：cache=None 时直接探测（测试等无缓存上下文的调用方）。
 fn probe_cached(cache: Option<&ProbeCache>, cmd: &str, args: &[&str]) -> Option<String> {
     match cache {
         Some(c) => c.probe(cmd, args),
@@ -400,21 +414,25 @@ fn detect_webview2() -> Option<String> {
 ///
 /// 范围限定：仅探测“能否跑起来”所需的运行时依赖，**不含任何构建工具链**。
 ///
-/// 检查模型（三段，全部声明驱动、零硬编码端口/路径）：
+/// 检查模型（全部声明驱动、零硬编码端口/路径）：
 /// 1. **运行时检查**（kind 特有）：Java/WebView2/前端运行方式等；
-/// 2. **requires 声明检查**（`ServiceDef.requires`）：路径/端口由配置声明；
-/// 3. **dependsOn 依赖检查**：直接引用被依赖服务的实时状态（同一份「进程是事实来源」
+/// 2. **服务状态**（所有服务统一）：进程是事实来源 + 端口就绪分级——
+///    有就是有、没有就是没有，未运行/端口未就绪必须如实出项并给出路；
+/// 3. **requires 声明检查**（`ServiceDef.requires`）：路径/端口由配置声明；
+/// 4. **dependsOn 依赖检查**：直接引用被依赖服务的实时状态（同一份「进程是事实来源」
 ///    检测结果），依赖未运行即 Fail（启动它没有意义）、运行但端口不可达即 Warn。
 ///
-/// `states`：全部服务的实时状态视图（调用方从 to_status 构建）。
-/// `cache`：全量检查共享的探测会话缓存；单服务检查传 None。
+/// `states`：全部服务的实时状态视图（调用方从 to_status 构建）——
+/// 进程/端口/端点结论全部复用该视图的既有实测，不在检查内重复探测。
+/// `cache`：跨请求共享的探测缓存（java -version 等子进程调用，60s TTL）。
 pub fn check_service_env_with(
     def: &ServiceDef,
     states: &DepStates,
     cache: Option<&ProbeCache>,
 ) -> ServiceEnvReport {
     let mut items: Vec<CheckItem> = Vec::new();
-    let running = states.get(&def.id).map(|s| s.running).unwrap_or(false);
+    let st = states.get(&def.id);
+    let running = st.map(|s| s.running).unwrap_or(false);
 
     // ===== 1. 运行时检查（kind 特有） =====
     match def.kind {
@@ -455,80 +473,9 @@ pub fn check_service_env_with(
             }
         }
         ServiceKind::MqttBroker | ServiceKind::ObjectStorage | ServiceKind::Database => {
-            // 第三方中间件（VerneMQ/MinIO/MySQL/Redis/GreptimeDB）：本身就是外部依赖，平台只检测不托管。
-            // 纯远程形态（remoteOnly：Redis/VerneMQ/MinIO/GreptimeDB）：检测 = 托管端点 TCP 可达；
-            // 不可达时统一引导用户去「远程部署」配置页（不再提示本地安装）。
-            if let Some((host, port)) = states.get(&def.id).and_then(|s| s.remote.as_ref()) {
-                let ok = health::check_tcp(host, *port, 800);
-                let ep = format!("{host}:{port}");
-                // GreptimeDB 是「捆绑本地化」：端点读自 edge-conductor 的 config.toml，
-                // 是它自己的子进程——按远程端点措辞会误导运维（2026-11-11 生产反馈：
-                // 「我们的端点是跟随边缘计算一起启动的」）。捆绑/远程分别如实措辞。
-                let bundled = def.id == "greptime";
-                let (actual, expected) = if ok {
-                    if bundled {
-                        (
-                            format!("捆绑端点 {ep} 可达（随边缘计算启动）"),
-                            format!("捆绑端点 {ep} 可达"),
-                        )
-                    } else {
-                        (
-                            format!("远程端点 {ep} 可达（TCP 连通）"),
-                            format!("远程端点 {ep} 可达"),
-                        )
-                    }
-                } else if bundled {
-                    (
-                        format!("捆绑端点 {ep} 不可达——请到「修复中心」启动边缘计算后重新检测"),
-                        format!("捆绑端点 {ep} 可达（随边缘计算启动）"),
-                    )
-                } else {
-                    (
-                        format!("远程端点 {ep} 不可达——请先在「远程部署」配置页检查地址与密码设置"),
-                        format!("远程端点 {ep} 可达"),
-                    )
-                };
-                items.push(item(
-                    &format!("service-{}", def.id),
-                    "服务状态",
-                    "外部依赖",
-                    &expected,
-                    &actual,
-                    if ok {
-                        CheckStatus::Pass
-                    } else {
-                        CheckStatus::Fail
-                    },
-                ));
-            } else if running {
-                items.push(item(
-                    "service-state",
-                    "服务状态",
-                    "外部依赖",
-                    "已安装并处于运行状态",
-                    "服务运行中（进程/端口检测）",
-                    CheckStatus::Pass,
-                ));
-            } else {
-                let mut it = item(
-                    &format!("service-{}", def.id),
-                    "服务状态",
-                    "外部依赖",
-                    "已安装并处于运行状态",
-                    "未检测到运行",
-                    CheckStatus::Warn,
-                );
-                // 手动安装过的机器（服务已注册/目录存在）建议是「启动」，不是重装——
-                // 引导去装第二份 MySQL 反而制造冲突
-                if def.id == "mysql" {
-                    if let Some(src) = detect_mysql_install() {
-                        it.fix_hint = format!(
-                            "本机已安装 MySQL（{src}），但服务未运行——请在 Windows 服务管理器启动 MySQL 服务，或到「修复中心 → 安装维护」操作后重新检查"
-                        );
-                    }
-                }
-                items.push(it);
-            }
+            // 第三方中间件（VerneMQ/MinIO/MySQL/Redis/GreptimeDB）的服务状态
+            // 已上收为 match 后的统一「服务状态」段（远程端点 / 未配置 / 运行分级 /
+            // 未运行四分支），此处不再单独出项。
         }
         ServiceKind::TauriApp => {
             // Tauri 桌面客户端：WebView2 是 Windows 专属依赖；运行中则事实已回答。
@@ -576,7 +523,152 @@ pub fn check_service_env_with(
         }
     }
 
-    // ===== 2. requires 声明检查（配置驱动，零硬编码） =====
+    // ===== 2. 服务状态（所有被托管/第三方服务统一：进程是事实来源 + 端口就绪分级） =====
+    // 此前只有第三方中间件出「服务状态」项：edge-conductor、dfy-backend、nginx、
+    // 前端静态站「进程没在跑」时报告里连一条状态项都没有——「有就是有，没有就是没有」
+    // 要求每个服务都给出如实反馈（2026-11-11 生产反馈：已启动的被报缺失、未启动的
+    // 毫无提示）。TauriApp 在 kind 分支内自带状态表述（WebView2 / 进程级检测），不重复。
+    if !matches!(def.kind, ServiceKind::TauriApp) {
+        if let Some((host, port)) = st.and_then(|s| s.remote.as_ref()) {
+            // 托管远程端点（remoteOnly / third_party）：结论复用 states 构建时的
+            // TCP 实测（同一请求内刚测过，不再重复探测）。
+            // GreptimeDB 是「捆绑本地化」：端点读自 edge-conductor 的 config.toml，
+            // 是它自己的子进程——按远程端点措辞会误导运维（2026-11-11 生产反馈：
+            // 「我们的端点是跟随边缘计算一起启动的」）。捆绑/远程分别如实措辞。
+            let ok = st.map(|s| s.running && s.healthy).unwrap_or(false);
+            let ep = format!("{host}:{port}");
+            let bundled = def.id == "greptime";
+            let (actual, expected) = if ok {
+                if bundled {
+                    (
+                        format!("捆绑端点 {ep} 可达（随边缘计算启动）"),
+                        format!("捆绑端点 {ep} 可达"),
+                    )
+                } else {
+                    (
+                        format!("远程端点 {ep} 可达（TCP 连通）"),
+                        format!("远程端点 {ep} 可达"),
+                    )
+                }
+            } else if bundled {
+                (
+                    format!("捆绑端点 {ep} 不可达——请到「修复中心」启动边缘计算后重新检测"),
+                    format!("捆绑端点 {ep} 可达（随边缘计算启动）"),
+                )
+            } else {
+                (
+                    format!("远程端点 {ep} 不可达——请先在「远程部署」配置页检查地址与密码设置"),
+                    format!("远程端点 {ep} 可达"),
+                )
+            };
+            items.push(item(
+                &format!("service-{}", def.id),
+                "服务状态",
+                "外部依赖",
+                &expected,
+                &actual,
+                if ok {
+                    CheckStatus::Pass
+                } else {
+                    CheckStatus::Fail
+                },
+            ));
+        } else if def.remote_only {
+            // 纯远程服务从未配置端点 = 该功能未启用（与 dependsOn 段同一口径）：
+            // 本机必然没有进程/端口可查，如实说明「未配置」，不误报「未运行/缺失」
+            items.push(item(
+                &format!("service-{}", def.id),
+                "服务状态",
+                "外部依赖",
+                "远程端点可达，或该功能明确未启用",
+                "未配置远程端点（视为未启用该功能，不影响使用）",
+                CheckStatus::Pass,
+            ));
+        } else if running {
+            // 进程在 ≠ 一定可用：端口就绪才是「能用」的证据。就绪结论复用 states
+            // 的健康实测（进程反查端口 / 配置端口 TCP，同一请求内刚测过，零重复探测），
+            // 通 = Pass、不通 = Warn——如实反馈「启动中或异常」并给出重检/查日志的路。
+            let healthy = st.map(|s| s.healthy).unwrap_or(false);
+            // edge-conductor 端口可在配置中心修改：展示与判定跟随 config.toml 实际值
+            //（与 to_status / managed_healthy 同源，改过端口后不误报未就绪）
+            let ports = if def.id == "edge-conductor" {
+                crate::ops::edge_config::effective_ports(
+                    std::path::Path::new(&def.install_dir),
+                    &def.ports,
+                )
+            } else {
+                st.map(|s| s.ports.clone()).unwrap_or_default()
+            };
+            let ports_txt = ports
+                .iter()
+                .map(|p| p.to_string())
+                .collect::<Vec<_>>()
+                .join("/");
+            let (actual, status) = if healthy {
+                if ports_txt.is_empty() {
+                    ("服务运行中（进程检测通过）".to_string(), CheckStatus::Pass)
+                } else {
+                    (
+                        format!("服务运行中（端口 {ports_txt} 就绪）"),
+                        CheckStatus::Pass,
+                    )
+                }
+            } else if ports_txt.is_empty() {
+                (
+                    "进程在，健康检查未通过（启动中或异常——稍候重检）".to_string(),
+                    CheckStatus::Warn,
+                )
+            } else {
+                (
+                    format!("进程在，端口 {ports_txt} 未就绪（启动中或异常——稍候重检；持续未就绪请到「监控中心」查看服务日志）"),
+                    CheckStatus::Warn,
+                )
+            };
+            let mut it = item(
+                "service-state",
+                "服务状态",
+                "运行状态",
+                "已安装并处于运行状态",
+                &actual,
+                status,
+            );
+            if it.status == CheckStatus::Warn {
+                it.fix_hint =
+                    "端口未就绪——刚启动请稍候 10-30 秒点「重新检查」；持续未就绪请到「监控中心」查看该服务日志排查启动失败原因".into();
+            }
+            items.push(it);
+        } else {
+            // 没有就是没有：如实出「未检测到运行」（Warn），并给出路——
+            // 已装过的引导「启动」而非重装
+            let mut it = item(
+                &format!("service-{}", def.id),
+                "服务状态",
+                "运行状态",
+                "已安装并处于运行状态",
+                "未检测到运行",
+                CheckStatus::Warn,
+            );
+            if def.id == "mysql" {
+                // 手动安装过的机器（服务已注册/目录存在）建议是「启动」，不是重装——
+                // 引导去装第二份 MySQL 反而制造冲突；无任何安装痕迹时保留默认安装提示
+                if let Some(src) = detect_mysql_install() {
+                    it.fix_hint = format!(
+                        "本机已安装 MySQL（{src}），但服务未运行——请在 Windows 服务管理器启动 MySQL 服务，或到「修复中心 → 安装维护」操作后重新检查"
+                    );
+                }
+            } else if def.static_site {
+                it.fix_hint = "静态托管站点未运行——页面由宿主 nginx 直出：请到「修复中心 → 安装维护」启动 nginx 并确认部署产物就位后重新检测".into();
+            } else if !def.run_cmd.is_empty() {
+                it.fix_hint = format!(
+                    "未运行——请到「修复中心 → 安装维护」页签启动 {}，或在服务总览卡片点击启动后重新检测",
+                    def.name
+                );
+            }
+            items.push(it);
+        }
+    }
+
+    // ===== 3. requires 声明检查（配置驱动，零硬编码） =====
     for req in &def.requires {
         let (ok, actual, expected) = match (&req.path, &req.port) {
             (Some(p), _) => {
@@ -615,7 +707,7 @@ pub fn check_service_env_with(
         items.push(item(req.check_id(), &req.label, "外部依赖", &expected, &actual, status));
     }
 
-    // ===== 3. dependsOn 依赖检查（引用被依赖服务的实时状态，同一事实来源） =====
+    // ===== 4. dependsOn 依赖检查（引用被依赖服务的实时状态，同一事实来源） =====
     for dep_id in &def.depends_on {
         let it = match states.get(dep_id) {
             Some(dep) => {
@@ -855,15 +947,23 @@ mod tests {
         assert_ne!(jar.status, CheckStatus::Pass);
         assert!(!jar.fix_hint.is_empty(), "jar 缺失必须带修复提示");
 
-        // 除 jar 外不允许其他非 Pass（Java 版本、依赖检查都应通过）
+        // 未运行必须如实出「服务状态」项并引导启动（有就是有，没有就是没有）
+        let svc = report
+            .items
+            .iter()
+            .find(|i| i.id == "service-dfy-backend")
+            .expect("未运行的服务必须出状态项");
+        assert_eq!(svc.status, CheckStatus::Warn);
+        assert!(svc.fix_hint.contains("启动"), "未运行应引导启动: {}", svc.fix_hint);
+        // 除 jar 与「服务状态」外不允许其他非 Pass（Java 版本、依赖检查都应通过）
         let others: Vec<&CheckItem> = report
             .items
             .iter()
-            .filter(|i| i.id != "jar" && i.status != CheckStatus::Pass)
+            .filter(|i| i.id != "jar" && !i.id.starts_with("service-") && i.status != CheckStatus::Pass)
             .collect();
         assert!(
             others.is_empty(),
-            "dfy-backend 除 jar 产物外不应有其他非 Pass 项: {:?}",
+            "dfy-backend 除 jar 产物/服务状态外不应有其他非 Pass 项: {:?}",
             others
         );
     }
@@ -1011,6 +1111,79 @@ mod tests {
         let report2 = check_service_env_with(&def, &st, None);
         let m2 = report2.items.iter().find(|i| i.id == "dep-minio").unwrap();
         assert_eq!(m2.status, CheckStatus::Fail, "已配置端点不可达应 Fail");
+
+        // 纯远程服务自身从未配置端点 = 未启用：出 Pass 状态项如实说明，
+        // 不得报「未检测到运行」告警（本机本来就不可能有进程）
+        let vernemq = def_of("vernemq");
+        assert!(vernemq.remote_only, "VerneMQ 必须声明为 remoteOnly");
+        let report3 = check_service_env_with(&vernemq, &DepStates::new(), None);
+        let it = report3
+            .items
+            .iter()
+            .find(|i| i.id == "service-vernemq")
+            .expect("必须出服务状态项");
+        assert_eq!(
+            it.status,
+            CheckStatus::Pass,
+            "未配置远程端点应视为未启用: {}",
+            it.actual
+        );
+        assert!(
+            it.actual.contains("未配置远程端点"),
+            "文案应如实说明未配置: {}",
+            it.actual
+        );
+    }
+
+    /// 「有就是有，没有就是没有」：edge-conductor 没在跑时必须出「服务状态」项，
+    /// 且引导「启动」而非重装——此前 RustBin/Vertx/静态站等服务未运行时
+    /// 报告里连一条状态项都没有（2026-11-11 生产反馈的检测盲区）。
+    #[test]
+    fn stopped_managed_service_reports_status_item() {
+        let def = def_of("edge-conductor");
+        let report = check_service_env_with(&def, &states(&[]), None);
+        let it = report
+            .items
+            .iter()
+            .find(|i| i.id == "service-edge-conductor")
+            .expect("未运行的服务必须出状态项");
+        assert_eq!(it.status, CheckStatus::Warn);
+        assert_eq!(it.actual, "未检测到运行");
+        assert!(it.fix_hint.contains("启动"), "未运行应引导启动: {}", it.fix_hint);
+    }
+
+    /// 进程在 ≠ 一定可用：端口就绪分级——就绪 = Pass，未就绪 = Warn
+    ///（如实反馈「启动中或异常」并给出重检/查日志的路）。
+    #[test]
+    fn running_service_port_readiness_is_graded() {
+        let def = def_of("edge-conductor");
+
+        let ok = check_service_env_with(
+            &def,
+            &states(&[("edge-conductor", true, true, &[8084])]),
+            None,
+        );
+        let it = ok
+            .items
+            .iter()
+            .find(|i| i.id == "service-state")
+            .expect("运行中必须出状态项");
+        assert_eq!(it.status, CheckStatus::Pass);
+        assert!(it.actual.contains("就绪"), "文案应反馈端口就绪: {}", it.actual);
+
+        let down = check_service_env_with(
+            &def,
+            &states(&[("edge-conductor", true, false, &[8084])]),
+            None,
+        );
+        let it = down
+            .items
+            .iter()
+            .find(|i| i.id == "service-state")
+            .expect("运行中必须出状态项");
+        assert_eq!(it.status, CheckStatus::Warn, "进程在但端口未就绪必须警示");
+        assert!(it.actual.contains("未就绪"), "文案应反馈端口未就绪: {}", it.actual);
+        assert!(!it.fix_hint.is_empty(), "未就绪必须给出修复/排查出路");
     }
 
     /// GreptimeDB 是捆绑本地化：检测项措辞必须是「捆绑端点（随边缘计算启动）」，

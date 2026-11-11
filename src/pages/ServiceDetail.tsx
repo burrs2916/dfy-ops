@@ -23,6 +23,7 @@ import {
 } from "@mui/material";
 import { ArrowBack, Build, Close, ContentCopy, DnsOutlined, Download, PlayArrow, Settings } from "@mui/icons-material";
 import { api } from "../api";
+import { useOpsStore } from "../store";
 import { LOG_BG, ColoredLogLine } from "../components/LogTerminal";
 import type { LogsResponse, ServiceEnvReport, ServiceStatus } from "../types";
 import { StatusBadge } from "../components/StatusBadge";
@@ -225,6 +226,10 @@ export default function ServiceDetail() {
         setSnack({ open: true, msg: `${label}成功`, severity: "success" });
       }
       await load();
+      // 启动/停止/重启 = 显式事件：同步全局 store 状态 + 追加一次全量环境重检
+      //（依赖本服务的其他卡片同步翻绿/翻红；此后无事件不自动重探，切页零开销）
+      void useOpsStore.getState().refreshServices([id]);
+      void useOpsStore.getState().refreshEnvAll();
     } finally {
       setBusy(false);
     }

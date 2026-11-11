@@ -217,6 +217,8 @@ export default function RepairCenter({
         // 全局联动：概览/服务运维/顶栏同吃 ops store，启停后立刻同步该服务状态，
         // 避免「修复中心已停止、切个页面还显示运行中」的陈旧提示
         void useOpsStore.getState().refreshServices([target]);
+        // 启停 = 显式事件：追加一次全量环境重检（依赖该服务的卡片同步翻绿/翻红）
+        void useOpsStore.getState().refreshEnvAll();
       }
     },
     [probeStatus],

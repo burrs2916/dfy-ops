@@ -377,6 +377,8 @@ export default function Dashboard() {
             void api
               .start(id)
               .then(() => refreshServices([id]))
+              // 启动 = 显式事件：后台追加一次全量环境重检（依赖本服务的卡片同步）
+              .then(() => { void refreshEnvAll(); })
               .then(() => setSnack({ open: true, msg: "启动完成", severity: "success" }))
               .catch((e) => setSnack({ open: true, msg: "启动失败：" + (e as Error).message, severity: "error" }))
           }

@@ -1104,11 +1104,11 @@ pub async fn diagnosis(State(state): State<Arc<AppState>>) -> Json<serde_json::V
             .map(|(id, dep)| (id.clone(), (dep.running, dep.healthy)))
             .collect();
         // 环境检查：探测各服务的运行时依赖 + requires 声明 + dependsOn 依赖，并纳入诊断。
-        let cache = environment::ProbeCache::default();
+        // 探测缓存用全局共享实例（60s TTL）：诊断与全量检测复用同一份 java -version 事实。
         let env_reports: Vec<environment::ServiceEnvReport> = std::thread::scope(|s| {
             // move 闭包捕获引用本身（Copy），避免把 deps/cache 整体 move 进闭包
             let deps = &deps;
-            let cache = &cache;
+            let cache = &state.probes;
             let handles: Vec<_> = state
                 .registry
                 .iter()
@@ -1263,7 +1263,8 @@ pub async fn env_check(
         let mut ids = def.depends_on.clone();
         ids.push(def.id.clone());
         let deps = dep_states_for(&st, &snap, &ids);
-        environment::check_service_env_with(&def, &deps, None)
+        // 单服务检查也接全局探测缓存：java -version 等 60s 内复用，不再每次冷启
+        environment::check_service_env_with(&def, &deps, Some(&st.probes))
     })
     .await;
     // 单服务检测结论留痕：耗时 + 整体结论 + 非 Pass 项明细
@@ -1969,6 +1970,12 @@ pub async fn env_check_all(
             }
         }
     }
+    // force = 彻底新探：清掉子进程探测缓存（刚装完 JDK/nginx 的复检不允许
+    // 被 60s 内的旧探测结果污染），再进入重建。非 force 重建时探测条目与
+    // 报告缓存同窗长（60s），此处自然同批过期，无需额外清。
+    if q.force {
+        state.probes.clear();
+    }
     crate::debug_log::entry(
         crate::debug_log::APP_SCOPE,
         "INFO",
@@ -1984,11 +1991,11 @@ pub async fn env_check_all(
     let reports = blocking(move || {
         let snap = ProcSnapshot::capture();
         let deps = dep_states(&st, &snap);
-        let cache = environment::ProbeCache::default();
+        // 探测缓存用全局共享实例（60s TTL）：force 路径已在锁内清空，此处新探回填
+        let cache = &st.probes;
         std::thread::scope(|s| {
             // move 闭包捕获引用本身（Copy），避免把 deps/cache 整体 move 进闭包
             let deps = &deps;
-            let cache = &cache;
             let handles: Vec<_> = st
                 .registry
                 .iter()
@@ -2080,7 +2087,8 @@ pub async fn service_refresh(
         let mut ids = def.depends_on.clone();
         ids.push(def.id.clone());
         let deps = dep_states_for(&st, &snap, &ids);
-        let report = environment::check_service_env_with(&def, &deps, None);
+        // 组合刷新同样接全局探测缓存：60s 内与全量检查共享同一份 java -version 事实
+        let report = environment::check_service_env_with(&def, &deps, Some(&st.probes));
         (status, report)
     })
     .await;

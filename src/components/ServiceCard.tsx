@@ -42,20 +42,22 @@ function envChip(env?: ServiceEnvReport) {
 export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvReport }) {
   const navigate = useNavigate();
   const refreshServices = useOpsStore((st) => st.refreshServices);
+  const refreshEnvAll = useOpsStore((st) => st.refreshEnvAll);
   const [busy, setBusy] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
 
-  // 卡片级快捷操作：执行期间禁点，完成后只刷新本服务 + 其依赖
-  //（启动会级联拉起 dependsOn，依赖的状态也可能变化），不做全量探测，
-  // 失败就地显示错误
+  // 卡片级快捷操作：执行期间禁点，完成后刷新本服务 + 其依赖（启动会级联
+  // 拉起 dependsOn），并追加一次全量环境重检——启停是显式事件，依赖本服务
+  // 的其他卡片必须同步翻绿/翻红；此后无事件不自动重探（切页零开销）。
   const act = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(true);
     setErrMsg(null);
     try {
       await fn();
       await refreshServices([s.id, ...s.dependsOn]);
+      void refreshEnvAll();
     } catch (e) {
       setErrMsg(`${label}失败：${e instanceof Error ? e.message : String(e)}`);
     } finally {

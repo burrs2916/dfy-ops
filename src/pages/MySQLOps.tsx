@@ -61,6 +61,7 @@ import SaveOutlinedIcon from "@mui/icons-material/SaveOutlined";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { useOpsStore } from "../store";
 import type {
   MysqlBackupFile,
   MysqlOverview,
@@ -253,6 +254,10 @@ export default function MySQLOps({ active, mysqlInstalled }: { active: boolean; 
         if (r.ok) flash(r.message ?? "操作成功", "success");
         else flash(r.error ?? "操作失败", "error");
         await refreshOverview();
+        // 启停 = 显式事件：同步全局 store 的 mysql 状态 + 追加一次全量环境重检
+        //（dfy-backend 等依赖 mysql 的卡片同步翻绿/翻红；无事件不自动重探）
+        void useOpsStore.getState().refreshServices(["mysql"]);
+        void useOpsStore.getState().refreshEnvAll();
       } catch (e) {
         flash(`服务操作失败：${String(e)}`, "error");
       } finally {

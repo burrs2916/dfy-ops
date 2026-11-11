@@ -33,6 +33,10 @@ pub struct AppState {
     /// env_check_all 的 single-flight 锁：缓存过期瞬间的并发请求只放一个重探，
     /// 其余等锁后命中新缓存（tokio 异步锁，等待不占 worker 线程）。
     pub env_rebuild: Arc<tokio::sync::Mutex<()>>,
+    /// 跨请求共享的环境探测缓存（java -version / nginx -v 等子进程调用，60s TTL）：
+    /// 全量与单服务检查复用同一事实（单服务检查不再每次冷启 java）；
+    /// force 全量重检时清空——「重新检查」必须拿到装 JDK 后的新事实。
+    pub probes: crate::ops::environment::ProbeCache,
     /// 环境修复任务状态（JDK 自动安装等；全局单例，前端轮询）。
     pub repair: Arc<RepairState>,
 }
@@ -479,6 +483,7 @@ mod tests {
             config_dir: dir,
             env_cache: Arc::new(Mutex::new(None)),
             env_rebuild: Arc::new(tokio::sync::Mutex::new(())),
+            probes: crate::ops::environment::ProbeCache::default(),
             repair: Arc::new(crate::ops::env_repair::RepairState::default()),
         })
     }
