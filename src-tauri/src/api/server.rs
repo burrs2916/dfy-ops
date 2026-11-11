@@ -1,8 +1,9 @@
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use axum::extract::Request;
-use axum::http::header::CONTENT_TYPE;
+use axum::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -96,6 +97,126 @@ async fn require_client_header(req: Request, next: Next) -> Response {
             .into_response();
     }
     next.run(req).await
+}
+
+/// 请求日志的耗时阈值（ms）：超过即记 slow——检测卡顿、探测超时的第一手线索。
+const SLOW_LOG_MS: u128 = 1000;
+/// 响应体读取上限：JSON 业务错误体（须查 {"ok":false}）/ 文本错误体。
+/// 超限的响应只记状态与耗时，不读正文（大日志文件内容不能被截断破坏）。
+const JSON_BODY_LIMIT: usize = 512 * 1024;
+const TEXT_BODY_LIMIT: usize = 64 * 1024;
+
+fn clamp_str(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!("{}…", s.chars().take(max).collect::<String>())
+    }
+}
+
+/// 从 JSON 响应体提取业务错误消息——仅当 `{"ok": false}`（本项目 handler 的失败惯例）。
+/// 这类失败以 HTTP 200 返回，状态码全绿，不读正文就永远不会留痕。
+/// 返回 error/message 字段（缺失则整段正文），超长截断。
+fn json_fail_message(bytes: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    if v.get("ok").and_then(|o| o.as_bool())? {
+        return None; // ok=true（或无 ok 字段）→ 业务成功，不是失败
+    }
+    let msg = v
+        .get("error")
+        .and_then(|e| e.as_str())
+        .or_else(|| v.get("message").and_then(|m| m.as_str()))
+        .map(str::to_string)
+        .unwrap_or_else(|| String::from_utf8_lossy(bytes).into_owned());
+    Some(clamp_str(&msg, 400))
+}
+
+/// 请求日志中间件（挂最外层：CORS 拦截、缺客户端头 403 的请求也能记到）。
+///
+/// 补的盲区：本项目大量 handler 以 HTTP 200 + `{"ok":false,"error":...}` 返回业务失败——
+/// 状态码全绿，此前任何地方都不留痕，出错时 debug.log 一片安静，根本无从定位。
+/// 落 `[HTTP]` scope 四类（`phase=api`）：
+///   · http_fail —— 4xx/5xx（缺客户端头、CORS 拦截、参数 400…），带响应错误文本
+///   · resp_fail —— 200 但 `{"ok":false}`，带 error 字段
+///   · slow      —— 耗时 ≥1s（检测卡顿、探测超时的线索）
+///   · action    —— 成功的变更请求（POST/DELETE）留痕，用于还原「出错前做过什么」
+/// 成功的 GET 轮询不记（5s 一轮，纯噪音）。
+/// **请求体一律不落日志**——可能含密码、SQL、凭据。
+async fn log_api_requests(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let uri = req.uri().to_string();
+    let started = Instant::now();
+    let mut res = next.run(req).await;
+    let ms = started.elapsed().as_millis();
+    let status = res.status();
+
+    let is_json = res
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|ct| ct.starts_with("application/json"))
+        .unwrap_or(false);
+    let failed = status.is_client_error() || status.is_server_error();
+    let slow = ms >= SLOW_LOG_MS;
+    let mutating = method != Method::GET && method != Method::HEAD && method != Method::OPTIONS;
+
+    // 需要读响应体的场景：JSON（查 ok=false）/ 失败或慢的文本响应（错误文本入日志）
+    let limit = if is_json {
+        JSON_BODY_LIMIT
+    } else if failed || slow {
+        TEXT_BODY_LIMIT
+    } else {
+        0
+    };
+
+    let mut fail_msg: Option<String> = None;
+    let too_big = res
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok())
+        .map(|n| n > limit)
+        .unwrap_or(false);
+    if limit > 0 && !too_big {
+        let (parts, body) = res.into_parts();
+        match axum::body::to_bytes(body, limit).await {
+            Ok(bytes) => {
+                if is_json {
+                    fail_msg = json_fail_message(&bytes);
+                } else if failed {
+                    fail_msg = Some(clamp_str(&String::from_utf8_lossy(&bytes), 400));
+                }
+                // 原字节原样重建响应，读日志/查数据的调用方无感
+                res = Response::from_parts(parts, axum::body::Body::from(bytes));
+            }
+            Err(_) => {
+                // 极端情况（流中断/超限）：状态与错误仍要留下，正文放弃
+                res = Response::from_parts(parts, axum::body::Body::empty());
+                fail_msg = Some("响应体读取失败（超限或流中断）".into());
+            }
+        }
+    }
+
+    let (level, evt) = if status.is_server_error() {
+        ("ERROR", "http_fail")
+    } else if status.is_client_error() {
+        ("WARN", "http_fail")
+    } else if fail_msg.is_some() {
+        ("WARN", "resp_fail")
+    } else if slow {
+        ("WARN", "slow")
+    } else if mutating {
+        ("INFO", "action")
+    } else {
+        return res; // 成功的只读轮询：不落日志
+    };
+
+    let mut detail = format!("{} {} -> {} {}ms", method, uri, status.as_u16(), ms);
+    if let Some(m) = fail_msg {
+        detail.push_str(&format!(" | {m}"));
+    }
+    crate::debug_log::entry(crate::debug_log::HTTP_SCOPE, level, "api", evt, &detail);
+    res
 }
 
 /// 构造 Axum 路由。运维 REST API 监听本地 127.0.0.1:18721。
@@ -459,10 +580,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             axum::routing::post(handlers_network::remote_test),
         )
         .with_state(state)
-        // 层的执行顺序是「后挂的在外层」：CORS 最外层，先裁决预检与来源白名单，
-        // 通过后再由 require_client_header 校验自定义头。
+        // 层的执行顺序是「后挂的在外层」：
+        // require_client_header 校验自定义头 → CORS 裁决预检与来源白名单 →
+        // 请求日志挂最外层（CORS 拒绝、缺客户端头 403 的响应都要路过它，都得留痕）。
         .layer(axum::middleware::from_fn(require_client_header))
         .layer(cors)
+        .layer(axum::middleware::from_fn(log_api_requests))
 }
 
 #[cfg(test)]
@@ -628,5 +751,97 @@ mod tests {
             "?force=true 必须被接受为合法查询参数"
         );
         assert!(res.json::<serde_json::Value>().await.unwrap().is_array());
+    }
+
+    /// 业务失败以 200 + {"ok":false} 返回——日志中间件必须能从正文把它识别出来，
+    /// 否则这类失败在 debug.log 里永远无痕（本项目最关键的日志盲区）。
+    #[test]
+    fn json_fail_detects_ok_false_with_error() {
+        let msg = json_fail_message(r#"{"ok":false,"error":"SQL 执行失败：连接被拒绝"}"#.as_bytes())
+            .expect("ok=false 必须被识别为业务失败");
+        assert!(msg.contains("连接被拒绝"), "应提取 error 字段，实际：{msg}");
+    }
+
+    /// ok=true / 无 ok 字段的成功响应不得被误判为失败（否则日志全是假警报）。
+    #[test]
+    fn json_fail_ignores_success_payloads() {
+        assert!(json_fail_message(r#"{"ok":true,"message":"完成"}"#.as_bytes()).is_none());
+        assert!(json_fail_message(br#"{"status":"ok","services":3}"#).is_none());
+        assert!(json_fail_message(b"[1,2,3]").is_none());
+        assert!(json_fail_message(b"not json at all").is_none());
+    }
+
+    /// error 字段缺失时回退整段正文——错误现场宁可多留也不能空。
+    #[test]
+    fn json_fail_falls_back_to_body_when_no_error_field() {
+        let msg = json_fail_message(r#"{"ok":false,"detail":"boom"}"#.as_bytes())
+            .expect("ok=false 无 error 字段也要留正文");
+        assert!(msg.contains("boom"), "应回退整段正文，实际：{msg}");
+    }
+
+    /// 超长错误消息必须截断——单行日志无限膨胀会把 debug.log 冲爆。
+    #[test]
+    fn json_fail_clamps_long_messages() {
+        let long = "x".repeat(2000);
+        let body = format!(r#"{{"ok":false,"error":"{long}"}}"#);
+        let msg = json_fail_message(body.as_bytes()).unwrap();
+        assert!(
+            msg.chars().count() <= 401,
+            "错误消息应截断到 400 字符左右，实际 {}",
+            msg.chars().count()
+        );
+    }
+
+    /// 端到端：失败请求必须真的落盘 debug.log（`[HTTP] phase=api evt=http_fail` 行）。
+    /// 单元测试只证明分类函数正确，证明不了「中间件 → entry → 文件」整条链是通的。
+    #[tokio::test]
+    async fn failed_request_lands_in_debug_log() {
+        use crate::debug_log;
+        let dir = std::env::temp_dir().join(format!("dfy-ops-logtest-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("debug.log");
+        let _ = std::fs::remove_file(&file); // 清掉上轮残留，防旧内容让断言假通过
+        debug_log::init_paths(std::sync::Arc::new(vec![file.clone()]));
+
+        let base = spawn_server().await;
+        // 缺客户端头 → 403：确定性失败，不触碰任何真实服务
+        let res = reqwest::get(format!("{base}/api/health")).await.unwrap();
+        assert_eq!(res.status(), reqwest::StatusCode::FORBIDDEN);
+
+        let content = std::fs::read_to_string(&file).unwrap_or_default();
+        assert!(
+            content
+                .lines()
+                .any(|l| l.contains("phase=api")
+                    && l.contains("evt=http_fail")
+                    && l.contains("/api/health")
+                    && l.contains("403")),
+            "403 失败请求必须在 debug.log 留下 [HTTP] 行，实际内容：\n{content}"
+        );
+
+        // tracing 桥同一路径验证：分段写入（fmt 的真实行为：先内容后换行）必须
+        // 攒行落盘，且 ANSI 颜色码剥干净——否则发布态 debug.log 全是转义垃圾。
+        {
+            use tracing_subscriber::fmt::MakeWriter;
+            let mut w = debug_log::TraceMakeWriter.make_writer();
+            std::io::Write::write_all(&mut w, b"\x1b[32mINFO\x1b[0m bridge").unwrap();
+            std::io::Write::write_all(&mut w, b" ok\n").unwrap();
+            // 尾部残行（无换行）靠 Drop flush 落盘——fmt 偶发不补尾换行时不能丢内容
+            std::io::Write::write_all(&mut w, b"tail-no-newline").unwrap();
+            drop(w);
+        }
+        let content = std::fs::read_to_string(&file).unwrap_or_default();
+        assert!(
+            content.contains("bridge ok"),
+            "tracing 桥必须把行落到 debug.log，实际内容：\n{content}"
+        );
+        assert!(
+            content.contains("tail-no-newline"),
+            "无尾换行的残行必须靠 Drop flush 落盘"
+        );
+        assert!(
+            !content.contains('\u{1b}'),
+            "debug.log 不得残留 ANSI 转义码"
+        );
     }
 }

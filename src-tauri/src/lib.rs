@@ -176,6 +176,9 @@ fn enforce_single_instance() {
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
+        // 双写 stdout + debug.log：Windows 发布态无控制台，启动期关键错误
+        //（端口绑定失败、API 异常退出）必须落 debug.log 才能被用户拿到
+        .with_writer(debug_log::TraceMakeWriter)
         .init();
 
     // debug.log 最先初始化（OnceLock，setup 里的再次 init 是幂等空操作）——

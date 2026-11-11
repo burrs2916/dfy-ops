@@ -91,7 +91,11 @@ pub fn write_line(path: &Path, message: &str) -> std::io::Result<()> {
         .unwrap_or(0);
     let seq = SEQ.fetch_add(1, Ordering::Relaxed);
     let time_ms = chrono::Local::now().format("%H:%M:%S%.3f");
-    writeln!(file, "[{unix}] #{seq:06} {time_ms} {message}")?;
+    // 整行先拼内存、再一次 write_all 落盘：`writeln!` 会按格式分段发起多个
+    // write syscall，API 线程与看门狗/启停操作并发写时行会互相穿插撕裂，
+    // 排障时看到半截日志等于没看到。O_APPEND + 单次写 = 行级原子。
+    let line = format!("[{unix}] #{seq:06} {time_ms} {message}\n");
+    file.write_all(line.as_bytes())?;
     Ok(())
 }
 
@@ -125,7 +129,6 @@ pub fn write(message: &str) {
 pub const MQTT_SCOPE: &str = "MQTT";
 #[allow(dead_code)]
 pub const REDIS_SCOPE: &str = "Redis";
-#[allow(dead_code)]
 pub const HTTP_SCOPE: &str = "HTTP";
 #[allow(dead_code)]
 pub const APP_SCOPE: &str = "App";
@@ -141,6 +144,92 @@ pub fn entry(scope: &str, level: &str, phase: &str, evt: &str, detail: &str) {
         clamp(&one_line(detail), MAX_DETAIL_LEN)
     );
     write(&line);
+}
+
+// ── tracing → debug.log 桥 ────────────────────────────────────────
+//
+// 背景：tracing 此前只打 stdout。Windows 发布态是 GUI 子系统（没有控制台），
+// 端口绑定失败、运维 API 异常退出这类启动期关键错误一个字都留不下——
+// 用户拿 debug.log 排障时完全看不到，正是「出错时日志里定位不到」的元凶之一。
+//
+// 本 writer 让所有 tracing 事件双写：stdout（开发态终端，保留颜色）+
+// debug.log（发布态唯一可达落点，剥掉 ANSI 后按 debug.log 前缀落盘）。
+// 用法（lib.rs）：tracing_subscriber::fmt().with_writer(TraceMakeWriter)
+
+pub struct TraceMakeWriter;
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TraceMakeWriter {
+    type Writer = TraceWriter;
+    fn make_writer(&'a self) -> TraceWriter {
+        TraceWriter { buf: String::new() }
+    }
+}
+
+pub struct TraceWriter {
+    buf: String,
+}
+
+impl std::io::Write for TraceWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // stdout 镜像：Windows GUI 子系统下句柄无效——错误忽略，绝不能 panic
+        let _ = std::io::stdout().write_all(buf);
+        self.buf.push_str(&String::from_utf8_lossy(buf));
+        // fmt 先写事件内容、再单独补一个换行——攒到完整行才落盘
+        while let Some(pos) = self.buf.find('\n') {
+            let line: String = self.buf.drain(..=pos).collect();
+            emit_trace(&line);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if !self.buf.is_empty() {
+            let line = std::mem::take(&mut self.buf);
+            emit_trace(&line);
+        }
+        Ok(())
+    }
+}
+
+impl Drop for TraceWriter {
+    fn drop(&mut self) {
+        let _ = std::io::Write::flush(self);
+    }
+}
+
+/// 一行 tracing 输出落盘：剥 ANSI、去尾部换行，空行不写。
+fn emit_trace(line: &str) {
+    let clean = strip_ansi(line);
+    let clean = clean.trim_end();
+    if !clean.is_empty() {
+        write(clean);
+    }
+}
+
+/// 去 ANSI 转义序列：tracing 的彩色输出（ESC [ ... m 等 CSI 序列）落盘前清洗，
+/// debug.log 保持纯文本——带转义码的行既难读也干扰检索。
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut it = s.chars().peekable();
+    while let Some(c) = it.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if it.peek() == Some(&'[') {
+            // CSI 序列：ESC [ ... 终止于 0x40..=0x7E（tracing 的颜色码都属此类）
+            it.next();
+            for c2 in it.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c2) {
+                    break;
+                }
+            }
+        } else {
+            // 其他孤立 ESC 序列：连同后一个字符一起丢弃
+            let _ = it.next();
+        }
+    }
+    out
 }
 
 // ── 工具函数 ────────────────────────────────────────────────────
@@ -210,6 +299,16 @@ mod tests {
         let out = clamp(&s, MAX_DETAIL_LEN);
         assert!(out.contains("truncated"));
         assert!(out.contains(&(MAX_DETAIL_LEN + 5).to_string()));
+    }
+
+    #[test]
+    fn strip_ansi_removes_color_codes() {
+        // tracing 彩色输出的典型 CSI 颜色码 + 普通文本
+        assert_eq!(strip_ansi("\u{1b}[32mINFO\u{1b}[0m hello"), "INFO hello");
+        // 多段颜色码混合
+        assert_eq!(strip_ansi("\u{1b}[1m\u{1b}[31merr\u{1b}[0m"), "err");
+        // 无转义的纯文本原样保留
+        assert_eq!(strip_ansi("plain 中文"), "plain 中文");
     }
 
     #[test]

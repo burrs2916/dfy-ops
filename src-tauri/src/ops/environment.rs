@@ -76,52 +76,86 @@ pub struct DepState {
 /// 服务 id -> 实时状态。
 pub type DepStates = HashMap<String, DepState>;
 
+/// Env 域日志 scope（与 Proc/Watchdog 同惯例：域常量定义在使用处）。
+const ENV_SCOPE: &str = "Env";
+
+/// 探测失败留痕——失败是「未安装/不满足」结论的唯一证据链。
+/// 不记原因，下次出错只能猜：命令不存在？挂了？超时被杀？
+/// 成功路径不记（每轮环境检查都会跑，纯噪音）。
+fn probe_failed(cmd: &str, args: &[&str], reason: &str) -> Option<String> {
+    crate::debug_log::entry(
+        ENV_SCOPE,
+        "WARN",
+        "probe",
+        "fail",
+        &format!("cmd={cmd} {} | {reason}", args.join(" ")),
+    );
+    None
+}
+
+/// 读子进程输出：stdout 与 stderr 各读一遍（java/nginx -v 打 stderr，取用方按需选）。
+fn read_output(child: &mut std::process::Child) -> (String, String) {
+    let mut out = String::new();
+    if let Some(s) = child.stdout.as_mut() {
+        let _ = s.read_to_string(&mut out);
+    }
+    let mut err = String::new();
+    if let Some(s) = child.stderr.as_mut() {
+        let _ = s.read_to_string(&mut err);
+    }
+    (out, err)
+}
+
 /// 执行命令并取首行有效输出（兼容 java/nginx 输出到 stderr 的情况）。
 ///
 /// 带硬超时（3s）：`java -version` 在杀软扫描/冷启动下可能显著变慢，
 /// 损坏的运行时甚至可能挂起——无超时的 `output()` 会把整轮检测永久卡死。
+/// 四种失败（启动失败/超时/非零退出/无输出）各自入 debug.log，reason 即证据。
 fn probe(cmd: &str, args: &[&str]) -> Option<String> {
     const TIMEOUT: Duration = Duration::from_millis(3000);
-    let mut child = Command::new(cmd)
+    let mut child = match Command::new(cmd)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .ok()?;
+    {
+        Ok(c) => c,
+        // 命令不存在 / 无执行权限——「未安装」判定的直接证据
+        Err(e) => return probe_failed(cmd, args, &format!("启动失败（命令不存在或无权限）: {e}")),
+    };
     let deadline = Instant::now() + TIMEOUT;
     let status = loop {
         match child.try_wait() {
-            Ok(Some(st)) => break Some(st),
+            Ok(Some(st)) => break st,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            // 超时：杀掉并视为探测失败（输出不再读取，进程死后管道自然 EOF）
+            // 超时：杀掉并视为探测失败（进程死后管道自然 EOF）
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return None;
+                return probe_failed(cmd, args, &format!("超过 {TIMEOUT:?} 未退出，已强制结束"));
             }
-            Err(_) => return None,
+            Err(e) => return probe_failed(cmd, args, &format!("等待进程退出失败: {e}")),
         }
-    }?;
-    if !status.success() {
-        return None;
-    }
-    let mut stdout = String::new();
-    if let Some(s) = child.stdout.as_mut() {
-        let _ = s.read_to_string(&mut stdout);
-    }
-    let text = if stdout.trim().is_empty() {
-        let mut stderr = String::new();
-        if let Some(s) = child.stderr.as_mut() {
-            let _ = s.read_to_string(&mut stderr);
-        }
-        stderr
-    } else {
-        stdout
     };
-    text.lines()
-        .find(|l| !l.trim().is_empty())
-        .map(|l| l.trim().to_string())
+    let (stdout, stderr) = read_output(&mut child);
+    let text = if stdout.trim().is_empty() { stderr } else { stdout };
+    if !status.success() {
+        // 非零退出：退出码 + 输出内容是失败的直接证据（此前这里静默返回 None）
+        let code = status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "信号终止".into());
+        return probe_failed(
+            cmd,
+            args,
+            &format!("退出码={code} 输出={}", text.trim()),
+        );
+    }
+    match text.lines().find(|l| !l.trim().is_empty()) {
+        Some(l) => Some(l.trim().to_string()),
+        None => probe_failed(cmd, args, "正常退出但无任何输出"),
+    }
 }
 
 /// 探测条目的缓存有效期：与全量环境报告缓存（handlers 的 ENV_CACHE_TTL=60s）

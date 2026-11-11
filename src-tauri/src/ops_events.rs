@@ -62,7 +62,11 @@ pub fn record(actor: &str, target: &str, action: &str, ok: bool, detail: &str) {
     });
     if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
         use std::io::Write;
-        let _ = writeln!(f, "{line}");
+        // 整行拼好再一次 write_all（同 debug_log::write_line）：
+        // writeln! 分段写会与并发写入穿插，事件行被撕裂就没法回看了
+        let mut s = line.to_string();
+        s.push('\n');
+        let _ = f.write_all(s.as_bytes());
     }
 }
 
