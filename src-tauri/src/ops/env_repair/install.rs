@@ -797,6 +797,44 @@ const EDGE_CONFIG_TEMPLATE: &str = include_str!("../../../templates/edge-conduct
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
 const EDGE_GREPTIMEDB_TEMPLATE: &str = include_str!("../../../templates/edge-greptimedb.toml");
 
+/// edge-conductor 部署即最新配置：config.toml 始终对齐平台最新模板。
+/// 旧逻辑「文件已存在就保留」会让新版部署带着旧配置跑——2026-11-11 生产问题：
+/// 模板已把 VerneMQ broker 改为 192.168.56.101，但重装后旧 config.toml 幸存
+/// （zip 只有 exe 不带 config.toml → 命中「已就位」跳过写入），初始化仍连
+/// 127.0.0.1:18830 被拒。现改为：缺失→生成；内容过期→备份旧配置
+/// （config.toml.bak-<epoch>）并重置为最新模板；已是最新→不动（幂等）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn ensure_fresh_edge_config(cfg: &std::path::Path) -> Result<String, String> {
+    if cfg.is_file() {
+        let old = std::fs::read_to_string(cfg)
+            .map_err(|e| format!("读取现有 config.toml 失败（{}）：{e}", cfg.display()))?;
+        if old == EDGE_CONFIG_TEMPLATE {
+            return Ok("config.toml 已是平台最新配置".into());
+        }
+        let epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let bak = std::path::PathBuf::from(format!("{}.bak-{epoch}", cfg.display()));
+        std::fs::write(&bak, &old).map_err(|e| format!("备份旧 config.toml 失败：{e}"))?;
+        std::fs::write(cfg, EDGE_CONFIG_TEMPLATE)
+            .map_err(|e| format!("重置 config.toml 失败（{}）：{e}", cfg.display()))?;
+        let bak_name = bak
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return Ok(format!(
+            "已按平台最新模板重置 config.toml（旧配置备份为 {bak_name}，回滚请手动改名覆盖）——部署即最新版，配置中心可改"
+        ));
+    }
+    std::fs::write(cfg, EDGE_CONFIG_TEMPLATE)
+        .map(|_| {
+            "已生成平台最新默认 config.toml（VerneMQ=192.168.56.101:18830、端口 8084/8085，配置中心可改）"
+                .to_string()
+        })
+        .map_err(|e| format!("生成默认 config.toml 失败（{}）：{e}", cfg.display()))
+}
+
 /// 在资源目录定位 greptimedb 目录：约定顶层 greptimedb/ 或 greptime/
 /// （内含 greptime.exe 即视为就绪），一级子目录兜底（资源目录分层布局）。
 #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
@@ -973,6 +1011,36 @@ async fn run_edge_dir_install(
         .await;
         return;
     };
+    // edge-conductor：部署即全新安装（2026-11-11 定案）——复制前清空旧安装目录
+    //（旧程序、旧数据、旧配置一并清除），杜绝旧 config.toml 幸存带旧地址跑
+    let old_dir = std::path::Path::new(&install_dir);
+    if old_dir.is_dir() && std::fs::read_dir(old_dir).map(|d| d.count()).unwrap_or(0) > 0 {
+        state.log(format!(
+            "检测到旧版 {label} 安装目录，先清空（部署即全新安装：旧程序/旧数据/旧配置一并清除）"
+        ));
+        let clear_dir = install_dir.clone();
+        let cleared = tokio::task::spawn_blocking(move || {
+            std::fs::remove_dir_all(&clear_dir).map_err(|e| format!("清除旧安装目录失败：{e}"))
+        })
+        .await;
+        match cleared {
+            Ok(Ok(())) => state.log("旧安装目录已清空（将按平台最新模板全新安装）"),
+            Ok(Err(e)) => {
+                finish(
+                    state,
+                    env_cache,
+                    false,
+                    format!("{e}——请先在「服务总览」停止边缘计算，关闭占用后重试"),
+                )
+                .await;
+                return;
+            }
+            Err(e) => {
+                finish(state, env_cache, false, format!("清除旧安装目录任务异常：{e}")).await;
+                return;
+            }
+        }
+    }
     // ===== 复制程序 =====
     state.patch(|j| j.stage = "copy".into());
     // install_dir 后续 greptimedb 整合还要用（L782）——闭包 move 前先克隆
@@ -1046,22 +1114,15 @@ async fn run_edge_dir_install(
     let exe = std::path::Path::new(&install_dir).join("edgecd-daemon.exe");
     if exe.is_file() {
         state.log("验证通过：edgecd-daemon.exe 就绪");
-        // 配置继承：exe 解压产物不带 config.toml（CI 产物只有 exe）——
-        // 平台内置默认模板自动生成，装完即可启动；之后配置中心可改
+        // 部署即最新配置：缺失生成、过期重置（旧配置备份 .bak-<epoch>）——
+        // 约定目录拷贝进来的 config.toml 可能是旧模板（如 VerneMQ 旧地址）
         let cfg_path = std::path::Path::new(&install_dir).join("config.toml");
-        if cfg_path.is_file() {
-            state.log("config.toml 已就位，可在服务总览启动边缘计算");
-        } else if let Err(e) = std::fs::write(&cfg_path, EDGE_CONFIG_TEMPLATE) {
-            finish(
-                state,
-                env_cache,
-                false,
-                format!("生成默认 config.toml 失败（{}）：{e}", cfg_path.display()),
-            )
-            .await;
-            return;
-        } else {
-            state.log("已生成默认 config.toml（端口 8084/8085）——可在配置中心修改，重启后生效");
+        match ensure_fresh_edge_config(&cfg_path) {
+            Ok(msg) => state.log(format!("{msg}——可在服务总览启动边缘计算")),
+            Err(e) => {
+                finish(state, env_cache, false, e).await;
+                return;
+            }
         }
         debug_log::entry(
             debug_log::APP_SCOPE,
@@ -1763,19 +1824,9 @@ fn configure_zip_target(target: &str, home: &str) -> Result<String, String> {
                 Ok("非 Windows 平台无需配置".into())
             }
         }
-        // edge-conductor：CI 解压产物只有 exe——config.toml 缺失时用平台内置
-        // 模板自动生成（生产实际值，装完即可启动），与目录/exe 兜底管线同口径；
-        // 之后配置中心可改
-        "edge-conductor" => {
-            let cfg = std::path::Path::new(home).join("config.toml");
-            if cfg.is_file() {
-                Ok("config.toml 已就位".into())
-            } else {
-                std::fs::write(&cfg, EDGE_CONFIG_TEMPLATE)
-                    .map(|_| "资源包未带 config.toml，已生成平台内置默认配置（端口 8084/8085，配置中心可改）".to_string())
-                    .map_err(|e| format!("生成默认 config.toml 失败（{}）：{e}", cfg.display()))
-            }
-        }
+        // edge-conductor：部署即最新配置——config.toml 缺失生成、过期重置
+        //（旧配置备份 .bak-<epoch>），保证新程序永远配着平台最新模板
+        "edge-conductor" => ensure_fresh_edge_config(std::path::Path::new(home)),
         // gateway-console：静态托管管线——zip 内置预构建 dist（ng build 产物），
         // 解压 + Nginx 接管即装完；本管线没有 npm install，目标机无需 Node.js
         "gateway-console" => {
@@ -1865,6 +1916,47 @@ async fn run_zip_install(
                 return;
             }
             state.log("旧 JDK 目录已清除");
+        }
+    }
+    // edge-conductor：部署即全新安装（2026-11-11 定案）——解压前清空旧安装目录
+    //（旧程序、旧数据、旧配置一并清除，config.toml 随后按平台最新模板重新生成）。
+    // 没有这一步：CI zip 只有 exe 不带 config.toml，旧 config.toml 幸存 → configure
+    // 命中「已就位」跳过写入，新版本永远带着旧地址跑（VerneMQ 127.0.0.1 连接被拒事故）
+    if target == "edge-conductor" {
+        let old = std::path::Path::new(&install_dir);
+        if old.is_dir() && std::fs::read_dir(old).map(|d| d.count()).unwrap_or(0) > 0 {
+            state.log(format!(
+                "检测到旧版 {label} 安装目录，先清空（部署即全新安装：旧程序/旧数据/旧配置一并清除）"
+            ));
+            let clear_dir = install_dir.clone();
+            let cleared = tokio::task::spawn_blocking(move || {
+                std::fs::remove_dir_all(&clear_dir).map_err(|e| format!("清除旧安装目录失败：{e}"))
+            })
+            .await;
+            match cleared {
+                Ok(Ok(())) => {
+                    state.log("旧安装目录已清空（将按平台最新模板全新安装）");
+                }
+                Ok(Err(e)) => {
+                    finish(
+                        state,
+                        env_cache,
+                        false,
+                        format!("{e}——请先在「服务总览」停止边缘计算，关闭占用后重试"),
+                    )
+                    .await;
+                    return;
+                }
+                Err(e) => {
+                    finish(state, env_cache, false, format!("清除旧安装目录任务异常：{e}")).await;
+                    return;
+                }
+            }
+        }
+        // remove_dir_all 已摘掉 install_dir——extract_zip 需要目标根存在
+        if let Err(e) = std::fs::create_dir_all(&install_dir) {
+            finish(state, env_cache, false, format!("重建安装目录失败：{e}")).await;
+            return;
         }
     }
     state.log("正在解压安装包（大包需 1-2 分钟）…");
@@ -2298,25 +2390,16 @@ async fn run_zip_install(
                     gt.display()
                 ));
             }
-            // config.toml 缺失不阻断安装（资源包可能没带），但必须亮出来——
-            // 没有它 edgecd-daemon 起不来，启动时才会报错
+            // 部署即最新配置：缺失生成、过期重置（旧配置备份 .bak-<epoch>）——
+            // 写失败视为安装失败（没有 config.toml edgecd-daemon 起不来）
             let cfg = p.join("config.toml");
-            if !cfg.is_file() {
-                return Ok("config.toml 缺失".to_string());
-            }
-            Ok(String::new())
+            ensure_fresh_edge_config(&cfg)
         })
         .await;
         match v {
-            Ok(Ok(missing_cfg)) => {
+            Ok(Ok(cfg_msg)) => {
                 state.log("验证通过：edgecd-daemon.exe + greptimedb/greptime.exe 均就绪");
-                if missing_cfg.is_empty() {
-                    state.log("config.toml 已就位，可在服务总览启动边缘计算");
-                } else {
-                    state.log(format!(
-                        "警告：{missing_cfg}——启动前请把配置文件放到 {install_dir}\\config.toml（edge-conductor 没有它无法启动）"
-                    ));
-                }
+                state.log(format!("{cfg_msg}——可在服务总览启动边缘计算"));
                 state.log(format!(
                     "[状态自检] 修复中心探测基准：{install_dir}\\edgecd-daemon.exe 存在 = 已安装"
                 ));
@@ -2326,8 +2409,7 @@ async fn run_zip_install(
                     "install_verify",
                     "edge-conductor",
                     &format!(
-                        "基准 {install_dir}\\edgecd-daemon.exe；greptimedb=就位；config.toml={}",
-                        if missing_cfg.is_empty() { "有" } else { "缺" }
+                        "基准 {install_dir}\\edgecd-daemon.exe；greptimedb=就位；config.toml=有（{cfg_msg}）"
                     ),
                 );
                 finish(state, env_cache, true, String::new()).await;
@@ -2537,6 +2619,52 @@ mod tests {
             "root 必须指向 dfy-ui 安装根（dist 内容已搬平）: {conf}"
         );
         assert!(!conf.contains("/dist"), "root 不应再带 /dist 后缀: {conf}");
+    }
+
+    /// edge-conductor 部署即最新配置：旧 config.toml（如 VerneMQ 旧地址）必须被
+    /// 重置为平台最新模板并备份；已是最新则幂等；缺失则生成。
+    /// 回归点：2026-11-11 生产问题——重装后旧配置幸存，初始化仍连 127.0.0.1 被拒。
+    #[test]
+    fn edge_config_fresh_reset_backup_and_idempotent() {
+        let dir = std::env::temp_dir().join(format!("dfy-ops-edge-cfg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("config.toml");
+
+        // 旧安装残留：模拟旧模板（broker 地址换回 127.0.0.1）
+        let stale = EDGE_CONFIG_TEMPLATE.replace("192.168.56.101", "127.0.0.1");
+        assert_ne!(stale, EDGE_CONFIG_TEMPLATE, "夹具必须与最新模板不同");
+        std::fs::write(&cfg, &stale).unwrap();
+
+        // 过期 → 重置为最新模板 + 旧配置备份
+        let msg = ensure_fresh_edge_config(&cfg).unwrap();
+        assert!(msg.contains("重置"), "过期配置必须被重置: {msg}");
+        assert_eq!(
+            std::fs::read_to_string(&cfg).unwrap(),
+            EDGE_CONFIG_TEMPLATE,
+            "重置后必须是平台最新模板"
+        );
+        let baks = |d: &std::path::Path| {
+            std::fs::read_dir(d)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().contains(".bak-"))
+                .count()
+        };
+        assert_eq!(baks(&dir), 1, "旧配置必须备份一份");
+
+        // 幂等：已是最新 → 不动、不产生新备份
+        let msg2 = ensure_fresh_edge_config(&cfg).unwrap();
+        assert!(msg2.contains("已是平台最新"), "已是最新不应重复重置: {msg2}");
+        assert_eq!(baks(&dir), 1, "幂等运行不应新增备份");
+
+        // 缺失 → 生成最新模板
+        std::fs::remove_file(&cfg).unwrap();
+        let msg3 = ensure_fresh_edge_config(&cfg).unwrap();
+        assert!(msg3.contains("生成"), "缺失时必须生成: {msg3}");
+        assert_eq!(std::fs::read_to_string(&cfg).unwrap(), EDGE_CONFIG_TEMPLATE);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// gateway-console 静态托管：nginx.conf 4200 托管块的写入 → 幂等 → 摘除往返。

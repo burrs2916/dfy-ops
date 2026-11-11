@@ -124,7 +124,7 @@ enable_foreign_keys = true
 # @section VerneMQ配置
 # ========================================
 [VerneMQ]
-broker_url = "127.0.0.1"
+broker_url = "192.168.56.101"
 broker_port = 18830
 client_id = "ec-001"
 # 默认认证信息（与当前生产使用的值一致——当无法从 Spring Boot 获取时使用）
