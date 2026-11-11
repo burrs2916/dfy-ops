@@ -66,6 +66,11 @@ pub struct DepState {
     /// running/healthy 已是「托管端点 TCP 可达」的探测结果，端点值用于生成
     /// 面向用户的提示文案（不可达时引导去「远程部署」配置页）。
     pub remote: Option<(String, u16)>,
+    /// 远程部署型服务（registry remoteOnly）：未配置端点时视为「该功能未启用」，
+    /// 不进本地进程检测——否则 MinIO 等未使用的远程依赖会把整张服务卡拖成
+    /// 「缺失」（2026-11-11 生产反馈：边缘业务未用 MinIO 且未配地址，
+    /// edge-conductor 卡片因 dep-minio 恒红，与业务实际运行状态相悖）。
+    pub remote_only: bool,
 }
 
 /// 服务 id -> 实时状态。
@@ -197,7 +202,9 @@ fn fix_hint_for(id: &str) -> String {
             "托管部署：winget install -e --id nginx.nginx；dev 运行：从 https://nodejs.org 安装 Node.js",
             "托管部署：brew install nginx；dev 运行：brew install node",
         ),
-        "greptime" | "service-greptime" | "dep-greptime" => "GreptimeDB 为远程部署模式（随 Edge Conductor 一同启动）：请确认边缘计算已启动，并到「远程部署」检查端点设置后重新检测".into(),
+        "greptime" | "service-greptime" | "dep-greptime" => {
+            "GreptimeDB 随边缘计算捆绑启动（端点读取其 config.toml）：请到「修复中心 → 安装维护」启动边缘计算后重新检测，无需远程部署配置".into()
+        }
         "webview2" => "在目标 Windows 主机安装 Microsoft Edge WebView2 Runtime：https://developer.microsoft.com/microsoft-edge/webview2/".into(),
         "service-vernemq" | "dep-vernemq" => "VerneMQ 为远程部署模式（本机不安装）：请到「远程部署」配置虚拟机/远程主机地址后重新检测".into(),
         "service-minio" | "dep-minio" => "MinIO 为远程部署模式（本机不安装）：请到「远程部署」配置虚拟机/远程主机地址后重新检测".into(),
@@ -454,16 +461,38 @@ pub fn check_service_env_with(
             if let Some((host, port)) = states.get(&def.id).and_then(|s| s.remote.as_ref()) {
                 let ok = health::check_tcp(host, *port, 800);
                 let ep = format!("{host}:{port}");
-                let actual = if ok {
-                    format!("远程端点 {ep} 可达（TCP 连通）")
+                // GreptimeDB 是「捆绑本地化」：端点读自 edge-conductor 的 config.toml，
+                // 是它自己的子进程——按远程端点措辞会误导运维（2026-11-11 生产反馈：
+                // 「我们的端点是跟随边缘计算一起启动的」）。捆绑/远程分别如实措辞。
+                let bundled = def.id == "greptime";
+                let (actual, expected) = if ok {
+                    if bundled {
+                        (
+                            format!("捆绑端点 {ep} 可达（随边缘计算启动）"),
+                            format!("捆绑端点 {ep} 可达"),
+                        )
+                    } else {
+                        (
+                            format!("远程端点 {ep} 可达（TCP 连通）"),
+                            format!("远程端点 {ep} 可达"),
+                        )
+                    }
+                } else if bundled {
+                    (
+                        format!("捆绑端点 {ep} 不可达——请到「修复中心」启动边缘计算后重新检测"),
+                        format!("捆绑端点 {ep} 可达（随边缘计算启动）"),
+                    )
                 } else {
-                    format!("远程端点 {ep} 不可达——请先在「远程部署」配置页检查地址与密码设置")
+                    (
+                        format!("远程端点 {ep} 不可达——请先在「远程部署」配置页检查地址与密码设置"),
+                        format!("远程端点 {ep} 可达"),
+                    )
                 };
                 items.push(item(
                     &format!("service-{}", def.id),
                     "服务状态",
                     "外部依赖",
-                    &format!("远程端点 {ep} 可达"),
+                    &expected,
                     &actual,
                     if ok {
                         CheckStatus::Pass
@@ -592,7 +621,18 @@ pub fn check_service_env_with(
             Some(dep) => {
                 // 纯远程依赖（remoteOnly：Redis/VerneMQ/MinIO/GreptimeDB）：状态即托管端点可达性，
                 // 提示引导到「远程部署」配置页而非本地启动/安装。
-                if let Some((host, port)) = &dep.remote {
+                if dep.remote_only && dep.remote.is_none() {
+                    // 未配置端点 = 该功能未启用：如实判绿，不判缺失——
+                    // 本机没有也不会有这个进程，「未运行」的 Fail 提示全是噪音
+                    item(
+                        &format!("dep-{dep_id}"),
+                        &format!("依赖：{}", dep.name),
+                        "外部依赖",
+                        "远程端点可达，或该功能明确未启用",
+                        "未配置远程端点（视为未启用该功能，不影响本服务）",
+                        CheckStatus::Pass,
+                    )
+                } else if let Some((host, port)) = &dep.remote {
                     let ep = format!("{host}:{port}");
                     let (status, detail) = if dep.running && dep.healthy {
                         (
@@ -694,6 +734,7 @@ mod tests {
                         healthy: *healthy,
                         ports: ports.to_vec(),
                         remote: None,
+                        remote_only: false,
                     },
                 )
             })
@@ -715,6 +756,7 @@ mod tests {
                         healthy: *healthy,
                         ports: ports.to_vec(),
                         remote: remote.map(|(h, p)| (h.to_string(), p)),
+                        remote_only: true,
                     },
                 )
             })
@@ -923,6 +965,79 @@ mod tests {
         let mysql = report.items.iter().find(|i| i.id == "dep-mysql").unwrap();
         assert_eq!(mysql.status, CheckStatus::Warn);
         assert_eq!(report.overall, CheckStatus::Warn);
+    }
+
+    /// remoteOnly 依赖未配置端点 = 功能未启用 → 如实判绿（2026-11-11 生产反馈：
+    /// 边缘业务未用 MinIO 且未配地址，本机无进程可探——dep-minio 恒红把整张
+    /// edge-conductor 卡拖成「缺失」，与业务实际运行状态相悖）。
+    /// 配置了端点则保持严格：不可达仍 Fail，不放水。
+    #[test]
+    fn remote_only_dep_unconfigured_is_not_missing() {
+        let def = def_of("edge-conductor");
+        assert!(
+            def.depends_on.contains(&"minio".to_string()),
+            "edge 应声明 minio 依赖（远程部署型）"
+        );
+
+        // minio 未配置端点（remote_only=true, remote=None）→ Pass·视为未启用
+        let mut st = states(&[
+            ("edge-conductor", true, true, &[8084]),
+            ("dfy-backend", true, true, &[48085]),
+            ("vernemq", true, true, &[18830]),
+            ("minio", false, false, &[]),
+        ]);
+        st.get_mut("minio").unwrap().remote_only = true;
+        let report = check_service_env_with(&def, &st, None);
+        let minio = report.items.iter().find(|i| i.id == "dep-minio").unwrap();
+        assert_eq!(
+            minio.status,
+            CheckStatus::Pass,
+            "未配置的远程依赖应判绿（视为未启用）: {}",
+            minio.actual
+        );
+        assert!(minio.actual.contains("未配置远程端点"), "actual: {}", minio.actual);
+        // overall 允许其他项（如 requires 路径在测试机不存在）为 Warn，但绝不能 Fail
+        assert_ne!(
+            report.overall,
+            CheckStatus::Fail,
+            "edge 卡片不应被未配置依赖拖成缺失"
+        );
+
+        // 配置了端点但不可达 → 仍 Fail（忠于配置，不放水）
+        let minio_st = st.get_mut("minio").unwrap();
+        minio_st.remote = Some(("192.168.56.101".into(), 9000));
+        minio_st.running = false;
+        minio_st.healthy = false;
+        let report2 = check_service_env_with(&def, &st, None);
+        let m2 = report2.items.iter().find(|i| i.id == "dep-minio").unwrap();
+        assert_eq!(m2.status, CheckStatus::Fail, "已配置端点不可达应 Fail");
+    }
+
+    /// GreptimeDB 是捆绑本地化：检测项措辞必须是「捆绑端点（随边缘计算启动）」，
+    /// 不得再以「远程端点」误导运维（2026-11-11 生产反馈：「我们的端点是跟随
+    /// 边缘计算一起启动的」）。端口选必然不可达的 1，锁死 Fail 分支的文案。
+    #[test]
+    fn greptime_service_state_uses_bundled_wording() {
+        let def = def_of("greptime");
+        let st = states_with_remote(&[("greptime", false, false, &[], Some(("127.0.0.1", 1)))]);
+        let report = check_service_env_with(&def, &st, None);
+        let it = report
+            .items
+            .iter()
+            .find(|i| i.id == "service-greptime")
+            .expect("greptime 应有服务状态项");
+        assert_eq!(it.status, CheckStatus::Fail, "1 端口必然不可达");
+        assert!(it.actual.contains("捆绑端点"), "actual: {}", it.actual);
+        assert!(
+            it.actual.contains("启动边缘计算"),
+            "不可达时应引导启动边缘计算: {}",
+            it.actual
+        );
+        assert!(
+            !it.actual.contains("远程部署」配置页"),
+            "捆绑服务不得引导去远程部署配置页: {}",
+            it.actual
+        );
     }
 
     /// 未运行的前端检测语义：

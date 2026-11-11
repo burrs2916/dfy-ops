@@ -1166,14 +1166,14 @@ fn dep_states(state: &AppState, snap: &ProcSnapshot) -> environment::DepStates {
                 let remote = remote_of(state, d);
                 s.spawn(move || {
                     let st = to_status(d, state.procs.is_running(&d.id), snap, remote.as_ref());
-                    (d.id.clone(), st, d.ports.clone(), remote)
+                    (d.id.clone(), st, d.ports.clone(), remote, d.remote_only)
                 })
             })
             .collect();
         handles
             .into_iter()
             .map(|h| {
-                let (id, st, ports, remote) = h.join().expect("服务状态探测线程 panic");
+                let (id, st, ports, remote, remote_only) = h.join().expect("服务状态探测线程 panic");
                 (
                     id,
                     environment::DepState {
@@ -1182,6 +1182,7 @@ fn dep_states(state: &AppState, snap: &ProcSnapshot) -> environment::DepStates {
                         healthy: st.healthy,
                         ports,
                         remote,
+                        remote_only,
                     },
                 )
             })
@@ -1211,6 +1212,7 @@ fn dep_states_for(
                 healthy: st.healthy,
                 ports: d.ports.clone(),
                 remote,
+                remote_only: d.remote_only,
             };
             (d.id.clone(), dep)
         })
