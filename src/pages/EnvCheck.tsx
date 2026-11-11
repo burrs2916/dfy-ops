@@ -20,7 +20,7 @@ import { useSearchParams } from "react-router-dom";
 import { api } from "../api";
 import { LOG_BG, ColoredLogLine } from "../components/LogTerminal";
 import { MONO_STACK } from "../theme";
-import { useAppSettingsStore, useOpsStore } from "../store";
+import { ensureRepairWatch, useAppSettingsStore, useOpsStore } from "../store";
 import type { EnvRepairJob } from "../types";
 import { REPAIR_STAGE_LABEL, STATUS_HEX, TARGET_LABEL, ackId, loadAck, saveAck } from "./envcheck/shared";
 import Stat from "./envcheck/Stat";
@@ -218,8 +218,11 @@ export default function EnvCheck() {
     };
   }, []);
 
-  /** 修复任务轮询（java 与通用修复共用）：任务结束后强制复探让新环境生效。 */
+  /** 修复任务轮询（java 与通用修复共用）：更新任务状态与完成提示。
+   *  重检不在这里做——ensureRepairWatch 是模块级 watcher，用户切走后组件
+   *  卸载、本轮询被清掉，它仍能等到任务结束并重检一次（唯一重检出口，避免双扫描）。 */
   const pollRepair = useCallback(() => {
+    ensureRepairWatch();
     if (repairPollRef.current) window.clearInterval(repairPollRef.current);
     repairPollRef.current = window.setInterval(async () => {
       try {
@@ -230,18 +233,17 @@ export default function EnvCheck() {
           repairPollRef.current = null;
           if (job.ok) {
             const label = job.target ? TARGET_LABEL[job.target] ?? job.target : "环境";
-            // 任务结束已自动 refreshEnvAll()，如实告知用户结果已刷新
+            // 重检由模块级 watcher 触发，这里如实告知结果已刷新
             setRepairNotice(`${label} ${job.op === "uninstall" ? "卸载" : "安装"}完成，环境已自动重新检查`);
           } else {
             setRepairError(job.error || "修复未成功，请查看日志或按修复建议手动处理");
           }
-          void refreshEnvAll();
         }
       } catch {
         /* 单次轮询失败忽略，下一轮重试 */
       }
     }, 2000);
-  }, [refreshEnvAll]);
+  }, []);
 
   /** 检测表里的「一键修复」（java）：分级响应——无需修复/配置指引/自动安装。 */
   const startRepair = useCallback(

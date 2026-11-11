@@ -102,6 +102,29 @@ export const useOpsStore = create<OpsState>((set, get) => ({
   },
 }));
 
+/** 修复任务 watcher（模块级，独立于组件生命周期）：安装/卸载/部署可能在用户
+ *  切离环境检测页之后才完成——组件内轮询随卸载被清掉，就没有任何人重检，
+ *  envMap 会一直停在任务前的旧结论。定时器活在模块层跨页面存活，任务结束时
+ *  触发一次全量重检（force），保证「任务事件 → 重新检测」的唯一刷新时机。
+ *  幂等：已在监视中直接返回；新修复任务启动时调用。 */
+let repairWatchTimer: number | null = null;
+export function ensureRepairWatch(): void {
+  if (repairWatchTimer !== null) return;
+  repairWatchTimer = window.setInterval(async () => {
+    try {
+      const job = await api.envRepairStatus();
+      if (!job.running) {
+        window.clearInterval(repairWatchTimer!);
+        repairWatchTimer = null;
+        // 任务结束 = 环境事实变了（装了/卸了/部署了）→ 全量重检一次
+        void useOpsStore.getState().refreshAll();
+      }
+    } catch {
+      /* 单次轮询失败忽略，下一轮重试 */
+    }
+  }, 2500);
+}
+
 interface AppSettingsState {
   settings: AppSettings;
   loaded: boolean;
