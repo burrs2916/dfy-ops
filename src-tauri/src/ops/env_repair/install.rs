@@ -1731,6 +1731,44 @@ fn extract_zip(zip: &str, dest: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// gateway-console 安装版清理：静态托管运行时只需要 dist/（Nginx :4200 直出）
+/// 与 package.json（「已安装」判定标记 + 目录定位标志），其余根条目——源码
+/// src/、开发文档 doc/、public/、node_modules、锁文件、tsconfig/angular 配置、
+/// 构建缓存——全是开发资产，zip 没过滤干净也不该落到安装目录。
+///
+/// 白名单制（比黑名单稳：以后打包混进任何新杂物都不用改代码）；安装包 zip
+/// 本身若恰在安装目录内一并保护（不销毁资源文件）。返回（删除数, 失败项）。
+/// 失败非致命：文件被占用时如实上报，由调用方留痕后继续（dist 已可用）。
+#[cfg(any(target_os = "windows", test))]
+fn prune_gateway_dev_files(root: &std::path::Path, zip_path: &str) -> (usize, Vec<String>) {
+    let zip_name = std::path::Path::new(zip_path)
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned());
+    let mut removed = 0usize;
+    let mut failed = Vec::new();
+    let entries = match std::fs::read_dir(root) {
+        Ok(e) => e,
+        Err(e) => return (0, vec![format!("读取安装目录失败：{e}")]),
+    };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name == "dist" || name == "package.json" || Some(&name) == zip_name.as_ref() {
+            continue;
+        }
+        let path = e.path();
+        let r = if path.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        match r {
+            Ok(()) => removed += 1,
+            Err(err) => failed.push(format!("{name}: {err}")),
+        }
+    }
+    (removed, failed)
+}
+
 /// 解压后在目标目录里定位「程序主目录」：zip 可能带顶层目录（如
 /// mysql-8.0.42-winx64/），以标志二进制所在层为准。
 #[cfg(target_os = "windows")]
@@ -2057,6 +2095,45 @@ async fn run_zip_install(
             Err(e) => {
                 finish(state, env_cache, false, format!("搬平目录任务异常：{e}")).await;
                 return;
+            }
+        }
+    }
+
+    // ===== gateway-console：安装版只留运行必需（dist/ + package.json）=====
+    // zip 打包时没过滤干净也不怕：解压+搬平后按白名单清理，源码/开发文档/锁
+    // 文件一律不落安装目录（旧版本安装残留的开发文件也一并清掉）。
+    // 非致命：文件被占用清理失败时如实留痕，安装本体照常（dist 已可用）。
+    if target == "gateway-console" {
+        let idd = install_dir.clone();
+        let zp = zip_path.clone();
+        let pruned = tokio::task::spawn_blocking(move || {
+            prune_gateway_dev_files(std::path::Path::new(&idd), &zp)
+        })
+        .await;
+        match pruned {
+            Ok((n, failed)) => {
+                if n > 0 {
+                    state.log(format!(
+                        "已清理安装目录中的开发文件/文档 {n} 项（安装版仅保留 dist/ 与 package.json）"
+                    ));
+                }
+                if !failed.is_empty() {
+                    let msg = format!(
+                        "部分开发文件清理失败（不影响运行，可手动删除）：{}",
+                        failed.join("；")
+                    );
+                    state.log(format!("警告：{msg}"));
+                    crate::debug_log::entry(
+                        crate::debug_log::APP_SCOPE,
+                        "WARN",
+                        "install",
+                        "gw_prune_fail",
+                        &format!("target=gateway-console {msg}"),
+                    );
+                }
+            }
+            Err(e) => {
+                state.log(format!("警告：开发文件清理任务异常（不影响运行）：{e}"));
             }
         }
     }
@@ -2772,5 +2849,68 @@ mod tests {
         assert!(install_dir.join("nginx.exe").is_file(), "幂等调用不得破坏已有文件");
 
         std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// gateway-console 安装白名单清理：只留 dist/ + package.json，
+    /// 源码/开发文档/锁文件全删，安装包 zip 自身受保护。
+    #[test]
+    fn gw_prune_keeps_only_runtime_files() {
+        let base = std::env::temp_dir().join(format!("dfy-ops-gw-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        // 模拟「打包时没过滤干净」的安装目录：doc/src/锁文件/配置全混进来了
+        for d in ["dist/assets", "src/app", "doc/实施文档", "node_modules/x", ".angular/cache", "public"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+        }
+        for f in [
+            "dist/index.html",
+            "package.json",
+            "angular.json",
+            "tsconfig.app.json",
+            "proxy.conf.json",
+            "pnpm-lock.yaml",
+            "README.md",
+            "doc/配置使用指南.md",
+            "src/main.ts",
+        ] {
+            std::fs::write(base.join(f), b"x").unwrap();
+        }
+        // 安装包 zip 恰在安装目录内：必须保留（不销毁资源文件）
+        let zip_inside = base.join("gateway-console.zip");
+        std::fs::write(&zip_inside, b"zip").unwrap();
+
+        let (n, failed) = prune_gateway_dev_files(&base, zip_inside.to_str().unwrap());
+        assert!(failed.is_empty(), "不应有清理失败项: {failed:?}");
+
+        // 白名单：运行必需必须还在
+        assert!(base.join("dist/index.html").is_file(), "dist/ 是 Nginx 直出内容，必须保留");
+        assert!(base.join("dist/assets").is_dir(), "dist 子内容必须整棵保留");
+        assert!(base.join("package.json").is_file(), "package.json 是安装标记+定位标志，必须保留");
+        assert!(zip_inside.is_file(), "安装目录内的 zip 必须受保护");
+
+        // 黑名单：开发资产必须一个不剩
+        for gone in [
+            "src",
+            "doc",
+            "node_modules",
+            ".angular",
+            "public",
+            "angular.json",
+            "tsconfig.app.json",
+            "proxy.conf.json",
+            "pnpm-lock.yaml",
+            "README.md",
+        ] {
+            assert!(!base.join(gone).exists(), "{gone} 应被清理出安装目录");
+        }
+        // 5 根级目录（src、doc、node_modules、.angular、public）+ 5 根级文件
+        //（dist、package.json、zip 保留；doc/、src/ 内部文件随父目录整体删除不单计）
+        assert_eq!(n, 10, "清理计数应如实");
+
+        // 幂等：再清一次无事发生
+        let (n2, failed2) = prune_gateway_dev_files(&base, zip_inside.to_str().unwrap());
+        assert_eq!(n2, 0, "已干净的目录再清理不应删除任何东西");
+        assert!(failed2.is_empty());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }
