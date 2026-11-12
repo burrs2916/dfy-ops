@@ -99,14 +99,15 @@ pub async fn start_generic_repair(
     let dir_for_edge = dir.clone();
     // 调度日志展示用（dir 随后移进阻塞闭包）
     let dir_display = if dir.is_empty() { "(未配置)".to_string() } else { dir.clone() };
-    let (zip, msi, jar) = if dir.is_empty() {
-        (None, None, None)
+    let (zip, msi, jar, exe) = if dir.is_empty() {
+        (None, None, None, None)
     } else {
         blocking(move || {
             (
                 resource::find_zip(&dir, target),
                 resource::find_msi(&dir, target),
                 resource::find_jar(&dir, target),
+                resource::find_exe(&dir, target),
             )
         })
         .await
@@ -116,6 +117,7 @@ pub async fn start_generic_repair(
     // - java/mysql/nginx/dfy-ui → zip 解压管线
     // - edge-conductor → zip 解压管线（装完整合 greptimedb）；无 zip 时目录/exe 兜底
     // - dfy-backend → jar 拷贝管线（单独分支）
+    // - dfy-spatial → NSIS EXE 静默安装管线（bundle 只出 .exe 不出 .msi）
     // - 其他 → msi 静默安装管线
     let zip_capable = matches!(target, "mysql" | "java" | "nginx" | "dfy-ui" | "edge-conductor" | "gateway-console");
     let jar_capable = target == "dfy-backend";
@@ -175,6 +177,14 @@ pub async fn start_generic_repair(
                 state.repair.clone(),
             )
         }
+    } else if target == "dfy-spatial" && exe.is_some() {
+        // NSIS 安装包：/S 静默 + UAC（exe_install_command 生成命令）
+        crate::ops::env_repair::start_resource_install(
+            target,
+            exe.clone().unwrap().path,
+            state.env_cache.clone(),
+            state.repair.clone(),
+        )
     } else if let Some(f) = msi.clone() {
         crate::ops::env_repair::start_resource_install(
             target,
@@ -197,7 +207,11 @@ pub async fn start_generic_repair(
         if jar_capable {
             hint_parts.push("fat JAR");
         }
-        hint_parts.push("MSI 安装包");
+        if target == "dfy-spatial" {
+            hint_parts.push("NSIS 安装包 (.exe)");
+        } else {
+            hint_parts.push("MSI 安装包");
+        }
         Err(format!(
             "本地资源目录中没有 {label} 的可安装包。请将 {} 放入「设置 → 本地资源目录」后重试，或使用 AI 方案",
             hint_parts.join("/")
@@ -210,6 +224,8 @@ pub async fn start_generic_repair(
         Some("zip")
     } else if target == "edge-conductor" {
         Some("edge-dir")
+    } else if target == "dfy-spatial" && exe.is_some() {
+        Some("exe")
     } else if msi.is_some() {
         Some("msi")
     } else {
@@ -223,10 +239,11 @@ pub async fn start_generic_repair(
         "repair_install",
         "dispatch",
         &format!(
-            "{label} 调度：resource_dir={dir_display}；zip={} msi={} jar={}；管线={}",
+            "{label} 调度：resource_dir={dir_display}；zip={} msi={} jar={} exe={}；管线={}",
             zip.as_ref().map(|f| f.file_name.as_str()).unwrap_or("-"),
             msi.as_ref().map(|f| f.file_name.as_str()).unwrap_or("-"),
             jar.as_ref().map(|f| f.file_name.as_str()).unwrap_or("-"),
+            exe.as_ref().map(|f| f.file_name.as_str()).unwrap_or("-"),
             source.unwrap_or("无"),
         ),
     );
@@ -253,6 +270,7 @@ pub async fn start_generic_repair(
                 Some("zip") if target == "gateway-console" => format!("开始离线安装 {label}（免安装版：解压 → 接入 Nginx 托管 4200，无需 Node.js/npm），进度见下方任务状态"),
                 Some("zip") => format!("开始离线安装 {label}（免安装版：解压 → 初始化 → 注册服务），全程只需一次管理员确认，进度见下方任务状态"),
                 Some("edge-dir") => format!("开始离线安装 {label}（程序 + GreptimeDB 时序库整合：复制 → 整合 → 校验），进度见下方任务状态"),
+                Some("exe") => format!("开始离线安装 {label}（NSIS {}，静默模式）→ 管理员确认 → 验证，进度见下方任务状态", exe.as_ref().map(|f| f.file_name.as_str()).unwrap_or_default()),
                 Some("msi") => format!("开始离线安装 {label}（{}）→ 管理员确认 → 验证，进度见下方任务状态", msi.as_ref().map(|f| f.file_name.as_str()).unwrap_or_default()),
                 _ => format!("资源目录无 {label} 安装包，开始在线安装免安装版（下载 → 解压 → 验证）"),
             }

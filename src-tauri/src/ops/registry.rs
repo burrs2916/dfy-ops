@@ -263,19 +263,22 @@ fn builtin() -> Vec<ServiceDef> {
             description: "边缘计算后端，自身监听 8084/8085；GreptimeDB 时序库随安装整合到 greptimedb/ 目录并由其自行拉起；依赖 VerneMQ（MQTT 18830）与 MinIO（对象存储），均为远程部署的独立服务。".into(),
         },
         ServiceDef {
-            id: "biosphere-spatial".into(),
+            id: "dfy-spatial".into(),
             name: "空间数据驱动程序".into(),
             kind: ServiceKind::TauriApp,
             java_major: None,
-            install_dir: "C:/services/biosphere-spatialdata-system".into(),
+            install_dir: "C:/services/dfy-spatialdata-system".into(),
             build_cmd: Some("pnpm tauri build".into()),
             run_cmd:
-                "C:/services/biosphere-spatialdata-system/target/release/biosphere-spatialdata-system.exe".into(),
+                "C:/services/dfy-spatialdata-system/target/release/dfy-spatialdata-system.exe".into(),
             ports: vec![],
-            process_names: vec!["biosphere-spatialdata-system".into()],
+            process_names: vec![
+                "dfy-spatialdata-system".into(),
+                "鼎飞益矿井喷雾降尘智能管控系统".into(),
+            ],
             // 「已安装」检测：按产品显示名（控制面板「程序和功能」同源）匹配，
             // 与部署路径无关；镜像名只判「跑没跑」，注册表才判「装没装」。
-            product_names: vec!["空间数据驱动".into()],
+            product_names: vec!["鼎飞益矿井喷雾降尘智能管控系统".into()],
             health_url: None,
             log_paths: vec![],
             depends_on: vec![],
@@ -284,7 +287,7 @@ fn builtin() -> Vec<ServiceDef> {
             remote_only: false,
             static_site: false,
             requires: vec![],
-            description: "空间数据驱动程序桌面客户端；无端口，按镜像名判「跑没跑」、卸载注册表判「装没装」（非常驻，不参与批量启动）。".into(),
+            description: "空间数据驱动程序桌面客户端；无端口，按镜像名判「跑没跑」、卸载注册表判「装没装」（非常驻，不参与批量启动）。安装包（NSIS .exe）放资源目录约定文件夹 dfy-spatialdata-system/，修复中心可 /S 静默安装。".into(),
         },
         ServiceDef {
             id: "vernemq".into(),
@@ -525,13 +528,13 @@ mod tests {
     /// 2026-10-14 Windows 实测：未安装却报「正常」——根因是检测模型缺「装没装」
     /// 维度且命令行兜底自匹配，此测试锁定声明面。
     #[test]
-    fn biosphere_declares_product_names_and_display_name() {
+    fn dfy_spatial_declares_product_names_and_display_name() {
         let d = builtin()
             .into_iter()
-            .find(|d| d.id == "biosphere-spatial")
-            .expect("biosphere-spatial 必须存在");
+            .find(|d| d.id == "dfy-spatial")
+            .expect("dfy-spatial 必须存在");
         assert_eq!(d.name, "空间数据驱动程序");
-        assert_eq!(d.product_names, vec!["空间数据驱动".to_string()]);
+        assert_eq!(d.product_names, vec!["鼎飞益矿井喷雾降尘智能管控系统".to_string()]);
         assert!(d.ports.is_empty() && !d.process_names.is_empty());
     }
 

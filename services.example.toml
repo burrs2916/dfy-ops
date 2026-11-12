@@ -85,19 +85,19 @@ isDaemon = true
 description = "边缘计算后端；8084/8085 为自身监听端口，依赖 VerneMQ/MinIO（独立注册的第三方服务）与 DFY 后端 48085。"
 
 [[services]]
-id = "biosphere-spatial"
+id = "dfy-spatial"
 name = "空间数据驱动程序"
 kind = "tauri_app"
-installDir = "C:/services/biosphere-spatialdata-system"
+installDir = "C:/services/dfy-spatialdata-system"
 buildCmd = "pnpm tauri build"
-runCmd = "C:/services/biosphere-spatialdata-system/target/release/biosphere-spatialdata-system.exe"
+runCmd = "C:/services/dfy-spatialdata-system/target/release/dfy-spatialdata-system.exe"
 ports = []
-processNames = ["biosphere-spatialdata-system"]
-productNames = ["空间数据驱动"]
+processNames = ["dfy-spatialdata-system", "鼎飞益矿井喷雾降尘智能管控系统"]
+productNames = ["鼎飞益矿井喷雾降尘智能管控系统"]
 logPaths = []
 dependsOn = []
 isDaemon = false
-description = "空间数据驱动程序桌面客户端；无端口，镜像名判「跑没跑」、卸载注册表判「装没装」（非常驻，不参与批量启动）。"
+description = "空间数据驱动程序桌面客户端；无端口，镜像名判「跑没跑」、卸载注册表判「装没装」（非常驻，不参与批量启动）。安装包（NSIS .exe）放资源目录约定文件夹 dfy-spatialdata-system/，修复中心可静默安装。"
 
 # ===== 第三方依赖：平台只检测不托管 =====
 

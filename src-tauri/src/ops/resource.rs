@@ -14,9 +14,9 @@
 use serde::Serialize;
 
 /// 资源目录可修复的目标软件（与环境检查项 id 对应，见 repair_target）。
-pub const TARGETS: [&str; 11] = [
+pub const TARGETS: [&str; 12] = [
     "java", "mysql", "redis", "vernemq", "minio", "greptime", "nginx", "dfy-backend", "dfy-ui",
-    "edge-conductor", "gateway-console",
+    "edge-conductor", "gateway-console", "dfy-spatial",
 ];
 
 /// 资源目录里的一个文件（识别不出的也列出，target=None 交 AI 判断）。
@@ -69,7 +69,14 @@ fn is_pkg_ext(name_lower: &str) -> bool {
 /// 目录名兜底识别依赖它：约定布局 `resources/mysql/…`、`resources/redis/…`。
 fn match_target(name_lower: &str) -> Option<&'static str> {
     // 自研服务（优先：精确的 service id 匹配，不跟 java/jdk 这种泛词冲突）
-    if name_lower.contains("dfy-server") {
+    // 空间数据桌面应用：NSIS 产物名带中文产品名（鼎飞益…_x64-setup.exe），
+    // 源码/CI 命名 dfy-spatialdata-system——三个 token 都认
+    if name_lower.contains("dfy-spatial")
+        || name_lower.contains("spatialdata")
+        || name_lower.contains("鼎飞益")
+    {
+        Some("dfy-spatial")
+    } else if name_lower.contains("dfy-server") {
         Some("dfy-backend")
     } else if name_lower.contains("dfy-ui") {
         Some("dfy-ui")
@@ -128,6 +135,8 @@ fn convention_target(dir_name_lower: &str) -> Option<&'static str> {
         // 自研云端三件套：目录名 = service id
         "dfy-backend" => Some("dfy-backend"),
         "dfy-ui" => Some("dfy-ui"),
+        // 空间数据桌面应用：约定目录 dfy-spatialdata-system/（交付布局）
+        "dfy-spatial" | "dfy-spatialdata-system" | "spatialdata-system" => Some("dfy-spatial"),
         // 边缘网关控制台：约定目录 gateway-console/（源码 zip 解压即部署）
         "gateway-console" => Some("gateway-console"),
         // 边缘计算：约定目录 edge-conductor/（放 edgecd-daemon.exe + config.toml 等）
@@ -263,6 +272,12 @@ pub fn find_jar(dir: &str, target: &str) -> Option<ResourceFile> {
     find_pkg(dir, target, ".jar")
 }
 
+/// 找目标软件的 EXE 安装包（NSIS 类：dfy-spatial 的 Windows 交付包）。
+/// 约定目录内的包优先，同优先级取最大的。
+pub fn find_exe(dir: &str, target: &str) -> Option<ResourceFile> {
+    find_pkg(dir, target, ".exe")
+}
+
 fn find_pkg(dir: &str, target: &str, ext: &str) -> Option<ResourceFile> {
     scan(dir)
         .files
@@ -322,6 +337,30 @@ pub fn msi_install_command(target: &str, msi_path: &str) -> Option<String> {
     }
 }
 
+/// 目标软件的预置 EXE 静默安装命令（UAC 提权执行）。None = 该软件无 EXE 链路。
+/// 返回 "程序 参数" 形式（程序段含引号），调用方按首 token 拆
+/// (FilePath, ArgumentList) 交给 Start-Process，无 shell 解释层。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn exe_install_command(target: &str, exe_path: &str) -> Option<String> {
+    let quoted = format!("\"{exe_path}\"");
+    match target {
+        // Tauri NSIS 安装包：/S 全静默（NSIS 标准开关，大小写敏感）
+        "dfy-spatial" => Some(format!("{quoted} /S")),
+        _ => None,
+    }
+}
+
+/// 预置安装命令汇聚：按包扩展名分发——.exe 走 NSIS 静默、.msi 走 msiexec，
+/// 其余类型/无链路的目标返回 None（修复中心据此提示）。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub fn installer_command(target: &str, path: &str) -> Option<String> {
+    if path.to_lowercase().ends_with(".exe") {
+        exe_install_command(target, path)
+    } else {
+        msi_install_command(target, path)
+    }
+}
+
 /// 检查项 id → 修复目标软件。dep-*/service-* 前缀折叠后按 id 匹配。
 /// greptime 检查项修复 → edge-conductor 安装管线：GreptimeDB 时序库随
 /// edge-conductor 安装整合（greptimedb/ 目录），不单独安装。
@@ -352,6 +391,7 @@ pub fn target_label(target: &str) -> &'static str {
         "dfy-backend" => "DFY 后端服务 (dfy-boot-base)",
         "dfy-ui" => "DFY 前端 (Vue3)",
         "gateway-console" => "Gateway Console (Angular)",
+        "dfy-spatial" => "空间数据系统 (鼎飞益)",
         _ => "未知目标",
     }
 }
@@ -373,6 +413,15 @@ mod tests {
         assert_eq!(classify("greptime-windows-amd64.zip"), Some("greptime"));
         assert_eq!(classify("gateway-console-20261110.zip"), Some("gateway-console"));
         assert_eq!(classify("jdk-17_windows-x64_binaries.msi"), Some("java"));
+        // 空间数据桌面应用：NSIS 中文产品名与源码命名两种 CI 产物名都认
+        assert_eq!(
+            classify("鼎飞益矿井喷雾降尘智能管控系统_0.1.0_x64-setup.exe"),
+            Some("dfy-spatial")
+        );
+        assert_eq!(
+            classify("dfy-spatialdata-system_0.1.0_x64-setup.exe"),
+            Some("dfy-spatial")
+        );
         // 未识别 / 非安装包
         assert_eq!(classify("readme.pdf"), None);
         assert_eq!(classify("mysql-notes.txt"), None, "非安装包扩展名不识别");
@@ -517,6 +566,22 @@ mod tests {
         assert!(msi_install_command("vernemq", "C:/res/vernemq.msi").is_some());
         assert!(msi_install_command("minio", "C:/res/minio.exe").is_none(), "EXE 类不提供 MSI 链路");
         assert!(msi_install_command("greptime", "C:/res/greptime.zip").is_none());
+    }
+
+    /// EXE 预置安装命令（NSIS /S 静默）：只给 dfy-spatial；installer_command
+    /// 按扩展名分发——.exe 走 NSIS、.msi 走 msiexec，无链路的组合 None。
+    #[test]
+    fn exe_install_commands_by_target() {
+        let exe = exe_install_command("dfy-spatial", "C:/res/鼎飞益_0.1.0_x64-setup.exe").unwrap();
+        assert!(exe.ends_with(" /S") && exe.contains("setup.exe"), "NSIS 静默: {exe}");
+        assert!(exe_install_command("mysql", "C:/res/x.exe").is_none(), "只有 dfy-spatial 有 EXE 链路");
+        // installer_command 按扩展名分发
+        assert!(installer_command("dfy-spatial", "C:/res/a.exe").unwrap().ends_with("/S"));
+        assert!(
+            installer_command("dfy-spatial", "C:/res/a.msi").is_none(),
+            "dfy-spatial 无 MSI 链路（bundle 只出 NSIS）"
+        );
+        assert!(installer_command("mysql", "C:/res/mysql.msi").unwrap().starts_with("msiexec"));
     }
 
     /// 检查项 id → 目标：dep-*/service-* 前缀折叠；不支持的 id 返回 None。

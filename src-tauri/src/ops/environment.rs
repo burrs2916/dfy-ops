@@ -918,20 +918,20 @@ mod tests {
         let st = states(&[
             ("dfy-ui", true, true, &[]),
             ("edge-conductor", true, true, &[]),
-            ("biosphere-spatial", true, true, &[]),
+            ("dfy-spatial", true, true, &[]),
             ("dfy-backend", true, true, &[48085]),
             ("nginx", true, true, &[80]),
             ("mysql", true, true, &[3306]),
             ("redis", true, true, &[6379]),
         ]);
-        // biosphere-spatial 无 requires 也无 depends_on → 依赖齐全即 Pass。
+        // dfy-spatial 无 requires 也无 depends_on → 依赖齐全即 Pass。
         {
-            let def = def_of("biosphere-spatial");
+            let def = def_of("dfy-spatial");
             let report = check_service_env_with(&def, &st, None);
             assert_eq!(
                 report.overall,
                 CheckStatus::Pass,
-                "运行中的 biosphere-spatial（依赖齐全）环境检查不应告警: {:?}",
+                "运行中的 dfy-spatial（依赖齐全）环境检查不应告警: {:?}",
                 report.items
             );
         }
@@ -1334,7 +1334,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn tauri_env_passes_on_macos_without_running() {
-        let def = def_of("biosphere-spatial");
+        let def = def_of("dfy-spatial");
         let report = check_service_env_with(&def, &states(&[]), None);
         assert_eq!(report.overall, CheckStatus::Pass);
     }

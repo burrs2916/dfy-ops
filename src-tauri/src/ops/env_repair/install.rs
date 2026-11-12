@@ -69,7 +69,7 @@ pub fn start_resource_install(
     env_cache: EnvCache,
     state: Arc<RepairState>,
 ) -> Result<(), String> {
-    if crate::ops::resource::msi_install_command(target, &msi_path).is_none() {
+    if crate::ops::resource::installer_command(target, &msi_path).is_none() {
         return Err(format!(
             "{} 没有预置的静默安装链路，请使用 AI 方案或手动安装",
             crate::ops::resource::target_label(target)
@@ -228,9 +228,28 @@ async fn run_install(state: Arc<RepairState>, expected_major: u32, env_cache: En
     }
 }
 
-/// 本地资源包安装流水线（Windows）：UAC 提权 msiexec 静默安装 → 复探验证。
-/// 与 run_install 的差异：安装包来自资源目录（离线），无需下载；验证仅 java
-/// 有可靠的注册表/目录扫描口径，其余目标以 msiexec 退出码为准并提示重新检测。
+/// 把预置安装命令拆成 (程序, 参数串)：双引号开头取到闭合引号为程序（不含引号），
+/// 否则取首个空白前的 token。命令由 resource::installer_command 生成（非用户输入），
+/// 无解析注入面；程序段与参数段随后各自做 PowerShell 单引号转义。
+#[cfg(target_os = "windows")]
+fn split_program_args(cmd: &str) -> (&str, &str) {
+    let t = cmd.trim();
+    if let Some(rest) = t.strip_prefix('"') {
+        match rest.find('"') {
+            Some(end) => (&rest[..end], rest[end + 1..].trim()),
+            None => (t, ""),
+        }
+    } else {
+        match t.find(' ') {
+            Some(i) => (&t[..i], t[i + 1..].trim()),
+            None => (t, ""),
+        }
+    }
+}
+
+/// 本地资源包安装流水线（Windows）：UAC 提权静默安装（MSI 走 msiexec / EXE 走
+/// NSIS /S）→ 复探验证。与 run_install 的差异：安装包来自资源目录（离线），无需下载；
+/// 验证仅 java 有可靠的注册表/目录扫描口径，其余目标以安装器退出码为准并提示重新检测。
 #[cfg(target_os = "windows")]
 async fn run_resource_install(
     state: Arc<RepairState>,
@@ -245,21 +264,29 @@ async fn run_resource_install(
     ));
 
     state.patch(|j| j.stage = "install".into());
-    // msi_install_command 返回 "msiexec /i \"path\" ..."，取首 token 之后的参数串
-    // 交给 Start-Process 的 ArgumentList（无 shell 解释层，无注入面）。
-    let Some(cmd) = crate::ops::resource::msi_install_command(target, &msi_path) else {
+    // installer_command 返回预置命令（"msiexec /i …" 或 "\"…\setup.exe" /S"），
+    // 按首 token 拆 (程序, 参数串) 交给 Start-Process 的 -FilePath/-ArgumentList
+    // （无 shell 解释层，无注入面）。
+    let Some(cmd) = crate::ops::resource::installer_command(target, &msi_path) else {
         finish(state, env_cache, false, "该目标没有预置的静默安装链路".into()).await;
         return;
     };
-    let args_part = cmd["msiexec".len()..].trim().to_string();
+    let (program, args_part) = split_program_args(&cmd);
     // PowerShell 单引号字面量转义（路径含单引号时防破坏命令结构）
+    let program = program.replace('\'', "''");
     let args_part = args_part.replace('\'', "''");
-    state.log("正在启动 MSI 静默安装…请在弹出的 UAC 管理员确认框中点击「是」…");
+    let pkg_name = std::path::Path::new(&msi_path)
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| msi_path.clone());
+    state.log(format!(
+        "正在启动 {pkg_name} 静默安装…请在弹出的 UAC 管理员确认框中点击「是」…"
+    ));
     let install = tokio::task::spawn_blocking(move || {
         let ps = if args_part.is_empty() {
-            "Start-Process msiexec -Verb RunAs -Wait".to_string()
+            format!("Start-Process -FilePath '{program}' -Verb RunAs -Wait")
         } else {
-            format!("Start-Process msiexec -ArgumentList '{args_part}' -Verb RunAs -Wait")
+            format!("Start-Process -FilePath '{program}' -ArgumentList '{args_part}' -Verb RunAs -Wait")
         };
         std::process::Command::new("powershell")
             .args(["-NoProfile", "-Command", &ps])
@@ -268,7 +295,7 @@ async fn run_resource_install(
     .await;
     match install {
         Ok(Ok(out)) if out.status.success() => {
-            state.log("MSI 安装完成");
+            state.log(format!("安装包执行完成：{pkg_name}"));
         }
         Ok(Ok(out)) => {
             let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
@@ -316,7 +343,7 @@ async fn run_resource_install(
             }
         }
     } else {
-        // mysql/redis/vernemq：安装器返回成功即视为安装完成；服务注册/端口监听
+        // mysql/redis/vernemq/dfy-spatial：安装器返回成功即视为安装完成；服务注册/端口监听
         // 状态由「重新检查」重新实测（本进程看不到安装器写的新 PATH）
         state.log("安装流程已执行完成，请点击「重新检查」验证环境状态");
         finish(state, env_cache, true, String::new()).await;
