@@ -55,6 +55,7 @@ fn service_status_contract() {
         is_daemon: true,
         third_party: false,
         remote_only: false,
+        remote_endpoint: None,
         static_site: false,
         installed: true,
         description: String::new(),
@@ -68,7 +69,7 @@ fn service_status_contract() {
         &serde_json::to_value(&s).unwrap(),
         &[
             "id", "name", "kind", "running", "runState", "healthy", "ports", "dependsOn",
-            "isDaemon", "thirdParty", "remoteOnly", "staticSite", "installed", "description",
+            "isDaemon", "thirdParty", "remoteOnly", "remoteEndpoint", "staticSite", "installed", "description",
             "installDir", "buildCmd", "runCmd", "healthUrl", "logPaths",
         ],
     );
