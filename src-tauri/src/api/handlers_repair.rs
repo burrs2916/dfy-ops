@@ -177,11 +177,18 @@ pub async fn start_generic_repair(
                 state.repair.clone(),
             )
         }
-    } else if target == "dfy-spatial" && exe.is_some() {
-        // NSIS 安装包：/S 静默 + UAC（exe_install_command 生成命令）
+    } else if target == "dfy-spatial" && (exe.is_some() || zip.is_some()) {
+        // NSIS 安装包：/S 静默 + UAC（exe_install_command 生成命令）。
+        // zip 兜底：安装程序可能被压缩包裹着——run 内先解压提取 *.exe 再装
+        //（2026-11-13 反馈：zip 被扫描列出却报「没有可安装包」）。
+        let pkg = exe
+            .clone()
+            .or_else(|| zip.clone())
+            .map(|f| f.path)
+            .expect("exe/zip 至少其一已判定");
         crate::ops::env_repair::start_resource_install(
             target,
-            exe.clone().unwrap().path,
+            pkg,
             state.env_cache.clone(),
             state.repair.clone(),
         )
@@ -208,7 +215,7 @@ pub async fn start_generic_repair(
             hint_parts.push("fat JAR");
         }
         if target == "dfy-spatial" {
-            hint_parts.push("NSIS 安装包 (.exe)");
+            hint_parts.push("NSIS 安装包 (.exe) 或含安装程序的 ZIP");
         } else {
             hint_parts.push("MSI 安装包");
         }
@@ -224,7 +231,7 @@ pub async fn start_generic_repair(
         Some("zip")
     } else if target == "edge-conductor" {
         Some("edge-dir")
-    } else if target == "dfy-spatial" && exe.is_some() {
+    } else if target == "dfy-spatial" && (exe.is_some() || zip.is_some()) {
         Some("exe")
     } else if msi.is_some() {
         Some("msi")
@@ -270,7 +277,18 @@ pub async fn start_generic_repair(
                 Some("zip") if target == "gateway-console" => format!("开始离线安装 {label}（免安装版：解压 → 接入 Nginx 托管 4200，无需 Node.js/npm），进度见下方任务状态"),
                 Some("zip") => format!("开始离线安装 {label}（免安装版：解压 → 初始化 → 注册服务），全程只需一次管理员确认，进度见下方任务状态"),
                 Some("edge-dir") => format!("开始离线安装 {label}（程序 + GreptimeDB 时序库整合：复制 → 整合 → 校验），进度见下方任务状态"),
-                Some("exe") => format!("开始离线安装 {label}（NSIS {}，静默模式）→ 管理员确认 → 验证，进度见下方任务状态", exe.as_ref().map(|f| f.file_name.as_str()).unwrap_or_default()),
+                Some("exe") => {
+                    let pkg_desc = if let Some(f) = exe.as_ref() {
+                        format!("NSIS {}", f.file_name)
+                    } else if let Some(f) = zip.as_ref() {
+                        format!("ZIP {}（先解压提取安装程序）", f.file_name)
+                    } else {
+                        "NSIS 安装程序".to_string()
+                    };
+                    format!(
+                        "开始离线安装 {label}（{pkg_desc}，静默模式）→ 管理员确认 → 验证，进度见下方任务状态"
+                    )
+                }
                 Some("msi") => format!("开始离线安装 {label}（{}）→ 管理员确认 → 验证，进度见下方任务状态", msi.as_ref().map(|f| f.file_name.as_str()).unwrap_or_default()),
                 _ => format!("资源目录无 {label} 安装包，开始在线安装免安装版（下载 → 解压 → 验证）"),
             }

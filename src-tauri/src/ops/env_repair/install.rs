@@ -69,7 +69,11 @@ pub fn start_resource_install(
     env_cache: EnvCache,
     state: Arc<RepairState>,
 ) -> Result<(), String> {
-    if crate::ops::resource::installer_command(target, &msi_path).is_none() {
+    // zip 兜底（dfy-spatial）：命令要等解压提取出安装程序才建得出来，此处先放行
+    let pkg_lower = msi_path.to_lowercase();
+    let zip_exed =
+        target == "dfy-spatial" && pkg_lower.ends_with(".zip");
+    if !zip_exed && crate::ops::resource::installer_command(target, &msi_path).is_none() {
         return Err(format!(
             "{} 没有预置的静默安装链路，请使用 AI 方案或手动安装",
             crate::ops::resource::target_label(target)
@@ -264,6 +268,47 @@ async fn run_resource_install(
     ));
 
     state.patch(|j| j.stage = "install".into());
+    // zip 包裹的安装程序（dfy-spatial）：先解压提取 *.exe（排除卸载器，优先
+    // setup/产品名命中的安装程序），提取出的路径接管后续 NSIS /S 静默安装。
+    let msi_path = if target == "dfy-spatial" && msi_path.to_lowercase().ends_with(".zip") {
+        state.log("检测到 ZIP 安装包：正在解压提取 NSIS 安装程序…");
+        let dest = std::env::temp_dir().join("dfy-ops-spatial-extract");
+        let _ = std::fs::remove_dir_all(&dest);
+        let (zip_src, dest_s) = (msi_path.clone(), dest.to_string_lossy().to_string());
+        let extracted = tokio::task::spawn_blocking(
+            move || -> Result<Option<std::path::PathBuf>, String> {
+                extract_zip(&zip_src, &dest_s)?;
+                Ok(find_install_exe(&dest))
+            },
+        )
+        .await;
+        match extracted {
+            Ok(Ok(Some(exe))) => {
+                state.log(format!("已提取安装程序：{}", exe.display()));
+                exe.to_string_lossy().to_string()
+            }
+            Ok(Ok(None)) => {
+                finish(
+                    state,
+                    env_cache,
+                    false,
+                    "ZIP 中未找到安装程序（*.exe），请检查安装包内容".into(),
+                )
+                .await;
+                return;
+            }
+            Ok(Err(e)) => {
+                finish(state, env_cache, false, format!("解压安装包失败：{e}")).await;
+                return;
+            }
+            Err(e) => {
+                finish(state, env_cache, false, format!("解压任务异常：{e}")).await;
+                return;
+            }
+        }
+    } else {
+        msi_path
+    };
     // installer_command 返回预置命令（"msiexec /i …" 或 "\"…\setup.exe" /S"），
     // 按首 token 拆 (程序, 参数串) 交给 Start-Process 的 -FilePath/-ArgumentList
     // （无 shell 解释层，无注入面）。
@@ -1756,6 +1801,53 @@ fn extract_zip(zip: &str, dest: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// 在解压目录里递归找 NSIS 安装程序：排除卸载器，按文件名打分
+///（setup/install/安装 +4、含产品名 +2），同分取体积大的（主安装程序 vs 辅助工具）。
+#[cfg(target_os = "windows")]
+fn find_install_exe(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    let mut exes: Vec<std::path::PathBuf> = Vec::new();
+    while let Some(dir) = stack.pop() {
+        let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p
+                .extension()
+                .map(|x| x.eq_ignore_ascii_case("exe"))
+                .unwrap_or(false)
+            {
+                exes.push(p);
+            }
+        }
+    }
+    let score = |p: &std::path::Path| -> i32 {
+        let n = p
+            .file_name()
+            .map(|s| s.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if n.contains("uninstall") || n.contains("卸载") {
+            return -1;
+        }
+        let mut s = 0;
+        if n.contains("setup") || n.contains("install") || n.contains("安装") {
+            s += 4;
+        }
+        if n.contains("鼎飞益") || n.contains("spatial") || n.contains("空间") {
+            s += 2;
+        }
+        s
+    };
+    exes
+        .into_iter()
+        .filter(|p| score(p) >= 0)
+        .max_by_key(|p| {
+            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+            (score(p), size)
+        })
 }
 
 /// gateway-console 安装版清理：静态托管运行时只需要 dist/（Nginx :4200 直出）
