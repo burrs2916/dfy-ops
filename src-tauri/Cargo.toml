@@ -1,6 +1,6 @@
 [package]
 name = "dfy-ops"
-version = "0.3.13"
+version = "0.3.14"
 description = "DFY运维平台"
 authors = ["DFY"]
 edition = "2021"
