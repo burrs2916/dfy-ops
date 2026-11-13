@@ -1,11 +1,13 @@
 import { useState } from "react";
 import {
+  Alert,
   Button,
   Card,
   CardContent,
   Chip,
   CircularProgress,
   IconButton,
+  Snackbar,
   Stack,
   Tooltip,
   Typography,
@@ -13,6 +15,7 @@ import {
 import { PlayArrow, Dns, Radar, Refresh, Replay, Stop } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { accessLine } from "../access";
 import { useOpsStore } from "../store";
 import type { CheckStatus, ServiceEnvReport, ServiceStatus } from "../types";
 import { StatusBadge } from "./StatusBadge";
@@ -46,6 +49,7 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
   const [busy, setBusy] = useState(false);
   const [reloading, setReloading] = useState(false);
   const [errMsg, setErrMsg] = useState<string | null>(null);
+  const [infoMsg, setInfoMsg] = useState<string | null>(null);
   const [discovering, setDiscovering] = useState(false);
 
   // 卡片级快捷操作：执行期间禁点，完成后刷新本服务 + 其依赖（启动会级联
@@ -54,8 +58,14 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
   const act = async (label: string, fn: () => Promise<unknown>) => {
     setBusy(true);
     setErrMsg(null);
+    setInfoMsg(null);
     try {
       await fn();
+      // 启动/重启完成即告知访问方式（端口 / 地址），否则用户不知道去哪访问
+      if (label === "启动" || label === "重启") {
+        const acc = accessLine(s.id, { kind: s.kind, ports: s.ports });
+        setInfoMsg(acc ? `${label}成功 · ${acc}` : `${label}成功`);
+      }
       await refreshServices([s.id, ...s.dependsOn]);
       void refreshEnvAll();
     } catch (e) {
@@ -228,6 +238,16 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
             </Typography>
           )}
         </CardContent>
+      <Snackbar
+        open={!!infoMsg}
+        autoHideDuration={10000}
+        onClose={() => setInfoMsg(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
+      >
+        <Alert severity="success" variant="filled" onClose={() => setInfoMsg(null)}>
+          {infoMsg}
+        </Alert>
+      </Snackbar>
       <ServiceDiscoveryDialog
         open={discovering}
         onClose={() => setDiscovering(false)}

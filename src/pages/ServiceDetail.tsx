@@ -23,6 +23,7 @@ import {
 } from "@mui/material";
 import { ArrowBack, Build, Close, ContentCopy, DnsOutlined, Download, PlayArrow, Settings } from "@mui/icons-material";
 import { api } from "../api";
+import { accessLine } from "../access";
 import { useOpsStore } from "../store";
 import { LOG_BG, ColoredLogLine } from "../components/LogTerminal";
 import type { LogsResponse, ServiceEnvReport, ServiceStatus } from "../types";
@@ -223,7 +224,12 @@ export default function ServiceDetail() {
       if (!r.ok) {
         setSnack({ open: true, msg: `${label}失败：${r.error ?? "未知错误"}`, severity: "error" });
       } else {
-        setSnack({ open: true, msg: `${label}成功`, severity: "success" });
+        // 启动/重启完成即告知访问方式（端口 / 地址），否则用户不知道去哪访问
+        const acc =
+          svc && (label === "启动" || label === "重启")
+            ? accessLine(id, { kind: svc.kind, ports: svc.ports })
+            : null;
+        setSnack({ open: true, msg: acc ? `${label}成功 · ${acc}` : `${label}成功`, severity: "success" });
       }
       await load();
       // 启动/停止/重启 = 显式事件：同步全局 store 状态 + 追加一次全量环境重检

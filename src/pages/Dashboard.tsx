@@ -28,6 +28,7 @@ import { ServiceCard } from "../components/ServiceCard";
 import ReadinessCard from "../components/ReadinessCard";
 import { PageHeader } from "../components/PageHeader";
 import { api } from "../api";
+import { accessLine } from "../access";
 import type { DiagnosisResponse } from "../types";
 
 /** 首页统计卡：左侧品牌色图标锚点 + 右侧标签/大数字，替代原先的白框裸数字 */
@@ -208,7 +209,18 @@ export default function Dashboard() {
     setBulkBusy("start");
     try {
       const r = await api.startAll();
-      setSnack({ open: true, msg: "全部启动 " + summarize(r), severity: "success" });
+      // 批量启动完成即告知各服务访问方式（端口 / 地址）
+      const accessLines = r
+        .filter((x) => x.ok)
+        .map((x) => {
+          const svc = services.find((sv) => sv.id === x.id);
+          return accessLine(x.id, svc ? { kind: svc.kind, ports: svc.ports } : undefined);
+        })
+        .filter((l): l is string => !!l);
+      const access = accessLines.length
+        ? ` · 访问：${accessLines.slice(0, 4).join("；")}${accessLines.length > 4 ? " 等" : ""}`
+        : "";
+      setSnack({ open: true, msg: "全部启动 " + summarize(r) + access, severity: "success" });
       refreshAll();
     } catch (e) {
       setSnack({ open: true, msg: "启动失败：" + (e as Error).message, severity: "error" });
@@ -379,7 +391,11 @@ export default function Dashboard() {
               .then(() => refreshServices([id]))
               // 启动 = 显式事件：后台追加一次全量环境重检（依赖本服务的卡片同步）
               .then(() => { void refreshEnvAll(); })
-              .then(() => setSnack({ open: true, msg: "启动完成", severity: "success" }))
+              .then(() => {
+                const svc = services.find((x) => x.id === id);
+                const acc = accessLine(id, svc ? { kind: svc.kind, ports: svc.ports } : undefined);
+                setSnack({ open: true, msg: acc ? `启动完成 · ${acc}` : "启动完成", severity: "success" });
+              })
               .catch((e) => setSnack({ open: true, msg: "启动失败：" + (e as Error).message, severity: "error" }))
           }
         />
@@ -405,7 +421,7 @@ export default function Dashboard() {
 
       <Snackbar
         open={snack.open}
-        autoHideDuration={4000}
+        autoHideDuration={snack.msg.length > 45 ? 12000 : 4000}
         onClose={() => setSnack((s) => ({ ...s, open: false }))}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >

@@ -47,6 +47,7 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../api";
+import { accessLine } from "../../access";
 import { useAppSettingsStore, useOpsStore } from "../../store";
 import type { EnvCheckItem, RepairPlan, ResourceScan, UninstallTargetStatus } from "../../types";
 import { MONO_STACK } from "../../theme";
@@ -204,7 +205,9 @@ export default function RepairCenter({
       try {
         const r = await api.serviceAction(target, action);
         if (r.ok) {
-          setSnack({ open: true, msg: r.message || "操作成功", severity: "success" });
+          // 启动完成即告知访问方式（端口 / 地址）
+          const acc = action === "start" ? accessLine(target) : null;
+          setSnack({ open: true, msg: `${r.message || "操作成功"}${acc ? ` · ${acc}` : ""}`, severity: "success" });
         } else {
           setSnack({ open: true, msg: r.error || "操作失败", severity: "error" });
         }
