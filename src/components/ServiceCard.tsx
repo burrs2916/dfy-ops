@@ -12,10 +12,12 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
-import { PlayArrow, Dns, Radar, Refresh, Replay, Stop } from "@mui/icons-material";
+import { PlayArrow, Dns, OpenInNew, Radar, Refresh, Replay, Stop } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { api } from "../api";
 import { accessLine } from "../access";
+import { LinkifiedText } from "./LinkifiedText";
 import { useOpsStore } from "../store";
 import type { CheckStatus, ServiceEnvReport, ServiceStatus } from "../types";
 import { StatusBadge } from "./StatusBadge";
@@ -63,7 +65,7 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
       await fn();
       // 启动/重启完成即告知访问方式（端口 / 地址），否则用户不知道去哪访问
       if (label === "启动" || label === "重启") {
-        const acc = accessLine(s.id, { kind: s.kind, ports: s.ports });
+        const acc = accessLine(s.id, { kind: s.kind, ports: s.ports, remote: s.remoteEndpoint });
         setInfoMsg(acc ? `${label}成功 · ${acc}` : `${label}成功`);
       }
       await refreshServices([s.id, ...s.dependsOn]);
@@ -141,6 +143,28 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
                   端口 {s.ports.join(", ")}
                 </Typography>
               )}
+              {/* 一键打开：服务有网页地址时给个直达入口（如 MinIO 控制台），不用猜、不用复制 */}
+              {(() => {
+                const acc = accessLine(s.id, { kind: s.kind, ports: s.ports, remote: s.remoteEndpoint });
+                const url = acc?.match(/https?:\/\/[^\s，、；）)]+/)?.[0];
+                if (!url) return null;
+                return (
+                  <Tooltip title={`打开 ${url}`}>
+                    <IconButton
+                      size="small"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        void openUrl(url).catch(() => {
+                          void navigator.clipboard?.writeText(url).catch(() => undefined);
+                          setInfoMsg(`无法自动打开，链接已复制到剪贴板：${url}`);
+                        });
+                      }}
+                    >
+                      <OpenInNew sx={{ fontSize: 14, color: "primary.main" }} />
+                    </IconButton>
+                  </Tooltip>
+                );
+              })()}
             </Stack>
             {/* 快捷操作：阻止冒泡，避免误触卡片跳转。
                 第三方依赖（VerneMQ/MinIO/Redis）由系统服务/虚拟机管理，平台只检测不托管
@@ -245,7 +269,7 @@ export function ServiceCard({ s, env }: { s: ServiceStatus; env?: ServiceEnvRepo
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
         <Alert severity="success" variant="filled" onClose={() => setInfoMsg(null)}>
-          {infoMsg}
+          {infoMsg && <LinkifiedText text={infoMsg} />}
         </Alert>
       </Snackbar>
       <ServiceDiscoveryDialog

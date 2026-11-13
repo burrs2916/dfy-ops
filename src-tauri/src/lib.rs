@@ -191,6 +191,7 @@ pub fn run() {
     tauri::Builder::default()
         // 原生目录/文件选择对话框（设置 → 资源目录「浏览」）
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             // debug.log：多路径写入（和 biosphere-terminal-app 同策略）。
             // 总有一处能写——Windows Program Files 下 exe 旁边可能没权限，

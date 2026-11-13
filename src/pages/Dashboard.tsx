@@ -29,6 +29,7 @@ import ReadinessCard from "../components/ReadinessCard";
 import { PageHeader } from "../components/PageHeader";
 import { api } from "../api";
 import { accessLine } from "../access";
+import { LinkifiedText } from "../components/LinkifiedText";
 import type { DiagnosisResponse } from "../types";
 
 /** 首页统计卡：左侧品牌色图标锚点 + 右侧标签/大数字，替代原先的白框裸数字 */
@@ -214,7 +215,7 @@ export default function Dashboard() {
         .filter((x) => x.ok)
         .map((x) => {
           const svc = services.find((sv) => sv.id === x.id);
-          return accessLine(x.id, svc ? { kind: svc.kind, ports: svc.ports } : undefined);
+          return accessLine(x.id, svc ? { kind: svc.kind, ports: svc.ports, remote: svc.remoteEndpoint } : undefined);
         })
         .filter((l): l is string => !!l);
       const access = accessLines.length
@@ -393,7 +394,7 @@ export default function Dashboard() {
               .then(() => { void refreshEnvAll(); })
               .then(() => {
                 const svc = services.find((x) => x.id === id);
-                const acc = accessLine(id, svc ? { kind: svc.kind, ports: svc.ports } : undefined);
+                const acc = accessLine(id, svc ? { kind: svc.kind, ports: svc.ports, remote: svc.remoteEndpoint } : undefined);
                 setSnack({ open: true, msg: acc ? `启动完成 · ${acc}` : "启动完成", severity: "success" });
               })
               .catch((e) => setSnack({ open: true, msg: "启动失败：" + (e as Error).message, severity: "error" }))
@@ -430,7 +431,7 @@ export default function Dashboard() {
           variant="filled"
           onClose={() => setSnack((s) => ({ ...s, open: false }))}
         >
-          {snack.msg}
+          <LinkifiedText text={snack.msg} />
         </Alert>
       </Snackbar>
 

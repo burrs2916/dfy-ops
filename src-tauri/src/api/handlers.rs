@@ -86,6 +86,10 @@ pub struct ServiceStatus {
     /// 前端据此把「Windows 服务管理器」类提示换成远程承载语义。
     #[serde(rename = "remoteOnly")]
     pub remote_only: bool,
+    /// 托管远程端点（host, port）：远程部署型服务已配置的真实地址，
+    /// 前端据此生成可点击的访问入口（如 MinIO 控制台 http://host:9001/）。
+    #[serde(rename = "remoteEndpoint")]
+    pub remote_endpoint: Option<(String, u16)>,
     /// 静态托管服务（dfy-ui：nginx 反代静态目录）：无独立进程，检测 = 本地
     /// 声明端口 TCP 探测；无启停按钮，不参与全部启停，前端据此隐藏启停入口。
     #[serde(rename = "staticSite")]
@@ -180,6 +184,7 @@ fn to_status(
         is_daemon: def.is_daemon,
         third_party: def.third_party,
         remote_only: def.remote_only,
+        remote_endpoint: remote.cloned(),
         static_site: def.static_site,
         installed,
         description: def.description.clone(),

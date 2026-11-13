@@ -24,6 +24,7 @@ import {
 import { ArrowBack, Build, Close, ContentCopy, DnsOutlined, Download, PlayArrow, Settings } from "@mui/icons-material";
 import { api } from "../api";
 import { accessLine } from "../access";
+import { LinkifiedText } from "../components/LinkifiedText";
 import { useOpsStore } from "../store";
 import { LOG_BG, ColoredLogLine } from "../components/LogTerminal";
 import type { LogsResponse, ServiceEnvReport, ServiceStatus } from "../types";
@@ -41,10 +42,13 @@ function ConfigRow({
   label,
   value,
   onCopy,
+  linkify,
 }: {
   label: string;
   value: string;
   onCopy: (text: string) => void;
+  /** 值里的 http(s) 链接渲染为可点击项（点击直接开浏览器），如「访问入口」行 */
+  linkify?: boolean;
 }) {
   return (
     <Stack direction="row" spacing={1} alignItems="center">
@@ -69,7 +73,7 @@ function ConfigRow({
           wordBreak: "break-all",
         }}
       >
-        {value}
+        {linkify ? <LinkifiedText text={value} /> : value}
       </Box>
       <IconButton
         size="small"
@@ -383,6 +387,11 @@ export default function ServiceDetail() {
                     <ConfigRow label="安装目录" value={svc.installDir} onCopy={copyText} />
                     <ConfigRow label="启动命令" value={svc.runCmd} onCopy={copyText} />
                     {svc.buildCmd && <ConfigRow label="构建命令" value={svc.buildCmd} onCopy={copyText} />}
+                    {/* 访问入口：地址可直接点击打开浏览器（远程服务按托管端点生成） */}
+                    {(() => {
+                      const acc = accessLine(id, { kind: svc.kind, ports: svc.ports });
+                      return acc ? <ConfigRow label="访问入口" value={acc} onCopy={copyText} linkify /> : null;
+                    })()}
                   </>
                 )}
                 {svc.healthUrl && (
@@ -564,12 +573,12 @@ export default function ServiceDetail() {
 
       <Snackbar
         open={snack.open}
-        autoHideDuration={3500}
+        autoHideDuration={snack.msg.length > 45 ? 12000 : 3500}
         onClose={() => setSnack((s) => ({ ...s, open: false }))}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
         <Alert severity={snack.severity} variant="filled" onClose={() => setSnack((s) => ({ ...s, open: false }))}>
-          {snack.msg}
+          <LinkifiedText text={snack.msg} />
         </Alert>
       </Snackbar>
 

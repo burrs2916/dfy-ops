@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { LinkifiedText } from "../../components/LinkifiedText";
 import {
   Alert,
   Badge,
@@ -1424,12 +1425,12 @@ export default function RepairCenter({
 
       <Snackbar
         open={snack.open}
-        autoHideDuration={4000}
+        autoHideDuration={snack.msg.length > 45 ? 12000 : 4000}
         onClose={() => setSnack((s) => ({ ...s, open: false }))}
         anchorOrigin={{ vertical: "bottom", horizontal: "center" }}
       >
         <Alert severity={snack.severity} variant="filled" onClose={() => setSnack((s) => ({ ...s, open: false }))}>
-          {snack.msg}
+          <LinkifiedText text={snack.msg} />
         </Alert>
       </Snackbar>
     </Stack>

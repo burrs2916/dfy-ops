@@ -40,8 +40,17 @@ export function accessUrl(id: string): string | null {
 /** 组装「访问地址 / 访问方式」片段，如「访问地址 http://localhost:4200/（边缘网关控制台，端口 4200，浏览器打开）」。 */
 export function accessLine(
   id: string,
-  opts?: { kind?: string; ports?: number[] },
+  opts?: { kind?: string; ports?: number[]; remote?: [string, number] | null },
 ): string | null {
+  // 远程部署型服务：地址按托管端点生成（未配置时按平台默认 192.168.56.101）；
+  // MinIO 控制台在 :9001、S3 API 在 :9000，链接可直接点击打开
+  const remoteHost = opts?.remote?.[0] ?? "192.168.56.101";
+  if (id === "minio") {
+    return `访问地址 http://${remoteHost}:9001/（MinIO 控制台，浏览器打开）；API http://${remoteHost}:9000/`;
+  }
+  if (id === "vernemq") return `访问方式 VerneMQ MQTT ${remoteHost}:18830（用户名 cloud）`;
+  if (id === "redis") return `访问方式 Redis 连接 ${remoteHost}:6379`;
+
   const known = KNOWN[id];
   if (known) {
     if (known.url) {
