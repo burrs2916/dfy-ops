@@ -792,11 +792,35 @@ fn parse_lsof_ports(text: &str) -> Vec<u16> {
     ports
 }
 
-/// install_dir 存在才作为子进程工作目录；不存在则不设置（兜底，避免 spawn 直接失败）。
+/// 子进程工作目录强制锚定 install_dir——**不允许继承平台自身 cwd**。
+///
+/// edge-conductor 二进制不解析 `--config` 参数，config.toml 与全部 SQLite
+/// 数据库路径都按进程 cwd 相对解析（`get_project_root() == current_dir()`）。
+/// 旧逻辑「install_dir 不存在就不设置 cwd」会让进程继承平台 cwd，加载到错误
+/// 的 config（白名单对不上 → 初始化口令验证失败）且 SQLite 按错位路径打开
+/// （code 14 unable to open database file）——2026-11-13 platform-spawn.log
+/// 初始化失败的根因。
+///
+/// 目录不存在时先创建；创建失败才降级为不设置（避免 spawn 直接失败），
+/// 并落 debug 日志留痕。
 fn apply_cwd(command: &mut Command, install_dir: &str) {
-    if std::path::Path::new(install_dir).is_dir() {
-        command.current_dir(install_dir);
+    if install_dir.trim().is_empty() {
+        return;
     }
+    let path = std::path::Path::new(install_dir);
+    if !path.is_dir() {
+        if let Err(e) = std::fs::create_dir_all(path) {
+            crate::debug_log::entry(
+                PROC_SCOPE,
+                "WARN",
+                "apply_cwd",
+                "mkdir_failed",
+                &format!("install_dir={install_dir} 创建失败：{e}，子进程将继承平台 cwd（存在配置/数据路径错位风险）"),
+            );
+            return;
+        }
+    }
+    command.current_dir(path);
 }
 
 /// 按平台选择 shell 并以分离方式启动命令（start 统一走 [`spawn_detached_logged`]，
