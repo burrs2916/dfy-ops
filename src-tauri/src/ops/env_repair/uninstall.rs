@@ -172,10 +172,10 @@ pub fn start_uninstall(
     if !matches!(
         target,
         "mysql" | "redis" | "java" | "nginx" | "dfy-backend" | "dfy-ui" | "edge-conductor"
-            | "gateway-console" | "greptime"
+            | "gateway-console" | "greptime" | "dfy-spatial"
     ) {
         return Err(format!(
-            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis/Java/Nginx/DFY 后端/DFY 前端/边缘计算/Gateway Console/GreptimeDB 时序库），请使用 AI 方案或控制面板手动卸载",
+            "{} 不支持平台内卸载（当前覆盖 MySQL/Redis/Java/Nginx/DFY 后端/DFY 前端/边缘计算/Gateway Console/GreptimeDB 时序库/空间数据系统），请使用 AI 方案或控制面板手动卸载",
             crate::ops::resource::target_label(target)
         ));
     }
@@ -213,6 +213,167 @@ pub fn start_uninstall(
         "平台内卸载仅支持 Windows 目标机，{} 请手动卸载",
         crate::ops::resource::target_label(target)
     ))
+}
+
+/// dfy-spatial（Tauri/NSIS 桌面应用）卸载（Windows）：先关在跑的应用（否则
+/// 卸载器删不掉被占用的 exe），再按卸载注册表 QuietUninstallString /
+/// UninstallString（+ /S）UAC 静默执行——与安装链路同一 Start-Process 语义。
+/// 成败以复核「卸载条目消失」为准（与安装探测 appdetect 同一事实来源）。
+/// remove_data = 连本机应用数据（地图/图标/背景等）与安装目录残留一起删。
+#[cfg(target_os = "windows")]
+async fn run_nsis_app_uninstall(
+    state: Arc<RepairState>,
+    remove_data: bool,
+    install_dir: String,
+    config_dir: String,
+    env_cache: EnvCache,
+) {
+    use std::time::Instant;
+    let label = crate::ops::resource::target_label("dfy-spatial");
+    let t0 = Instant::now();
+    state.log(format!("开始卸载 {label}（NSIS 卸载器，静默模式，需 UAC 确认）"));
+    state.patch(|j| j.stage = "uninstall".into());
+
+    // 服务定义取产品名/进程名（services.toml 覆盖优先，与检测同一事实来源）
+    let def = crate::ops::registry::services_with_override(std::path::Path::new(&config_dir))
+        .into_iter()
+        .find(|d| d.id == "dfy-spatial");
+    let (products, names) = def.map(|d| (d.product_names, d.process_names)).unwrap_or_default();
+    if products.is_empty() && names.is_empty() {
+        finish(state.clone(), env_cache, false, format!("{label} 服务定义缺失，无法定位卸载条目")).await;
+        return;
+    }
+
+    // 1) 应用在跑先关掉——否则卸载器删不掉被占用的主程序
+    {
+        let n = names.clone();
+        let acted =
+            tokio::task::spawn_blocking(move || crate::ops::appdetect::kill_app_processes(&n))
+                .await
+                .unwrap_or(false);
+        if acted {
+            state.log("应用正在运行 → 已结束应用进程");
+        }
+    }
+
+    // 2) 卸载注册表取卸载命令
+    let entry = {
+        let p = products.clone();
+        tokio::task::spawn_blocking(move || crate::ops::appdetect::uninstall_entry(&p))
+            .await
+            .ok()
+            .flatten()
+    };
+    let Some(entry) = entry else {
+        finish(
+            state.clone(),
+            env_cache,
+            false,
+            format!("卸载注册表未找到 {label} 的卸载条目（可能未安装或已卸载）"),
+        )
+        .await;
+        return;
+    };
+    let cmd = if !entry.quiet_cmd.trim().is_empty() {
+        entry.quiet_cmd.clone()
+    } else if !entry.uninstall_cmd.trim().is_empty() {
+        format!("{} /S", entry.uninstall_cmd)
+    } else {
+        finish(
+            state.clone(),
+            env_cache,
+            false,
+            format!("{label} 卸载条目缺少 UninstallString，请到控制面板手动卸载"),
+        )
+        .await;
+        return;
+    };
+    state.log(format!("执行卸载器：{cmd}"));
+
+    // 3) UAC 静默执行（Start-Process -Wait：无 shell 解释层，程序/参数引号感知拆分）
+    let (prog, args) = super::install::split_program_args(&cmd);
+    let ps = format!(
+        "Start-Process -FilePath '{p}' -ArgumentList '{a}' -Verb RunAs -Wait",
+        p = prog.replace('\'', "''"),
+        a = args.replace('\'', "''"),
+    );
+    let out = tokio::task::spawn_blocking(move || {
+        std::process::Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &ps])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+    })
+    .await
+    .unwrap_or_else(|e| Err(std::io::Error::other(format!("执行线程失败：{e}"))));
+
+    // 4) 复核：卸载条目消失才算成功（UAC 被拒 / 卸载器失败都不误报）
+    let mut ok = false;
+    let mut err = String::new();
+    match out {
+        Ok(o) if o.status.success() || o.status.code().is_none() => {
+            for _ in 0..30 {
+                let p = products.clone();
+                let installed =
+                    tokio::task::spawn_blocking(move || crate::ops::appdetect::is_installed(&p, &[]))
+                        .await
+                        .unwrap_or(true);
+                if !installed {
+                    ok = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            if !ok {
+                err = format!("{label} 卸载命令已执行但卸载条目仍在（UAC 可能被拒绝，或卸载器需要交互确认）");
+            }
+        }
+        Ok(o) => {
+            err = format!(
+                "卸载器执行失败（退出码 {}）：{}",
+                o.status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+        }
+        Err(e) => err = format!("卸载器启动失败：{e}"),
+    }
+
+    // 5) remove_data：连本机应用数据与安装残留一起删（默认不勾选）
+    if ok && remove_data {
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            let data_dir = std::path::Path::new(&appdata).join("com.dfy.spatialdata-system");
+            if data_dir.exists() {
+                match std::fs::remove_dir_all(&data_dir) {
+                    Ok(_) => state.log(format!("已删除应用数据目录：{}", data_dir.display())),
+                    Err(e) => {
+                        state.log(format!("⚠ 删除应用数据目录失败：{e}（目录被占用，可重启后手动删）"))
+                    }
+                }
+            }
+        }
+        if !install_dir.is_empty() && std::path::Path::new(&install_dir).exists() {
+            match std::fs::remove_dir_all(&install_dir) {
+                Ok(_) => state.log(format!("已清理安装目录残留：{install_dir}")),
+                Err(e) => state.log(format!("⚠ 安装目录残留清理失败：{e}")),
+            }
+        }
+    }
+    if ok {
+        state.log(format!(
+            "{label} 已卸载（用时 {:.0}s{}）",
+            t0.elapsed().as_secs(),
+            if remove_data { "，含本机数据" } else { "" }
+        ));
+    }
+    crate::ops_events::record(
+        "repair",
+        "dfy-spatial",
+        "uninstall",
+        ok,
+        if ok { "NSIS 静默卸载" } else { err.as_str() },
+    );
+    finish(state, env_cache, ok, err).await;
 }
 
 /// dfy-backend / dfy-ui 通用卸载：无服务注册、无 MSI 条目，产物是「平台进程 + 目录」。
@@ -694,6 +855,12 @@ async fn run_uninstall(
     }
     if target == "nginx" {
         run_nginx_uninstall(state, remove_data, install_dir, env_cache).await;
+        return;
+    }
+    // dfy-spatial：Tauri/NSIS 桌面应用——关在跑的应用 + 注册表卸载器静默卸载，
+    // 复核以卸载注册表条目消失为准（与安装探测同源）。
+    if target == "dfy-spatial" {
+        run_nsis_app_uninstall(state, remove_data, install_dir, config_dir, env_cache).await;
         return;
     }
     // dfy-backend / dfy-ui：无服务注册、无 MSI 条目——停平台进程 + 删目录即可。

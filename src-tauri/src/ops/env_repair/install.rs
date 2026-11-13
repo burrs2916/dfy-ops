@@ -235,8 +235,9 @@ async fn run_install(state: Arc<RepairState>, expected_major: u32, env_cache: En
 /// 把预置安装命令拆成 (程序, 参数串)：双引号开头取到闭合引号为程序（不含引号），
 /// 否则取首个空白前的 token。命令由 resource::installer_command 生成（非用户输入），
 /// 无解析注入面；程序段与参数段随后各自做 PowerShell 单引号转义。
+/// 安装与卸载（NSIS 卸载器）链路共用。
 #[cfg(target_os = "windows")]
-fn split_program_args(cmd: &str) -> (&str, &str) {
+pub(crate) fn split_program_args(cmd: &str) -> (&str, &str) {
     let t = cmd.trim();
     if let Some(rest) = t.strip_prefix('"') {
         match rest.find('"') {

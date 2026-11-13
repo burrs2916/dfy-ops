@@ -303,8 +303,9 @@ pub async fn start_generic_repair(
 /// （MSI 注册表条目静默卸载）+ nginx（Windows 服务可选注册，先优雅停服再删目录）
 /// + dfy-backend/dfy-ui（无服务注册，停平台进程 + 删目录）
 /// + edge-conductor（无服务注册，停 edgecd-daemon 进程 + 删目录）
-/// + greptime（捆绑时序库：停 greptime.exe 子进程 + 删 greptimedb 目录）。
-pub const UNINSTALLABLE: [&str; 9] = [
+/// + greptime（捆绑时序库：停 greptime.exe 子进程 + 删 greptimedb 目录）
+/// + dfy-spatial（Tauri/NSIS 桌面应用：关应用 + 注册表卸载器静默卸载）。
+pub const UNINSTALLABLE: [&str; 10] = [
     "mysql",
     "redis",
     "java",
@@ -314,6 +315,7 @@ pub const UNINSTALLABLE: [&str; 9] = [
     "edge-conductor",
     "gateway-console",
     "greptime",
+    "dfy-spatial",
 ];
 
 /// 可探测安装痕迹的全部目标（= UNINSTALLABLE）。
@@ -332,7 +334,7 @@ pub const PROBEABLE: [&str; 10] = [
     "edge-conductor",
     "gateway-console",
     "greptime",
-    // Tauri 桌面应用：卸载注册表探测（进入「待安装/已安装」列表）；平台不提供卸载
+    // Tauri 桌面应用：卸载注册表探测（进入「待安装/已安装」列表）；卸载走 NSIS 卸载器
     "dfy-spatial",
 ];
 
@@ -352,6 +354,57 @@ pub(crate) fn registry_install_dir(state: &AppState, target: &str) -> String {
         .find(|d| d.id == target)
         .map(|d| d.install_dir.clone())
         .unwrap_or_else(|| format!("C:\\services\\{target}"))
+}
+
+/// 扫安装目录找桌面应用主程序 exe（卸载注册表取不到时的启动兜底）：
+/// 排除卸载器（uninstall/卸载），优先主程序基名，其次目录里第一个其它 exe。
+/// 非 Windows 恒 None。
+pub fn find_main_exe(dir: &str) -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "windows")]
+    {
+        let rd = std::fs::read_dir(dir).ok()?;
+        let mut others: Vec<std::path::PathBuf> = Vec::new();
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.extension().map(|x| x.eq_ignore_ascii_case("exe")).unwrap_or(false) {
+                let name = p.file_name().unwrap_or_default().to_string_lossy().to_lowercase();
+                if name.contains("uninstall") || name.contains("卸载") {
+                    continue;
+                }
+                if name.contains("dfy-spatialdata-system") {
+                    return Some(p);
+                }
+                others.push(p);
+            }
+        }
+        others.into_iter().next()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = dir;
+        None
+    }
+}
+
+/// 拉起桌面应用主程序（分离进程：平台退出不带走应用）。非 Windows 拒绝执行。
+pub fn launch_app_detached(exe: &std::path::Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008; // 与平台会话解耦，不共享控制台
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        std::process::Command::new(exe)
+            .current_dir(exe.parent().unwrap_or(std::path::Path::new(".")))
+            .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+            .spawn()
+            .map(|_| ())
+            .map_err(|e| format!("启动 {} 失败：{e}", exe.display()))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = exe;
+        Err("桌面应用启动仅支持 Windows 目标机".to_string())
+    }
 }
 
 /// 按映像名探测进程是否在跑（tasklist；非 Windows 恒 false）。
@@ -482,18 +535,24 @@ pub(crate) async fn probe_target(state: &AppState, target: &str) -> (bool, bool,
     // productNames）判「装没装」，与服务卡 installed（appdetect）同源同口径。
     if target == "dfy-spatial" {
         let def = state.registry.iter().find(|d| d.id == target).cloned();
-        let installed = match def {
+        let (installed, running) = match def {
             Some(d) => {
                 let exe_names: Vec<String> = d
                     .process_names
                     .iter()
                     .map(|n| n.trim_end_matches(".exe").to_string())
                     .collect();
-                blocking(move || crate::ops::appdetect::is_installed(&d.product_names, &exe_names)).await
+                // 运行态 = 进程映像在跑（tasklist），与启停链路同源——
+                // 桌面应用没有固定端口，端口探测在这里无意义
+                let names = d.process_names.clone();
+                let running = blocking(move || crate::ops::appdetect::is_app_running(&names)).await;
+                let installed =
+                    blocking(move || crate::ops::appdetect::is_installed(&d.product_names, &exe_names)).await;
+                (installed, running)
             }
-            None => false,
+            None => (false, false),
         };
-        return (installed, false, false);
+        return (installed, running, false);
     }
     let install_dir = registry_install_dir(state, target);
     // dfy-backend/dfy-ui/nginx/edge-conductor/gateway-console 都不注册 Windows 服务：按 install_dir + 关键文件判定
@@ -1468,6 +1527,116 @@ pub async fn service_action(
             &format!("手动{action_label}（48085 监听状态：{up}）"),
         );
         return Json(serde_json::json!({ "ok": true, "running": up, "message": msg }));
+    }
+    // dfy-spatial：Tauri 桌面应用（NSIS）——无 Windows 服务：启动 = 从卸载
+    // 注册表解析安装的主程序 exe 拉起（不信平台内固定安装目录），停止 = 结束
+    // 进程名匹配的应用进程；运行判定与环境检查同源（appdetect）。
+    if req.target == "dfy-spatial" {
+        if !matches!(req.action.as_str(), "start" | "stop") {
+            return Json(serde_json::json!({ "ok": false, "error": format!("未知操作：{}", req.action) }));
+        }
+        let label = crate::ops::resource::target_label("dfy-spatial").to_string();
+        let def = state.registry.iter().find(|d| d.id == "dfy-spatial").cloned();
+        let (products, names) = def.map(|d| (d.product_names, d.process_names)).unwrap_or_default();
+        let running_before = {
+            let n = names.clone();
+            blocking(move || crate::ops::appdetect::is_app_running(&n)).await
+        };
+        crate::debug_log::entry(
+            crate::ops::process::PROC_SCOPE,
+            "INFO",
+            "service_action",
+            "app_request",
+            &format!("target=dfy-spatial action={} 操作前={}", req.action, if running_before { "运行中" } else { "已停止" }),
+        );
+        if req.action == "start" {
+            if running_before {
+                return Json(serde_json::json!({ "ok": true, "running": true, "message": format!("{label}已在运行") }));
+            }
+            // 主程序位置：卸载注册表（DisplayIcon/InstallLocation）优先，兜底扫
+            // 平台约定安装目录——两处都取不到才报「未安装」
+            let exe = {
+                let p = products.clone();
+                let n = names.clone();
+                blocking(move || crate::ops::appdetect::installed_exe(&p, &n)).await
+            };
+            let exe = match exe {
+                Some(e) => Some(e),
+                None => {
+                    let dir = registry_install_dir(&state, "dfy-spatial");
+                    blocking(move || find_main_exe(&dir)).await
+                }
+            };
+            let Some(exe) = exe else {
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("{label} 未找到已安装的主程序，请先到「安装维护」完成安装")
+                }));
+            };
+            return match launch_app_detached(&exe) {
+                Ok(()) => {
+                    // 拉起后复核进程出现（桌面应用冷启可达数秒，轮询 5s）
+                    let mut up = false;
+                    for _ in 0..10 {
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        let n = names.clone();
+                        if blocking(move || crate::ops::appdetect::is_app_running(&n)).await {
+                            up = true;
+                            break;
+                        }
+                    }
+                    let exe_name = exe.file_name().map(|s| s.to_string_lossy()).unwrap_or_default();
+                    let message = if up {
+                        format!("{label}已启动 · 桌面窗口即将打开（{exe_name}）")
+                    } else {
+                        format!("{label} 已发出启动命令但 5 秒内未检测到进程，请到安装目录双击 {exe_name} 确认（可能缺 WebView2 运行时）")
+                    };
+                    crate::ops_events::record(
+                        "user",
+                        "dfy-spatial",
+                        "start",
+                        up,
+                        &format!("手动启动（{}）", if up { "进程已出现" } else { "未检测到进程" }),
+                    );
+                    Json(serde_json::json!({ "ok": up, "running": up, "message": message }))
+                }
+                Err(e) => {
+                    crate::ops_events::record("user", "dfy-spatial", "start", false, &format!("启动失败：{e}"));
+                    Json(serde_json::json!({ "ok": false, "error": format!("启动失败：{e}") }))
+                }
+            }
+        } else {
+            // stop：结束进程并复核消失（桌面应用无服务可停，按进程映像收口）
+            if !running_before {
+                return Json(serde_json::json!({ "ok": true, "running": false, "message": format!("{label}未在运行") }));
+            }
+            {
+                let n = names.clone();
+                blocking(move || crate::ops::appdetect::kill_app_processes(&n)).await;
+            }
+            let mut down = false;
+            for _ in 0..10 {
+                tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+                let n = names.clone();
+                if !blocking(move || crate::ops::appdetect::is_app_running(&n)).await {
+                    down = true;
+                    break;
+                }
+            }
+            crate::ops_events::record(
+                "user",
+                "dfy-spatial",
+                "stop",
+                down,
+                &format!("手动停止（{}）", if down { "进程已结束" } else { "进程仍在运行" }),
+            );
+            let message = if down {
+                format!("{label}已停止")
+            } else {
+                format!("{label} 结束进程未生效，请检查是否有弹窗在等待确认")
+            };
+            return Json(serde_json::json!({ "ok": down, "running": !down, "message": message }));
+        }
     }
     if !UNINSTALLABLE.contains(&req.target.as_str()) {
         return Json(serde_json::json!({ "ok": false, "error": format!("不支持的服务：{}", req.target) }));
