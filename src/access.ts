@@ -46,7 +46,7 @@ export function accessLine(
   // MinIO 控制台在 :9001、S3 API 在 :9000，链接可直接点击打开
   const remoteHost = opts?.remote?.[0] ?? "192.168.56.101";
   if (id === "minio") {
-    return `访问地址 http://${remoteHost}:9001/（MinIO 控制台，浏览器打开）；API http://${remoteHost}:9000/`;
+    return `访问地址 http://${remoteHost}:9001/（MinIO 控制台，浏览器打开，用户名 dfy，密码 dfy123456）；API http://${remoteHost}:9000/`;
   }
   if (id === "vernemq") return `访问方式 VerneMQ MQTT ${remoteHost}:18830（用户名 cloud）`;
   if (id === "redis") return `访问方式 Redis 连接 ${remoteHost}:6379`;
