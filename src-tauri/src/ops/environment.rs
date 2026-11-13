@@ -263,6 +263,9 @@ fn fix_hint_for(id: &str) -> String {
         "service-redis" | "dep-redis" => {
             "Redis 为远程部署模式（本机不安装）：请到「远程部署」配置页检查主机/端口/密码设置后重新检测".into()
         }
+        "installed" => {
+            "到「修复中心 → 安装维护」待安装列表安装该应用（安装包放在资源目录约定文件夹）".into()
+        }
         "dep-dfy-backend" => "在服务总览启动 DFY 后端（受管），或确认其已在外部运行".into(),
         _ => "请在修复中心根据上方“实际”信息排查并安装对应依赖".into(),
     }
@@ -512,6 +515,57 @@ pub fn check_service_env_with(
             // 未运行四分支），此处不再单独出项。
         }
         ServiceKind::TauriApp => {
+            // 「装没装」判项（productNames 声明型）：桌面应用检测的命门——此前
+            // TauriApp 分支只查 WebView2、统一状态段还明确跳过 TauriApp，导致
+            // 未安装时报告全绿（2026-11-13 反馈：空间数据系统没装却检测通过）。
+            if !def.product_names.is_empty() {
+                if running {
+                    items.push(item(
+                        "installed",
+                        "应用安装状态",
+                        "安装",
+                        "已安装",
+                        "进程运行中（视为已安装）",
+                        CheckStatus::Pass,
+                    ));
+                } else {
+                    let exe_names: Vec<String> = def
+                        .process_names
+                        .iter()
+                        .map(|n| n.trim_end_matches(".exe").to_string())
+                        .collect();
+                    let hit = crate::ops::appdetect::is_installed(&def.product_names, &exe_names);
+                    #[cfg(target_os = "windows")]
+                    let (actual, status) = if hit {
+                        (
+                            format!("已安装（卸载注册表记录：{}）", def.product_names.join(" / ")),
+                            CheckStatus::Pass,
+                        )
+                    } else {
+                        (
+                            "卸载注册表无该应用的安装记录（未安装）".to_string(),
+                            CheckStatus::Fail,
+                        )
+                    };
+                    #[cfg(not(target_os = "windows"))]
+                    let (actual, status) = if hit {
+                        ("检测到本机应用记录".to_string(), CheckStatus::Pass)
+                    } else {
+                        (
+                            "本平台无安装记录探测（以 Windows 卸载注册表为准），请人工确认是否已安装".to_string(),
+                            CheckStatus::Warn,
+                        )
+                    };
+                    items.push(item(
+                        "installed",
+                        "应用安装状态",
+                        "安装",
+                        "已安装",
+                        &actual,
+                        status,
+                    ));
+                }
+            }
             // Tauri 桌面客户端：WebView2 是 Windows 专属依赖；运行中则事实已回答。
             if running {
                 items.push(item(
@@ -1330,13 +1384,30 @@ mod tests {
         }
     }
 
-    /// macOS：Tauri 客户端使用系统内置 WKWebView，未运行也不应产生 WebView2 假警告。
+    /// macOS：Tauri 客户端用系统内置 WKWebView，未运行不得有 WebView2 假警告；
+    /// 「应用安装状态」判项在本平台无卸载注册表可查——如实给 Warn（人工确认），
+    /// 不假绿（2026-11-13 反馈：未安装却全通过）也绝不误判 Fail。
     #[cfg(target_os = "macos")]
     #[test]
     fn tauri_env_passes_on_macos_without_running() {
         let def = def_of("dfy-spatial");
         let report = check_service_env_with(&def, &states(&[]), None);
-        assert_eq!(report.overall, CheckStatus::Pass);
+        assert!(
+            report.items.iter().all(|i| i.id != "webview2"),
+            "macOS 不应出现 WebView2 项: {:?}",
+            report.items
+        );
+        let installed = report
+            .items
+            .iter()
+            .find(|i| i.id == "installed")
+            .expect("dfy-spatial 声明了 productNames，必须出「应用安装状态」项");
+        assert_eq!(
+            installed.status,
+            CheckStatus::Warn,
+            "mac 无注册表可查应为 Warn（人工确认）: {installed:?}"
+        );
+        assert_ne!(report.overall, CheckStatus::Fail);
     }
 
     /// 纯远程模式（Redis）：检测 = 托管端点 TCP 可达。端点连通 → service 项与
