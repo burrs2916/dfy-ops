@@ -304,7 +304,7 @@ pub const UNINSTALLABLE: [&str; 9] = [
 /// （「待安装」列表有没有条目全靠这份探测），所以纳入探测列表。
 /// greptime（GreptimeDB）是 edge-conductor 的捆绑子进程组件：安装随边缘计算
 /// 管线整合，卡片上独立显示安装状态、支持单独卸载。
-pub const PROBEABLE: [&str; 9] = [
+pub const PROBEABLE: [&str; 10] = [
     "mysql",
     "redis",
     "java",
@@ -314,6 +314,8 @@ pub const PROBEABLE: [&str; 9] = [
     "edge-conductor",
     "gateway-console",
     "greptime",
+    // Tauri 桌面应用：卸载注册表探测（进入「待安装/已安装」列表）；平台不提供卸载
+    "dfy-spatial",
 ];
 
 pub(crate) fn registry_install_dir(state: &AppState, target: &str) -> String {
@@ -455,6 +457,24 @@ pub(crate) async fn probe_target(state: &AppState, target: &str) -> (bool, bool,
                 || crate::ops::env_repair::managed_java_home().is_some()
         })
         .await;
+        return (installed, false, false);
+    }
+    // dfy-spatial：Tauri 桌面应用（NSIS 安装包）——无 Windows 服务；安装目录可被
+    // 用户在安装时改，不信路径，按卸载注册表 DisplayName / DisplayIcon（服务定义
+    // productNames）判「装没装」，与服务卡 installed（appdetect）同源同口径。
+    if target == "dfy-spatial" {
+        let def = state.registry.iter().find(|d| d.id == target).cloned();
+        let installed = match def {
+            Some(d) => {
+                let exe_names: Vec<String> = d
+                    .process_names
+                    .iter()
+                    .map(|n| n.trim_end_matches(".exe").to_string())
+                    .collect();
+                blocking(move || crate::ops::appdetect::is_installed(&d.product_names, &exe_names)).await
+            }
+            None => false,
+        };
         return (installed, false, false);
     }
     let install_dir = registry_install_dir(state, target);

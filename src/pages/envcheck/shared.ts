@@ -86,9 +86,10 @@ export const TARGET_LABEL: Record<string, string> = {
   "dfy-ui": "DFY 前端",
   "edge-conductor": "边缘计算 (Edge Conductor)",
   "gateway-console": "Gateway Console (边缘网关控制台)",
+  "dfy-spatial": "空间数据系统 (鼎飞益)",
 };
 
-/** 安装与维护卡片的展示顺序：后端三件套在前（nginx 先装），再是中间件 */
+/** 安装与维护卡片的展示顺序：后端三件套在前（nginx 先装），再是中间件，桌面应用收尾 */
 export const SOFTWARE_ORDER = [
   "nginx",
   "dfy-backend",
@@ -101,6 +102,7 @@ export const SOFTWARE_ORDER = [
   "vernemq",
   "minio",
   "greptime",
+  "dfy-spatial",
 ];
 /** 注册了 Windows 服务或走平台进程管理器、可启停的软件（与后端 service_action 口径一致；java 无服务） */
 export const SERVICE_TARGETS = new Set(["mysql", "nginx", "dfy-backend", "edge-conductor", "gateway-console"]);
@@ -113,6 +115,7 @@ export const TARGET_DESC: Record<string, string> = {
   minio: "对象存储（远程）",
   greptime: "时序数据库 · 随边缘计算捆绑",
   nginx: "反向代理 · 80 端口",
+  "dfy-spatial": "矿井喷雾降尘智能管控 · 桌面应用 (NSIS)",
   "dfy-backend": "Spring Boot · 48085",
   "dfy-ui": "Vue3 管理后台 · 静态托管",
   "edge-conductor": "边缘计算网关 · 8084/8085",
