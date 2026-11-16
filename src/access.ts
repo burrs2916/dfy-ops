@@ -21,12 +21,13 @@ const KNOWN: Record<string, Known> = {
   "dfy-ui": { url: "http://localhost/", how: "云端管理控制台", ports: [80] },
   nginx: { url: "http://localhost/", how: "前端站点入口", ports: [80] },
   "edge-conductor": {
+    // 后端 API（8084/8085）：不进 BROWSER_PAGES，不对用户暴露
     url: "http://localhost:8084/",
     how: "边缘计算 API",
     ports: [8084, 8085],
-    extra: "GreptimeDB 控制台 http://localhost:4000/",
   },
-  greptime: { url: "http://localhost:4000/", how: "GreptimeDB 控制台", ports: [4000] },
+  // GreptimeDB 控制台必须带完整路径 /dashboard：4000 根路径是 API 根，打开是空白页
+  greptime: { url: "http://localhost:4000/dashboard", how: "GreptimeDB 控制台", ports: [4000] },
   "dfy-backend": { url: "http://localhost:48085/", how: "后端接口服务", ports: [48085] },
   mysql: { how: "MySQL 客户端连接 127.0.0.1:3306", ports: [3306] },
   "dfy-spatial": { how: "桌面应用：从桌面 / 开始菜单图标打开" },
@@ -44,8 +45,10 @@ export interface AccessLink {
   label: string;
 }
 
-/** 只暴露用户要打开的控制台/页面；后端 API 端口（边缘 8084、后端 48085、S3 9000 等）
- *  不对外展示——它们是程序间调用地址，不是给人看的页面。 */
+/** 只暴露用户要打开的控制台/页面；纯后端 API 端口（边缘 8084、后端 48085、
+ *  S3 9000 等）不对外展示——它们是程序间调用地址，不是给人看的页面。
+ *  GreptimeDB 控制台必须带完整路径 /dashboard（4000 根路径是 API 根，打开空白）；
+ *  边缘计算卡片不带 GreptimeDB 链接（2026-11-16 用户定案，链接挂 GreptimeDB 自身卡片）。 */
 const BROWSER_PAGES = new Set(["gateway-console", "dfy-ui", "nginx", "greptime"]);
 
 /** 服务的地址列表（无地址的服务返回空，如 dfy-spatial 桌面应用、dfy-backend 后端 API）。 */
@@ -64,8 +67,6 @@ export function accessLinks(
   const known = KNOWN[id];
   if (known?.url) {
     const out: AccessLink[] = BROWSER_PAGES.has(id) ? [{ label: known.how, url: known.url }] : [];
-    // 边缘计算自身是后端 API（8084）不展示，只给它捆绑的 GreptimeDB 控制台
-    if (id === "edge-conductor") out.push({ label: "GreptimeDB 控制台", url: "http://localhost:4000/" });
     return out;
   }
   const kind = opts?.kind ?? "";
