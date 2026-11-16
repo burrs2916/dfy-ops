@@ -37,41 +37,52 @@ export function accessUrl(id: string): string | null {
   return KNOWN[id]?.url ?? null;
 }
 
-/** 组装「访问地址 / 访问方式」片段，如「访问地址 http://localhost:4200/（边缘网关控制台，端口 4200，浏览器打开）」。 */
+/** 卡片常驻展示用的地址条目：url=浏览器页面（点击打开）；text=非网页地址（点击复制）。 */
+export interface AccessLink {
+  url?: string;
+  text?: string;
+  label: string;
+}
+
+/** 只暴露用户要打开的控制台/页面；后端 API 端口（边缘 8084、后端 48085、S3 9000 等）
+ *  不对外展示——它们是程序间调用地址，不是给人看的页面。 */
+const BROWSER_PAGES = new Set(["gateway-console", "dfy-ui", "nginx", "greptime"]);
+
+/** 服务的地址列表（无地址的服务返回空，如 dfy-spatial 桌面应用、dfy-backend 后端 API）。 */
+export function accessLinks(
+  id: string,
+  opts?: { kind?: string; ports?: number[]; remote?: [string, number] | null },
+): AccessLink[] {
+  const remoteHost = opts?.remote?.[0] ?? "192.168.56.101";
+  if (id === "minio") {
+    return [
+      { label: "MinIO 控制台", url: `http://${remoteHost}:9001/` },
+      { label: "登录账号", text: "dfy / dfy123456" },
+    ];
+  }
+  if (id === "mysql") return [{ label: "MySQL 数据库", text: "127.0.0.1:3306" }];
+  const known = KNOWN[id];
+  if (known?.url) {
+    const out: AccessLink[] = BROWSER_PAGES.has(id) ? [{ label: known.how, url: known.url }] : [];
+    // 边缘计算自身是后端 API（8084）不展示，只给它捆绑的 GreptimeDB 控制台
+    if (id === "edge-conductor") out.push({ label: "GreptimeDB 控制台", url: "http://localhost:4000/" });
+    return out;
+  }
+  const kind = opts?.kind ?? "";
+  const ports = opts?.ports ?? [];
+  if (["vertx", "vue_spa", "angular_spa", "rust_bin"].includes(kind) && ports.length) {
+    return [{ label: "服务入口", url: `http://localhost:${ports[0]}/` }];
+  }
+  return [];
+}
+
+/** 组装访问入口文案：与卡片展示同源（accessLinks 白名单）——
+ *  后端 API/连接类端口（8084、48085、18830、6379 等）不对外展示。 */
 export function accessLine(
   id: string,
   opts?: { kind?: string; ports?: number[]; remote?: [string, number] | null },
 ): string | null {
-  // 远程部署型服务：地址按托管端点生成（未配置时按平台默认 192.168.56.101）；
-  // MinIO 控制台在 :9001、S3 API 在 :9000，链接可直接点击打开
-  const remoteHost = opts?.remote?.[0] ?? "192.168.56.101";
-  if (id === "minio") {
-    return `访问地址 http://${remoteHost}:9001/（MinIO 控制台，浏览器打开，用户名 dfy，密码 dfy123456）；API http://${remoteHost}:9000/`;
-  }
-  if (id === "vernemq") return `访问方式 VerneMQ MQTT ${remoteHost}:18830（用户名 cloud）`;
-  if (id === "redis") return `访问方式 Redis 连接 ${remoteHost}:6379`;
-
-  const known = KNOWN[id];
-  if (known) {
-    if (known.url) {
-      const ports = opts?.ports?.length ? opts.ports : known.ports ?? [];
-      const portPart = ports.length ? `，端口 ${ports.join("、")}` : "";
-      const extra = known.extra ? `；${known.extra}` : "";
-      return `访问地址 ${known.url}（${known.how}${portPart}，浏览器打开）${extra}`;
-    }
-    return `访问方式 ${known.how}`;
-  }
-
-  // services.toml 自定义服务：按类型兜底
-  const ports = opts?.ports ?? [];
-  if (!ports.length) return null;
-  const kind = opts?.kind ?? "";
-  if (kind === "database" || kind === "mqtt_broker" || kind === "object_storage") {
-    return `连接地址 127.0.0.1:${ports.join("、")}（端口 ${ports.join("、")}）`;
-  }
-  if (kind === "tauri_app") return "桌面应用：从桌面 / 开始菜单图标打开";
-  if (["vertx", "vue_spa", "angular_spa", "rust_bin"].includes(kind)) {
-    return `访问地址 http://localhost:${ports[0]}/（端口 ${ports.join("、")}，浏览器打开）`;
-  }
-  return null;
+  const links = accessLinks(id, opts);
+  if (!links.length) return null;
+  return links.map((l) => `${l.label} ${l.url ?? l.text ?? ""}`).join("；");
 }

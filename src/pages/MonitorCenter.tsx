@@ -33,7 +33,7 @@ import FolderOpen from "@mui/icons-material/FolderOpen";
 import BackupOutlined from "@mui/icons-material/BackupOutlined";
 import DeleteOutline from "@mui/icons-material/DeleteOutline";
 import { api } from "../api";
-import { LOG_BG, LOG_TS_RE, ColoredLogLine, normalizeDate } from "../components/LogTerminal";
+import { LOG_BG, LOG_TS_RE, ColoredLogLine, normalizeDate, lineLevel } from "../components/LogTerminal";
 import { PageHeader } from "../components/PageHeader";
 
 /**
@@ -152,9 +152,16 @@ export default function MonitorCenter() {
   // 时间搜索定位：输入时间片段（HH:mm:ss 或完整日期时间），定位首条 >= 该时间的行
   const [timeQuery, setTimeQuery] = useState("");
   const [jumpIndex, setJumpIndex] = useState<number | null>(null);
+  // 文本过滤：只显示包含关键字的行（对当前尾部 200 行过滤）
+  const [filter, setFilter] = useState("");
   const jumpRef = useRef<HTMLDivElement | null>(null);
   const boxRef = useRef<HTMLDivElement | null>(null);
   const tickRef = useRef<number | null>(null);
+  // tail 请求序号：快速切换文件时丢弃过期响应，防止 A 的内容覆盖 B（看错日志）
+  const tailSeqRef = useRef(0);
+  // 定位锚点（时间戳）：行号会随尾窗滑动漂移，自动刷新后按时间戳重新换算，
+  // 定位高亮不再被一次刷新清掉；行本身无时间戳时为 null（刷新即清，与旧行为一致）
+  const jumpTsRef = useRef<Date | null>(null);
 
   const fetchList = useCallback(async () => {
     try {
@@ -163,10 +170,12 @@ export default function MonitorCenter() {
       setServices(r.services);
       setError(null);
       setSel((cur) => {
-        if (cur) return cur;
         const all = r.services.flatMap((s) =>
           s.files.map((f) => ({ id: s.id, path: f.path, modified: f.modified })),
         );
+        // 自愈：选中文件已被轮转/删除移出清单 → 自动切到最新文件，
+        // 否则右侧终端会永久卡在「读取失败」
+        if (cur && all.some((x) => x.path === cur.path)) return cur;
         const newest = all.sort((a, b) => b.modified - a.modified)[0];
         return newest ? { id: newest.id, path: newest.path } : null;
       });
@@ -185,19 +194,33 @@ export default function MonitorCenter() {
 
   const tail = useCallback(async () => {
     if (!sel) return;
+    const seq = ++tailSeqRef.current; // 本请求序号：响应回来时若已切换文件则丢弃
     setTailBusy(true);
     try {
       const r = await api.logs(sel.id, sel.path);
       const text = (r as { logs?: string }).logs ?? "";
       const next = text.length ? text.replace(/\r/g, "").split("\n") : [];
+      if (seq !== tailSeqRef.current) return; // 过期响应：文件已切换，防止串内容
       cacheLines(sel.path, next); // 存模块缓存：切页返回免重拉
       setLines(next);
       setLastFetch(Date.now());
-      setJumpIndex(null); // 内容已刷新，旧的定位高亮行号失效
+      // 定位高亮按时间戳锚定跨刷新保留（行号随尾窗滑动漂移，刷新后重新换算）
+      if (jumpTsRef.current) {
+        const target = jumpTsRef.current;
+        const idx = next.findIndex((l) => {
+          const t = parseTs(l);
+          return t && t >= target;
+        });
+        setJumpIndex(idx >= 0 ? idx : null);
+        if (idx < 0) jumpTsRef.current = null; // 时间点已滑出尾窗 → 解除锚定
+      } else {
+        setJumpIndex(null); // 无锚点的高亮（无时间戳的行）刷新即失效
+      }
     } catch (e) {
+      if (seq !== tailSeqRef.current) return;
       setLines([`读取失败：${e instanceof Error ? e.message : String(e)}`]);
     } finally {
-      setTailBusy(false);
+      if (seq === tailSeqRef.current) setTailBusy(false);
     }
   }, [sel]);
 
@@ -233,6 +256,52 @@ export default function MonitorCenter() {
     }
   }, [jumpIndex]);
 
+  /** 文本过滤：命中行的原始下标。渲染/定位/错误导航都基于原下标，jumpIndex 语义不变 */
+  const displayLines = useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    if (!q) return lines.map((_, i) => i);
+    return lines.reduce<number[]>((acc, l, i) => {
+      if (l.toLowerCase().includes(q)) acc.push(i);
+      return acc;
+    }, []);
+  }, [lines, filter]);
+
+  /** 错误导航目标（随过滤视图收窄）+ 错误/警告计数（与着色同源 lineLevel） */
+  const errorIdxs = useMemo(
+    () => displayLines.filter((i) => lineLevel(lines[i]) === "error"),
+    [displayLines, lines],
+  );
+  const levelStats = useMemo(() => {
+    let error = 0;
+    let warn = 0;
+    for (const i of displayLines) {
+      const lv = lineLevel(lines[i]);
+      if (lv === "error") error++;
+      else if (lv === "warn") warn++;
+    }
+    return { error, warn };
+  }, [displayLines, lines]);
+
+  /** 上一条/下一条错误：在当前过滤视图内跳，到底回绕 */
+  const gotoError = (dir: 1 | -1) => {
+    if (!errorIdxs.length) return;
+    const cur = jumpIndex ?? -1;
+    const idx =
+      dir === 1
+        ? (errorIdxs.find((i) => i > cur) ?? errorIdxs[0])
+        : ([...errorIdxs].reverse().find((i) => i < cur) ?? errorIdxs[errorIdxs.length - 1]);
+    setJumpIndex(idx);
+    jumpTsRef.current = parseTs(lines[idx]); // 锚时间戳：刷新后重新换算，高亮不丢
+  };
+
+  /** 滚动感知跟随：上翻看历史自动切「停留」，滚回底部自动恢复「跟随」（不再强制拽回） */
+  const handleLogScroll = () => {
+    const el = boxRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    setAutoScroll((cur) => (cur === atBottom ? cur : atBottom));
+  };
+
   /** 按时间定位：首条时间 >= 输入的日志行。无日期输入按日志里出现最多的日期补。 */
   const jumpToTime = () => {
     if (!lines.length) return;
@@ -256,14 +325,17 @@ export default function MonitorCenter() {
       });
       return;
     }
-    const idx = lines.findIndex((l) => {
-      const t = parseTs(l);
-      return t && t >= target;
-    });
+    // 在当前过滤视图内定位（过滤生效时只跳可见行）
+    const idx =
+      displayLines.find((i) => {
+        const t = parseTs(lines[i]);
+        return t && t >= target;
+      }) ?? -1;
     if (idx < 0) {
       setSnack({ open: true, msg: "该时间之后没有日志（检查日期/时间是否正确）", severity: "error" });
       return;
     }
+    jumpTsRef.current = target; // 锚时间戳：自动刷新后按锚点重新换算，高亮保留
     setJumpIndex(idx);
   };
 
@@ -636,6 +708,15 @@ export default function MonitorCenter() {
                   </MenuItem>
                 ))}
               </Select>
+              <Tooltip title="只显示包含关键字的行（对当前尾部 200 行过滤，留空显示全部）">
+                <TextField
+                  size="small"
+                  placeholder="过滤关键字"
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value)}
+                  sx={{ width: 118, "& input": { fontFamily: MONO_STACK, fontSize: 12 } }}
+                />
+              </Tooltip>
               <Tooltip title="按时间定位日志行：输入 HH:mm:ss 或 yyyy-MM-dd HH:mm:ss，跳到该时间之后的第一条">
                 <Stack direction="row" spacing={0.5} alignItems="center">
                   <TextField
@@ -682,6 +763,7 @@ export default function MonitorCenter() {
             </Stack>
             <Box
               ref={boxRef}
+              onScroll={handleLogScroll}
               sx={{
                 flex: 1,
                 overflow: "auto",
@@ -700,14 +782,21 @@ export default function MonitorCenter() {
                 <Typography variant="caption" sx={{ fontFamily: MONO_STACK, color: "grey.500" }}>
                   {tailBusy ? "读取中…" : "（日志为空——服务可能从未启动过，或启动后尚未写入）"}
                 </Typography>
+              ) : displayLines.length === 0 ? (
+                <Typography variant="caption" sx={{ fontFamily: MONO_STACK, color: "grey.500" }}>
+                  无匹配「{filter.trim()}」的行（共 {lines.length} 行）
+                </Typography>
               ) : (
-                lines.map((l, i) => (
+                displayLines.map((i) => (
                   <ColoredLogLine
                     key={i}
-                    line={l}
+                    line={lines[i]}
                     noWrap // 长行不换行：横向滚动，时间列始终对齐（换行是乱的根源）
                     highlight={i === jumpIndex}
-                    onClick={() => setJumpIndex(i)}
+                    onClick={() => {
+                      setJumpIndex(i);
+                      jumpTsRef.current = parseTs(lines[i]); // 有时间戳的行刷新后仍保持高亮
+                    }}
                     innerRef={i === jumpIndex ? jumpRef : undefined}
                   />
                 ))
@@ -720,9 +809,37 @@ export default function MonitorCenter() {
               sx={{ px: 1.5, py: 0.75, borderTop: "1px solid", borderColor: "divider" }}
             >
               <Typography variant="caption" color="text.secondary" sx={{ mr: "auto" }}>
-                {lines.length} 行 · 尾部 200 行
+                {displayLines.length === lines.length
+                  ? `${lines.length} 行`
+                  : `显示 ${displayLines.length}/${lines.length} 行`}
+                · 尾部 200 行
                 {lastFetch && ` · 更新于 ${new Date(lastFetch).toLocaleTimeString("zh-CN", { hour12: false })}`}
               </Typography>
+              {(levelStats.error > 0 || levelStats.warn > 0) && (
+                <Chip
+                  size="small"
+                  variant="outlined"
+                  color={levelStats.error > 0 ? "error" : "default"}
+                  label={`错误 ${levelStats.error} · 警告 ${levelStats.warn}`}
+                  sx={{ height: 20, fontSize: 11 }}
+                />
+              )}
+              <Button
+                size="small"
+                onClick={() => gotoError(-1)}
+                disabled={!errorIdxs.length}
+                sx={{ fontSize: 12, minWidth: 0, px: 1 }}
+              >
+                上一错误
+              </Button>
+              <Button
+                size="small"
+                onClick={() => gotoError(1)}
+                disabled={!errorIdxs.length}
+                sx={{ fontSize: 12, minWidth: 0, px: 1 }}
+              >
+                下一错误
+              </Button>
               <ToggleButtonGroup
                 size="small"
                 exclusive

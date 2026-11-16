@@ -48,7 +48,7 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 import { useNavigate } from "react-router-dom";
 import { api } from "../../api";
-import { accessLine } from "../../access";
+import { AccessLinks } from "../../components/AccessLinks";
 import { useAppSettingsStore, useOpsStore } from "../../store";
 import type { EnvCheckItem, RepairPlan, ResourceScan, UninstallTargetStatus } from "../../types";
 import { MONO_STACK } from "../../theme";
@@ -206,9 +206,8 @@ export default function RepairCenter({
       try {
         const r = await api.serviceAction(target, action);
         if (r.ok) {
-          // 启动完成即告知访问方式（端口 / 地址）
-          const acc = action === "start" ? accessLine(target) : null;
-          setSnack({ open: true, msg: `${r.message || "操作成功"}${acc ? ` · ${acc}` : ""}`, severity: "success" });
+          // 访问地址改为卡片常驻展示，成功提示不再夹带链接
+          setSnack({ open: true, msg: r.message || "操作成功", severity: "success" });
         } else {
           setSnack({ open: true, msg: r.error || "操作失败", severity: "error" });
         }
@@ -272,6 +271,8 @@ export default function RepairCenter({
     } finally {
       setBusyOps(null);
       probeStatus();
+      // 环境变量变了 → 环境问题列表联动重检（Java 项翻绿），不等用户手动复检
+      void useOpsStore.getState().refreshEnvAll();
     }
   }, [probeStatus]);
 
@@ -699,6 +700,10 @@ export default function RepairCenter({
       ) : null;
     }
 
+    // 卡片常驻访问地址：仅已安装且服务在跑时展示（dfy-ui 是静态托管，跟随承载它的 nginx）
+    const linkRunning =
+      !!st?.serviceInstalled && (t === "dfy-ui" ? !!installedOf("nginx")?.serviceRunning : !!st.serviceRunning);
+
     return (
       <Paper
         key={t}
@@ -739,6 +744,7 @@ export default function RepairCenter({
             {actions}
           </Stack>
         </Stack>
+        <AccessLinks id={t} running={linkRunning} />
       </Paper>
     );
   };

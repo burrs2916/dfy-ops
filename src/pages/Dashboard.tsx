@@ -28,7 +28,6 @@ import { ServiceCard } from "../components/ServiceCard";
 import ReadinessCard from "../components/ReadinessCard";
 import { PageHeader } from "../components/PageHeader";
 import { api } from "../api";
-import { accessLine } from "../access";
 import { LinkifiedText } from "../components/LinkifiedText";
 import type { DiagnosisResponse } from "../types";
 
@@ -210,18 +209,8 @@ export default function Dashboard() {
     setBulkBusy("start");
     try {
       const r = await api.startAll();
-      // 批量启动完成即告知各服务访问方式（端口 / 地址）
-      const accessLines = r
-        .filter((x) => x.ok)
-        .map((x) => {
-          const svc = services.find((sv) => sv.id === x.id);
-          return accessLine(x.id, svc ? { kind: svc.kind, ports: svc.ports, remote: svc.remoteEndpoint } : undefined);
-        })
-        .filter((l): l is string => !!l);
-      const access = accessLines.length
-        ? ` · 访问：${accessLines.slice(0, 4).join("；")}${accessLines.length > 4 ? " 等" : ""}`
-        : "";
-      setSnack({ open: true, msg: "全部启动 " + summarize(r) + access, severity: "success" });
+      // 访问地址由各服务卡片常驻展示，批量结果不再夹带链接
+      setSnack({ open: true, msg: "全部启动 " + summarize(r), severity: "success" });
       refreshAll();
     } catch (e) {
       setSnack({ open: true, msg: "启动失败：" + (e as Error).message, severity: "error" });
@@ -393,9 +382,8 @@ export default function Dashboard() {
               // 启动 = 显式事件：后台追加一次全量环境重检（依赖本服务的卡片同步）
               .then(() => { void refreshEnvAll(); })
               .then(() => {
-                const svc = services.find((x) => x.id === id);
-                const acc = accessLine(id, svc ? { kind: svc.kind, ports: svc.ports, remote: svc.remoteEndpoint } : undefined);
-                setSnack({ open: true, msg: acc ? `启动完成 · ${acc}` : "启动完成", severity: "success" });
+                // 访问地址由服务卡片常驻展示，成功提示不再夹带链接
+                setSnack({ open: true, msg: "启动完成", severity: "success" });
               })
               .catch((e) => setSnack({ open: true, msg: "启动失败：" + (e as Error).message, severity: "error" }))
           }

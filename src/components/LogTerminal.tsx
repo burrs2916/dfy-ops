@@ -54,6 +54,17 @@ export const normalizeDate = (d: string) => d.replace(/\//g, "-");
 const TOKEN_RE =
   /(ERROR|error|FATAL|Exception|exception|Caused by|caused by|BUILD FAILURE|FAILURE|failed|Failed|FAILED|\[(?:emerg|alert|crit)\]|失败|错误|异常|拒绝|超时|无法|不能|Access denied|Permission denied|refused|command not found|Cannot find|No such|退出|宕)|(WARN|warn|Warning|warning|警告|重试|retry|Retry|跳过|忽略|retrying)|(成功|完成|Started|started in|BUILD SUCCESS|已启动|启动成功|\bOK\b|正常)/g;
 
+/** 行级级别判定：与着色同一正则口径（无 g 标志的副本，避免 lastIndex 状态泄漏）。
+ *  监控中心的错误计数与「上一条/下一条错误」导航用。 */
+const LEVEL_RE = new RegExp(TOKEN_RE.source);
+export function lineLevel(line: string): "error" | "warn" | null {
+  const m = LEVEL_RE.exec(stripAnsi(line));
+  if (!m) return null;
+  if (m[1]) return "error";
+  if (m[2]) return "warn";
+  return null;
+}
+
 type Tok = { t: string; k?: "e" | "w" | "s" };
 
 /** Java/Python 异常堆栈续行：无 ERROR 关键字，但属于错误块，整段淡红。 */

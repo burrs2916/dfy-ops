@@ -415,7 +415,12 @@ pub fn image_running(img: &str) -> bool {
         std::process::Command::new("tasklist")
             .args(["/fi", &format!("imagename eq {img}"), "/fo", "csv", "/nh"])
             .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.contains(img)))
+            // GBK 解码：中文映像名（productName 型进程）不乱码、不失配
+            .map(|o| {
+                crate::ops::appdetect::decode_console_output(&o.stdout)
+                    .lines()
+                    .any(|l| l.contains(img))
+            })
             .unwrap_or(false)
     }
     #[cfg(not(target_os = "windows"))]
@@ -452,7 +457,8 @@ pub(crate) fn port_holder(port: u16) -> Option<(u32, String)> {
         .args(["/fi", &format!("pid eq {pid}"), "/fo", "csv", "/nh"])
         .output()
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        // GBK 解码：占用进程是中文名时展示不乱码
+        .map(|o| crate::ops::appdetect::decode_console_output(&o.stdout))
         .and_then(|s| {
             s.lines()
                 .next()

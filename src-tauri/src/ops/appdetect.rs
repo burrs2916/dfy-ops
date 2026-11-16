@@ -175,7 +175,11 @@ pub fn is_app_running(process_names: &[String]) -> bool {
                 let hit = std::process::Command::new("tasklist")
                     .args(["/fi", &format!("imagename eq {cand}"), "/fo", "csv", "/nh"])
                     .output()
-                    .map(|o| String::from_utf8_lossy(&o.stdout).lines().any(|l| l.contains(&cand)))
+                    .map(|o| {
+                        let text = decode_console_output(&o.stdout);
+                        let cand_l = cand.to_lowercase();
+                        text.lines().any(|l| l.to_lowercase().contains(&cand_l))
+                    })
                     .unwrap_or(false);
                 if hit {
                     return true;
@@ -189,6 +193,25 @@ pub fn is_app_running(process_names: &[String]) -> bool {
         let _ = process_names;
         false
     }
+}
+
+/// tasklist 等控制台工具的输出按 OEM 代码页编码（中文 Windows = GBK）：
+/// 中文进程名（如桌面应用 productName 是中文时）经 from_utf8_lossy 会解成
+/// 乱码导致 contains 匹配失败，「运行中」永远探不到。按 UTF-8 → UTF-16LE
+/// 启发 → GBK 顺序解码，ASCII 输出不受影响。
+/// pub(crate)：image_running / port_holder 等所有 tasklist 解析点共用，杜绝同类乱码。
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+pub(crate) fn decode_console_output(bytes: &[u8]) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+    // UTF-16LE 启发：偶数长度且奇数位大量为 0（GBK/ASCII 文本不会出现）
+    let odd_zeros = bytes.iter().skip(1).step_by(2).filter(|&&b| b == 0).count();
+    let pairs = bytes.len() / 2;
+    if pairs > 0 && odd_zeros * 2 > pairs {
+        return encoding_rs::UTF_16LE.decode(bytes).0.into_owned();
+    }
+    encoding_rs::GBK.decode(bytes).0.into_owned()
 }
 
 /// 结束应用进程（taskkill /IM /T /F，含 .exe 变体）。返回是否执行过结束动作
