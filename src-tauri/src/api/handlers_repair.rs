@@ -558,7 +558,7 @@ pub(crate) async fn probe_target(state: &AppState, target: &str) -> (bool, bool,
             }
             None => (false, false),
         };
-        return (installed, running, false);
+        return (installed, running, running);
     }
     let install_dir = registry_install_dir(state, target);
     // dfy-backend/dfy-ui/nginx/edge-conductor/gateway-console 都不注册 Windows 服务：按 install_dir + 关键文件判定
